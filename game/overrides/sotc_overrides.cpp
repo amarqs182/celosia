@@ -49,6 +49,15 @@ namespace
     // modules are loaded, switch to real-time pacing.
     void gamecoreEntryHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        // DIAG (teto: 1x): entry do GAMECORE.
+        {
+            static bool logged = false;
+            if (!logged)
+            {
+                logged = true;
+                std::fprintf(stderr, "[ovr] gamecoreEntryHook ENTER pc=0x%08x\n", static_cast<unsigned>(ctx->pc));
+            }
+        }
         static bool enabled = false;
         if (!enabled)
         {
@@ -930,6 +939,16 @@ namespace
 
     void applySotcOverrides(PS2Runtime &runtime)
     {
+        runtime.eeScheduler().enableHostClockSync();
+        // DIAG (teto: 1x): applySotcOverrides chamado?
+        {
+            static bool logged = false;
+            if (!logged)
+            {
+                logged = true;
+                std::fprintf(stderr, "[ovr] applySotcOverrides ENTER\n");
+            }
+        }
         // First: the hooks below wrap whatever is in the table, lean or not.
         ps2_lean::install(runtime);
         if (runtime.hasFunction(0x001AFFD8u) && runtime.hasFunction(0x001B00F0u) && runtime.hasFunction(0x001B0328u))
@@ -955,6 +974,25 @@ namespace
         {
             g_iosRecvMsg = runtime.lookupFunction(kIosRecvMsg);
             runtime.registerFunction(kIosRecvMsg, iosRecvMsgHook);
+            // DIAG (teto: 1x): hook instalado?
+            {
+                static bool logged = false;
+                if (!logged)
+                {
+                    logged = true;
+                    std::fprintf(stderr, "[ovr] iosRecvMsgHook INSTALLED hasFunc=%d\n", runtime.hasFunction(kIosRecvMsg) ? 1 : 0);
+                }
+            }
+        }
+        else
+        {
+            // DIAG (teto: 1x): hook NAO instalado; por que?
+            static bool logged = false;
+            if (!logged)
+            {
+                logged = true;
+                std::fprintf(stderr, "[ovr] iosRecvMsgHook NOT installed hasFunc=%d spinEnv=%d\n", runtime.hasFunction(kIosRecvMsg) ? 1 : 0, std::getenv("SOTC_IDLE_SPIN") ? 1 : 0);
+            }
         }
         if (std::getenv("SOTC_DUMP_SPRITE_PACKETS") && runtime.hasFunction(kSpriteDrawSprite))
         {
