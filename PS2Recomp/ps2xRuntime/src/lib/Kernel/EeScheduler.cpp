@@ -651,6 +651,7 @@ int EeScheduler::createThread(const EeThreadCreateParams &params)
     thread.currentPriority = params.priority;
     thread.status = EeThreadStatus::Dormant;
     m_threads.emplace(id, std::move(thread));
+    std::fprintf(stderr, "[ee:th] create id=%d entry=0x%08x prio=%d\n", id, params.entry, params.priority);
     publishSnapshot();
     return id;
 }
@@ -722,6 +723,7 @@ int EeScheduler::startThread(int id, uint32_t arg, const R5900Context &caller, b
     assert(exiting != nullptr);
     const int id = exiting->id;
     const uint32_t ownedStack = deleteThreadRecord && exiting->ownsStack ? exiting->stack : 0u;
+    std::fprintf(stderr, "[ee:th] exit id=%d pc=0x%08x\n", id, exiting->activeContext().pc);
     makeDormant(*exiting);
     m_currentThreadId = 0;
     if (deleteThreadRecord && id != kMainThreadId)
@@ -857,6 +859,7 @@ void EeScheduler::sleepCurrent()
         setReturnS32(&self->activeContext(), KE_OK);
         return;
     }
+    std::fprintf(stderr, "[ee:th] sleep id=%d pc=0x%08x\n", self->id, self->activeContext().pc);
     blockCurrentOrReturn(EeWaitState{EeWaitReason::Sleep, std::monostate{}});
 }
 
@@ -911,6 +914,7 @@ int EeScheduler::wakeupThread(int id, bool interruptSafe)
     if ((target->status == EeThreadStatus::Waiting || target->status == EeThreadStatus::WaitingSuspended) &&
         target->wait.reason == EeWaitReason::Sleep)
     {
+        std::fprintf(stderr, "[ee:th] wake id=%d by=%d\n", target->id, m_currentThreadId);
         makeReady(*target, KE_OK, interruptSafe);
     }
     else
@@ -1079,6 +1083,13 @@ int EeScheduler::createSemaphore(int initCount, int maxCount, uint32_t attr, uin
     semaphore.attr = attr;
     semaphore.option = option;
     m_semaphores.emplace(id, std::move(semaphore));
+    {
+        static std::atomic<unsigned> semaCreateCount{0};
+        if (semaCreateCount.fetch_add(1u) < 400u)
+        {
+            std::fprintf(stderr, "[ee:sema] create gid=%d init=%d max=%d\n", id, initCount, maxCount);
+        }
+    }
     publishSnapshot();
     return id;
 }
@@ -1110,6 +1121,15 @@ int EeScheduler::signalSemaphore(int id, bool interruptSafe)
 {
     assertExecutor();
     EeSemaphore *object = semaphore(id);
+    {
+        static std::atomic<unsigned> semaSignalCount{0};
+        if (semaSignalCount.fetch_add(1u) < 400u)
+        {
+            std::fprintf(stderr, "[ee:sema] signal gid=%d cnt=%d waiters=%d\n",
+                         id, object ? object->count : -1,
+                         object ? static_cast<int>(object->waiters.size()) : -1);
+        }
+    }
     if (!object)
     {
         return KE_UNKNOWN_SEMID;
@@ -1154,6 +1174,14 @@ void EeScheduler::waitSemaphore(int id)
 {
     assertExecutor();
     EeSemaphore *object = semaphore(id);
+    {
+        static std::atomic<unsigned> semaWaitCount{0};
+        if (semaWaitCount.fetch_add(1u) < 400u)
+        {
+            std::fprintf(stderr, "[ee:sema] wait gid=%d cnt=%d tid=%d\n",
+                         id, object ? object->count : -1, m_currentThreadId);
+        }
+    }
     if (!object)
     {
         GuestThread *self = currentThread();
@@ -1173,6 +1201,14 @@ void EeScheduler::waitSemaphore(int id)
     GuestThread *self = currentThread();
     assert(self != nullptr);
     object->waiters.push_back(self->id);
+    {
+        static std::atomic<unsigned> semaBlockCount{0};
+        if (semaBlockCount.fetch_add(1u) < 400u)
+        {
+            std::fprintf(stderr, "[ee:sema] block gid=%d tid=%d\n", id, m_currentThreadId);
+        }
+    }
+    std::fprintf(stderr, "[ee:th] waitsema id=%d sema=%d\n", self->id, id);
     blockCurrentOrReturn(EeWaitState{EeWaitReason::Semaphore, EeSemaphoreWait{id}});
 }
 
@@ -2269,8 +2305,8 @@ void EeScheduler::processDueDeadlines()
             const auto pacedNow = std::chrono::steady_clock::now();
             auto firstFuture = std::partition(m_deadlines.begin(), m_deadlines.end(),
                                               [this, pacedNow](const ScheduledEvent &item)
-                                              { return item.deadlineCycle <= eeNow() &&
-                                                       item.hostDeadline <= pacedNow; });
+                                              { return item.hostDeadline <= pacedNow &&
+                                                       (item.event.type == EeEventType::Alarm || item.deadlineCycle <= eeNow()); });
             due.insert(due.end(),
                        std::make_move_iterator(m_deadlines.begin()),
                        std::make_move_iterator(firstFuture));

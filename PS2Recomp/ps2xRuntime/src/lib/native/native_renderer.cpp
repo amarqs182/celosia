@@ -1,6 +1,8 @@
 // The native renderer's front: picks a backend (native_backend.h) the first
 // time it is used. macOS: Metal, or OpenGL with SOTC_NATIVE_GL=1 (to check
-// the GL path against Metal); the Vita: OpenGL (vitaGL); elsewhere none.
+// the GL path against Metal); the Vita: OpenGL (vitaGL); Linux: OpenGL too
+// (GLES3, once native_renderer_gl.cpp grows the ES path there, r36s);
+// elsewhere none.
 #include "native_backend.h"
 #include "runtime/native_tuning.h"
 #include "runtime/native_recorder.h"
@@ -35,7 +37,7 @@
 extern "C" unsigned int _pthread_stack_default_user; // ps2_vita_runtime.cpp
 #endif
 
-#if defined(__APPLE__) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
+#if defined(__APPLE__) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)) || defined(__linux__)
 #define PS2X_NATIVE_GL 1
 #endif
 

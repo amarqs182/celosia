@@ -1493,6 +1493,39 @@ namespace
         slot = offset >> 2;
         return slot < g_ps2RecompiledFunctionTableSlotCount;
     }
+
+    // Nearest recompiled-function start at or before `address` (the owner
+    // function), scanning back up to maxBackBytes. 0 when there is none.
+    uint32_t containingFunctionStart(uint32_t address, uint32_t maxBackBytes = 0x1000u)
+    {
+        uint32_t slot = 0u;
+        if (!generatedFunctionTableSlot(address, slot))
+        {
+            return 0u;
+        }
+
+        const uint32_t maxBackSlots = maxBackBytes >> 2;
+        for (uint32_t back = 0; back <= maxBackSlots && back <= slot; ++back)
+        {
+            const uint32_t candidate = slot - back;
+            if (g_ps2RecompiledFunctionTable[candidate] != nullptr)
+            {
+                return g_ps2RecompiledFunctionTableBase + (candidate << 2);
+            }
+        }
+        return 0u;
+    }
+
+    // PS2X_DISPATCH_CONTAINING=0 disables the containing-function fallback in
+    // dispatchGuestBranch (legacy reportMissingFunction path). Default on.
+    bool dispatchContainingEnabled()
+    {
+        static const bool enabled = [] {
+            const char *value = std::getenv("PS2X_DISPATCH_CONTAINING");
+            return !(value && std::strcmp(value, "0") == 0);
+        }();
+        return enabled;
+    }
 }
 
 namespace
@@ -1839,6 +1872,33 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
     }
 }
 
+namespace
+{
+    // One line per distinct guest target redispatched to its containing
+    // function (mirrors the missing-target log in reportMissingFunction).
+    void logContainingFunctionDispatch(uint32_t targetPc, uint32_t sourcePc, uint32_t start,
+                                       PS2Runtime::GuestBranchKind kind, const char *debugName)
+    {
+        static std::set<uint32_t> loggedTargets;
+        static std::mutex logMutex;
+
+        std::lock_guard<std::mutex> lock(logMutex);
+        if (!loggedTargets.emplace(targetPc).second)
+        {
+            return;
+        }
+
+        std::ostringstream oss;
+        oss << "[guest-branch:containing-function] source=0x" << std::hex << sourcePc
+            << " target=0x" << targetPc
+            << " -> start=0x" << start
+            << " kind=" << describeGuestBranchKind(kind)
+            << " name=" << (debugName ? debugName : "<unknown>")
+            << std::dec;
+        std::cerr << oss.str() << std::endl;
+    }
+}
+
 bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
                                      R5900Context *ctx,
                                      uint32_t targetPc,
@@ -1872,6 +1932,27 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
 
     if (!hasFunction(targetPc))
     {
+        // The target is inside a recompiled function but not at its entry
+        // (e.g. a JALR into the middle of one). Its generated code switches
+        // on ctx->pc with a default that restarts at the entry, so dispatch
+        // the owner function with the original guest PC.
+        if (dispatchContainingEnabled())
+        {
+            const uint32_t start = containingFunctionStart(targetPc);
+            if (start != 0u)
+            {
+                logContainingFunctionDispatch(targetPc, sourcePc, start, kind, debugName);
+                ctx->pc = targetPc;
+                if (RecompiledFunction ownerFn = guestFunctionAt(start))
+                {
+                    const uint32_t entryPc = ctx->pc;
+                    const uint32_t jumpSerial = m_guestJumpSerial;
+                    ownerFn(rdram, ctx, this);
+                    return finishGuestCall(ctx, entryPc, fallthroughPc, jumpSerial);
+                }
+            }
+        }
+
         reportMissingFunction(rdram, ctx, targetPc, sourcePc, kind, debugName);
 
         const MissingFunctionPolicy policy = missingFunctionPolicy();

@@ -4,10 +4,12 @@
 #include "runtime/ps2_rom_device.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <iostream>
 #include <limits>
 #include <utility>
 
@@ -150,6 +152,54 @@ namespace
         const auto systemValue = std::chrono::time_point_cast<std::chrono::system_clock::duration>(value - std::filesystem::file_time_type::clock::now() + std::chrono::system_clock::now());
         return std::chrono::system_clock::to_time_t(systemValue);
     }
+
+    // Diagnostic-only VFS logging helpers (no behavior change).
+    // Rate-limited to kVfsDiagLogMaxLines lines per run for the [vfs:host]
+    // stream; paths containing "STARTUP" (case-insensitive) always bypass it.
+    constexpr int kVfsDiagLogMaxLines = 200;
+    std::atomic<int> g_vfsDiagLogCount{0};
+
+    bool vfsDiagPathIsStartup(std::string_view path)
+    {
+        static constexpr std::string_view kNeedle = "startup";
+        if (path.size() < kNeedle.size())
+            return false;
+        for (size_t i = 0; i + kNeedle.size() <= path.size(); ++i)
+        {
+            bool match = true;
+            for (size_t j = 0; j < kNeedle.size(); ++j)
+            {
+                const char a = path[i + j];
+                const char b = kNeedle[j];
+                const char ua = (a >= 'a' && a <= 'z') ? static_cast<char>(a - 'a' + 'A') : a;
+                const char ub = (b >= 'a' && b <= 'z') ? static_cast<char>(b - 'a' + 'A') : b;
+                if (ua != ub)
+                {
+                    match = false;
+                    break;
+                }
+            }
+            if (match)
+                return true;
+        }
+        return false;
+    }
+
+    bool vfsDiagLogAllowed(std::string_view ps2Path, std::string_view hostPath)
+    {
+        if (vfsDiagPathIsStartup(ps2Path) || vfsDiagPathIsStartup(hostPath))
+            return true;
+        return g_vfsDiagLogCount.fetch_add(1, std::memory_order_relaxed) < kVfsDiagLogMaxLines;
+    }
+
+    void logVfsHost(const char *op, std::string_view ps2Path, const std::filesystem::path &hostPath, bool exists, std::string_view errText)
+    {
+        const std::string hostStr = hostPath.string();
+        if (!vfsDiagLogAllowed(ps2Path, hostStr))
+            return;
+        std::cerr << "[vfs:host] op=" << op << " path=\"" << ps2Path << "\" host=\"" << hostStr
+                  << "\" exists=" << (exists ? 1 : 0) << " err=\"" << errText << "\"" << std::endl;
+    }
 }
 
 PS2Vfs::~PS2Vfs() = default;
@@ -175,25 +225,40 @@ int32_t PS2Vfs::open(std::string_view path, uint32_t flags, const PS2VfsMounts &
     {
         std::filesystem::path hostPath;
         if (!resolveHostPath(path, mounts, hostPath))
+        {
+            // Diagnostic only (no behavior change): log the failed resolution.
+            logVfsHost("open", path, hostPath, false, "resolve failed");
             return -1;
+        }
 
         std::error_code existsError;
         const bool exists = std::filesystem::exists(hostPath, existsError);
+        if (existsError || !exists)
+        {
+            // Diagnostic only: report missing/erroring host paths.
+            logVfsHost("open", path, hostPath, exists, existsError ? existsError.message() : "not found");
+        }
         if (existsError || (exists && (flags & (PS2_FIO_O_CREAT | PS2_FIO_O_EXCL)) == (PS2_FIO_O_CREAT | PS2_FIO_O_EXCL)))
         {
             return -1;
         }
 
         FILE *stream = std::fopen(hostPath.string().c_str(), hostMode(flags));
+        int openErrno = errno;
         const uint32_t access = flags & PS2_FIO_O_RDWR;
         if (!stream && !exists && (flags & PS2_FIO_O_CREAT) != 0u &&
             access == PS2_FIO_O_RDWR &&
             (flags & (PS2_FIO_O_TRUNC | PS2_FIO_O_APPEND)) == 0u)
         {
             stream = std::fopen(hostPath.string().c_str(), "w+b");
+            openErrno = errno;
         }
         if (!stream)
+        {
+            // Diagnostic only: report host-level open failures.
+            logVfsHost("open", path, hostPath, exists, std::strerror(openErrno));
             return -1;
+        }
         file = std::make_unique<HostOpenFile>(stream);
     }
 
@@ -248,17 +313,29 @@ bool PS2Vfs::stat(std::string_view path, const PS2VfsMounts &mounts, const PS2Ro
 
     std::filesystem::path hostPath;
     if (!resolveHostPath(path, mounts, hostPath))
+    {
+        // Diagnostic only (no behavior change): log the failed resolution.
+        logVfsHost("stat", path, hostPath, false, "resolve failed");
         return false;
+    }
     std::error_code error;
     const auto status = std::filesystem::status(hostPath, error);
     if (error || !std::filesystem::exists(status))
+    {
+        // Diagnostic only: report missing/erroring host paths.
+        logVfsHost("stat", path, hostPath, std::filesystem::exists(status), error ? error.message() : "not found");
         return false;
+    }
     result.directory = std::filesystem::is_directory(status);
     if (!result.directory)
     {
         result.size = std::filesystem::file_size(hostPath, error);
         if (error)
+        {
+            // Diagnostic only: report host-level stat failures.
+            logVfsHost("stat", path, hostPath, true, error.message());
             return false;
+        }
     }
     const auto modified = std::filesystem::last_write_time(hostPath, error);
     if (!error)

@@ -16,12 +16,32 @@
 #include "runtime/native_tuning.h"
 #include "runtime/ps2_stats.h"
 
-#if defined(__APPLE__) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
+#if defined(__APPLE__) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)) || defined(__linux__)
 
 #if defined(__APPLE__)
 #define GL_SILENCE_DEPRECATION
 #include <OpenGL/gl3.h>
 #include <malloc/malloc.h>
+#elif defined(__linux__)
+// OpenGL ES 3.0 (Linux/GLES3): the shader set below is GLSL ES 3.00 and the
+// entry points this file uses (glBindVertexArray, glMapBuffer,
+// glFramebufferTexture2D, texelFetch, ...) are not in the ES 2.0 API or its
+// header. The GLES2 header is only an include-level fallback when GLES3
+// headers are missing; a true ES 1.00 runtime needs a separate shader set
+// (attribute/varying/texture2D, no texelFetch/textureSize/laml/LAYOUT) and
+// VAO-less/mapping-less code.
+#if __has_include(<GLES3/gl3.h>)
+#include <GLES3/gl3.h>
+#else
+#include <GLES2/gl2.h>
+#endif
+#include <malloc.h>
+#define PS2X_NATIVE_GLES 1
+// ES has no GL_DEPTH_CLAMP (desktop only): the shadow volumes' near-plane
+// clamp is GL_EXT_depth_clamp's, whose enum the headers may not define.
+#ifndef GL_DEPTH_CLAMP_EXT
+#define GL_DEPTH_CLAMP_EXT 0x864F
+#endif
 #else
 #include <mutex>
 #include <malloc.h>
@@ -43,6 +63,19 @@ extern "C" void vglCeloUniformStats(uint32_t *bytes, uint32_t *wraps); // celosi
 extern "C" SceGxmNotification query_fence;          // vitaGL's (buffers.c): every scene's end notification, value+1 a scene
 extern "C" SceGxmContext *gxm_context;              // vitaGL's (gxm.c): round 87 (glVol87) disables the volumes' fragment program
 extern "C" volatile unsigned long long ps2x_vita_swap_us; // raylib_vita.cpp (round 86): time in vglSwapBuffers, summed
+#endif
+
+// The GLSL version header of the shader strings below. Desktop GL is 3.3
+// core; on Linux the same shader bodies are GLSL ES 3.10 (in/out, texture,
+// textureLod, texelFetch, textureSize, layout(location) and array
+// constructors are all ES 3.00, but the full-screen passes sample the depth
+// texture with texelFetch: int texel is ES 3.10, so the version is 310 es
+// and the context is asked for below ES 3.10 no shader here compiles), plus
+// the fragment stage's default precision ES requires.
+#if defined(PS2X_NATIVE_GLES)
+#define PS2X_GL_VERSION "#version 310 es\nprecision highp float;\nprecision highp int;\n"
+#else
+#define PS2X_GL_VERSION "#version 330 core\n"
 #endif
 
 #include "ThreadNaming.h"
@@ -338,7 +371,7 @@ namespace
     // zones): the memory log and the eviction under pressure read it.
     uint64_t heapUsed()
     {
-#if defined(PS2X_NATIVE_VITA)
+#if defined(PS2X_NATIVE_VITA) || defined(PS2X_NATIVE_GLES)
         return mallinfo().uordblks;
 #else
         malloc_statistics_t stats{};
@@ -376,8 +409,7 @@ namespace
 
 #if !defined(PS2X_NATIVE_VITA)
     // ---- GLSL (macOS) ----
-    const char *kMainVertex = R"(#version 330 core
-layout(location = 0) in vec3 aPos;
+    const char *kMainVertex = PS2X_GL_VERSION R"(layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec4 aColor;
 layout(location = 3) in vec2 aUV;
@@ -418,8 +450,7 @@ void main()
 }
 )";
 
-    const char *kMainFragment = R"(#version 330 core
-in vec4 vUV;
+    const char *kMainFragment = PS2X_GL_VERSION R"(in vec4 vUV;
 in vec4 vColor;
 in vec4 vScreen;
 uniform sampler2D uTex, uBackground, uReflection, uRefraction;
@@ -545,8 +576,7 @@ void main()
 
     // Round 45: the shadow volumes' fragment stage: nothing (the volume only
     // counts in the stencil; its colour is masked and blended away).
-    const char *kVolumeFragment = R"(#version 330 core
-out vec4 oColor;
+    const char *kVolumeFragment = PS2X_GL_VERSION R"(out vec4 oColor;
 void main()
 {
     oColor = vec4(0.0);
@@ -554,8 +584,7 @@ void main()
 )";
 
     // Full-screen passes: a triangle over the screen, uv 0..1 (y up).
-    const char *kQuadVertex = R"(#version 330 core
-layout(location = 0) in vec2 aPos;
+    const char *kQuadVertex = PS2X_GL_VERSION R"(layout(location = 0) in vec2 aPos;
 uniform vec4 uQuad; // blur copy: scale, angle, offset (NDC); scale 0: plain
 uniform float uZ;   // the NDC z (SOTC_BLOOM_VITA: the Vita bloom mask's quad at the threshold's depth)
 out vec2 vUV;
@@ -573,8 +602,7 @@ void main()
 }
 )";
 
-    const char *kQuadFragment = R"(#version 330 core
-in vec2 vUV;
+    const char *kQuadFragment = PS2X_GL_VERSION R"(in vec2 vUV;
 uniform sampler2D uSrc, uSrc2, uDepth;
 uniform int uMode;
 uniform vec4 uA, uB, uC, uSize;
@@ -1329,6 +1357,57 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         uint32_t width = 0, height = 0;
     };
 
+    // Attaches a depth-stencil texture to the framebuffer bound now: a single
+    // GL_DEPTH_STENCIL_ATTACHMENT call on desktop GL; ES has no such point,
+    // so the same texture goes on both GL_DEPTH_ATTACHMENT and
+    // GL_STENCIL_ATTACHMENT.
+    static void attachDepthStencil(GLuint depthTexture)
+    {
+#if defined(PS2X_NATIVE_GLES)
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depthTexture, 0);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_TEXTURE_2D, depthTexture, 0);
+#else
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, depthTexture, 0);
+#endif
+    }
+
+#if defined(PS2X_NATIVE_GLES)
+    // The near-plane clamp of the shadow volumes: ES has no GL_DEPTH_CLAMP
+    // (desktop only), so it is GL_EXT_depth_clamp's point (the #ifndef above).
+    constexpr GLenum kDepthClamp = GL_DEPTH_CLAMP_EXT;
+
+    // glGetString as a C string ("" when there is no context to ask).
+    const char *glString(GLenum name)
+    {
+        const char *s = reinterpret_cast<const char *>(glGetString(name));
+        return s ? s : "";
+    }
+
+    // The whole name in the space-separated GL_EXTENSIONS list (the ES 2.0
+    // way, valid in ES 3.x too). Asked once, at init.
+    bool hasExtension(const char *name)
+    {
+        const char *list = glString(GL_EXTENSIONS);
+        const size_t n = std::strlen(name);
+        for (const char *at = list; (at = std::strstr(at, name)) != nullptr; at += n)
+            if ((at == list || at[-1] == ' ') && (at[n] == ' ' || at[n] == '\0'))
+                return true;
+        return false;
+    }
+
+    // The context's OpenGL ES version (310 = ES 3.10): what the shader set
+    // above is written for. 0: the version could not be read.
+    int glEsVersion()
+    {
+        GLint major = 0, minor = 0;
+        glGetIntegerv(GL_MAJOR_VERSION, &major);
+        glGetIntegerv(GL_MINOR_VERSION, &minor);
+        return major > 0 ? major * 100 + minor * 10 : 0;
+    }
+#elif !defined(PS2X_NATIVE_VITA)
+    constexpr GLenum kDepthClamp = GL_DEPTH_CLAMP; // desktop GL: core
+#endif
+
     struct Renderer
     {
         GLuint mainProgram = 0, quadProgram = 0;
@@ -1337,6 +1416,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         GLuint quadPrograms[19] = {}; // by mode (8 and 11: the bloom mask's, see kQuadFragment; 12 unused; 15-18 the GS bloom chain, round 65b)
 #endif
         GLuint quadBuffer = 0, blurBuffer = 0, vao = 0;
+        // The shadow volumes' near-plane clamp (kDepthClamp), set by init: on
+        // ES it is GL_EXT_depth_clamp, which the driver may not have.
+#if defined(PS2X_NATIVE_GLES)
+        bool depthClamp = false;
+#else
+        bool depthClamp = true; // GL_DEPTH_CLAMP is core in desktop GL
+#endif
         // Uniform locations by (program, name): the names are string literals,
         // so their address is the key (no string built per call: that was 41%
         // of the Vita's time). A few dozen: a list looked through, the last
@@ -1435,7 +1521,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #else
             // The rest of the frame is drawn on the picture's depth.
             glBindFramebuffer(GL_FRAMEBUFFER, blurOut.fbo);
-            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, color.depth, 0);
+            attachDepthStencil(color.depth);
 #endif
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
             boundFbo = ~0u;
@@ -2174,12 +2260,35 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #if defined(PS2X_NATIVE_VITA)
             return defines + kWorldFragment;
 #else
-            return "#version 330 core\n" + defines + kWorldFragment;
+            return PS2X_GL_VERSION + defines + kWorldFragment;
 #endif
         }
 
         bool init()
         {
+#if defined(PS2X_NATIVE_GLES)
+            // The shaders here are GLSL ES 3.10 (PS2X_GL_VERSION): the
+            // full-screen passes sample the depth texture with texelFetch,
+            // which is not ES 3.00, so nothing below 3.10 compiles. Report
+            // that plainly and leave the renderer down, rather than drawing
+            // nothing program by program. (init runs on the render thread,
+            // after the context was made current to it.)
+            const int esVersion = glEsVersion();
+            if (esVersion < 310)
+            {
+                std::cerr << "[native:gl] OpenGL ES " << (esVersion / 100) << "." << ((esVersion / 10) % 10) << " ("
+                          << glString(GL_VERSION) << "): the shaders are ES 3.10 (texelFetch), the renderer stays down" << std::endl;
+                return false;
+            }
+            // The GS does not cut at the near plane: ES has no GL_DEPTH_CLAMP
+            // (desktop only), so the clamp runs on GL_EXT_depth_clamp when the
+            // driver has it and is skipped otherwise (the shadow volumes lose
+            // that clamp alone).
+            depthClamp = hasExtension("GL_EXT_depth_clamp");
+            std::cerr << "[native:gl] OpenGL ES " << (esVersion / 100) << "." << ((esVersion / 10) % 10) << " ("
+                      << glString(GL_VERSION) << ", " << glString(GL_SHADING_LANGUAGE_VERSION) << "), near-plane clamp: "
+                      << (depthClamp ? "GL_EXT_depth_clamp" : "off (GL_EXT_depth_clamp missing)") << std::endl;
+#endif
             const GLuint mainVertex = compile(GL_VERTEX_SHADER, kMainVertex);
             mainProgram = program(mainVertex, kMainFragment, {"aPos", "aNormal", "aColor", "aUV"});
 #if defined(PS2X_NATIVE_VITA)
@@ -2542,11 +2651,18 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 // Depth = 1 - 0.1 / w, read back by the bloom mask and the depth of field.
                 glGenTextures(1, &t.depth);
                 glBindTexture(GL_TEXTURE_2D, t.depth);
+#if defined(PS2X_NATIVE_GLES)
+                // ES has no 32-bit-float depth-stencil: 24+8, whose .r is the
+                // depth the shaders read via texelFetch as on the Mac.
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH24_STENCIL8, static_cast<GLsizei>(w), static_cast<GLsizei>(h), 0, GL_DEPTH_STENCIL,
+                             GL_UNSIGNED_INT_24_8, nullptr);
+#else
                 glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH32F_STENCIL8, static_cast<GLsizei>(w), static_cast<GLsizei>(h), 0, GL_DEPTH_STENCIL,
                              GL_FLOAT_32_UNSIGNED_INT_24_8_REV, nullptr);
+#endif
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, t.depth, 0);
+                attachDepthStencil(t.depth);
             }
             if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
                 std::cerr << "[native:gl] incomplete framebuffer " << w << "x" << h << std::endl;
@@ -2712,10 +2828,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #if !defined(PS2X_NATIVE_VITA)
             // The shadow mask pass tests the main picture's stencil.
             glBindFramebuffer(GL_FRAMEBUFFER, shadowMask.fbo);
-            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, color.depth, 0);
+            attachDepthStencil(color.depth);
             // Layer 8 drawn apart on the picture's depth.
             glBindFramebuffer(GL_FRAMEBUFFER, glowLayer.fbo);
-            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, color.depth, 0);
+            attachDepthStencil(color.depth);
 #endif
             if (blurOut.texture)
                 makeBlurOut(w, h); // (the Vita's were let go above: made again at first use)
@@ -4683,7 +4799,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     glClearColor(fog.colour[0], fog.colour[1], fog.colour[2], 1.0f);
                 else
                     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-#if defined(PS2X_NATIVE_VITA)
+#if defined(PS2X_NATIVE_VITA) || defined(PS2X_NATIVE_GLES)
                 glClearDepthf(1.0f);
 #else
                 glClearDepth(1.0);
@@ -4843,7 +4959,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     if (reset)
                     {
                         glDepthMask(GL_TRUE);
-#if defined(PS2X_NATIVE_VITA)
+#if defined(PS2X_NATIVE_VITA) || defined(PS2X_NATIVE_GLES)
                         glClearDepthf(1.0f);
 #else
                         glClearDepth(1.0);
@@ -5118,7 +5234,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     glStencilOpSeparate(GL_FRONT, GL_KEEP, GL_KEEP, GL_INCR_WRAP);
                     glStencilOpSeparate(GL_BACK, GL_KEEP, GL_KEEP, GL_DECR_WRAP);
 #if !defined(PS2X_NATIVE_VITA)
-                    glEnable(GL_DEPTH_CLAMP); // the GS does not cut at the near plane
+                    // the GS does not cut at the near plane (on ES the clamp
+                    // is GL_EXT_depth_clamp's: init leaves depthClamp off when
+                    // the driver has no such extension, and says so)
+                    if (depthClamp)
+                        glEnable(kDepthClamp);
 #endif
                     drawMesh(mesh, firstVertex);
 #if defined(PS2X_NATIVE_VITA)
@@ -5134,7 +5254,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     if (shadowStats.lastFrame != arenaFrame)
                         shadowStats.lastFrame = arenaFrame, ++shadowStats.framesWithVolumes;
 #if !defined(PS2X_NATIVE_VITA)
-                    glDisable(GL_DEPTH_CLAMP);
+                    if (depthClamp)
+                        glDisable(kDepthClamp);
 #endif
                     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
                     glDisable(GL_STENCIL_TEST);

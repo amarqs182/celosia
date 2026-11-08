@@ -7,12 +7,39 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <vector>
 
 namespace ps2x::iop::detail
 {
+    namespace
+    {
+        // Diagnostic-only: bounded import tracing for the sifman/sifcmd modules.
+        // The counter is global on purpose, so the exact call sequence stays
+        // readable without an unbounded log.
+        std::atomic<unsigned> s_sifLogCount{0};
+        constexpr unsigned kSifLogLimit = 400u;
+
+        bool sifLogEnabled()
+        {
+            return s_sifLogCount.fetch_add(1u, std::memory_order_relaxed) < kSifLogLimit;
+        }
+
+        // Diagnostic-only: bounded tracing for the sceSifSetDma (case 7)
+        // descriptor loop. Separate counter, so DMA logs do not consume the
+        // shared sifman/sifcmd budget.
+        std::atomic<unsigned> s_dmaLogCount{0};
+        constexpr unsigned kDmaLogLimit = 200u;
+
+        bool dmaLogEnabled()
+        {
+            return s_dmaLogCount.fetch_add(1u, std::memory_order_relaxed) < kDmaLogLimit;
+        }
+    }
+
     IopRpcBridge::IopRpcBridge(IopHost &host, IopMemory &memory, IopKernel &kernel) noexcept
         : m_host(host), m_memory(memory), m_kernel(kernel)
     {
@@ -27,15 +54,39 @@ namespace ps2x::iop::detail
 
     bool IopRpcBridge::dispatchSifManImport(uint16_t ordinal, IopCpuState &cpu)
     {
+        if (sifLogEnabled())
+        {
+            std::fprintf(stderr, "[iop:sif] sifman ord=%u pc=0x%08x a0=0x%08x a1=0x%08x a2=0x%08x a3=0x%08x%s\n",
+                         static_cast<unsigned>(ordinal), cpu.pc,
+                         cpu.gpr[4], cpu.gpr[5], cpu.gpr[6], cpu.gpr[7],
+                         (cpu.pc >= 0x11000u && cpu.pc < 0x14000u) ? " mod=dbcman" : " mod=other");
+        }
+        bool logged = false;
         const auto setV0 = [&](uint32_t value)
         {
+            if (!logged)
+            {
+                logged = true;
+                if (sifLogEnabled())
+                    std::fprintf(stderr, "[iop:sif] sifman ret=0x%08x\n", value);
+            }
             cpu.gpr[2] = value;
         };
         switch (ordinal)
         {
         case 4: // sceSifDma2Init
+            m_sifInitialized = true;
+            setV0(0u);
+            return true;
         case 5: // sceSifInit
             m_sifInitialized = true;
+            // Mark the SIF as initialized in the register file as well, so
+            // IOP code that polls the hardware registers sees the SIF up.
+            m_memory.write32(IopMemory::SifBase + 0x00u,
+                             m_memory.read32(IopMemory::SifBase + 0x00u) | 0x00000001u); // SIF_SMFLG init bit
+            m_memory.write32(IopMemory::SifBase + 0x10u,
+                             m_memory.read32(IopMemory::SifBase + 0x10u) | 0x00000001u); // SIF_MSFLG init bit
+            m_memory.write32(IopMemory::SifBase + 0x20u, 0x00000001u); // SIF_CTRL
             setV0(0u);
             return true;
         case 7: // sceSifSetDma
@@ -68,13 +119,24 @@ namespace ps2x::iop::detail
             std::array<PendingTransfer, kMaxDescriptors> pending{};
             uint32_t pendingCount = 0u;
             uint32_t largestTransfer = 0u;
+            uint32_t copiedCount = 0u;
+            uint32_t skippedCount = 0u;
             for (uint32_t i = 0u; i < descriptorCount; ++i)
             {
                 const uint32_t source = descriptorWords[i * 4u + 0u];
                 const uint32_t destination = descriptorWords[i * 4u + 1u];
                 const int32_t signedSize = static_cast<int32_t>(descriptorWords[i * 4u + 2u]);
+                const uint32_t flags = descriptorWords[i * 4u + 3u];
+                if (dmaLogEnabled())
+                {
+                    std::fprintf(stderr, "[iop:dma] desc src=0x%08x dst=0x%08x size=0x%x flags=0x%x\n",
+                                 source, destination, descriptorWords[i * 4u + 2u], flags);
+                }
                 if (signedSize <= 0)
+                {
+                    ++skippedCount;
                     continue;
+                }
 
                 const uint32_t size = static_cast<uint32_t>(signedSize);
                 if (!m_memory.ownsRamRange(source, size))
@@ -109,12 +171,17 @@ namespace ps2x::iop::detail
                     setV0(0u);
                     return true;
                 }
+                ++copiedCount;
             }
 
             const uint32_t dmaId = m_nextDmaId++;
             if (m_nextDmaId == 0u || m_nextDmaId > static_cast<uint32_t>(std::numeric_limits<int32_t>::max()))
             {
                 m_nextDmaId = 1u;
+            }
+            if (dmaLogEnabled())
+            {
+                std::fprintf(stderr, "[iop:dma] done id=%u copied=%u skipped=%u\n", dmaId, copiedCount, skippedCount);
             }
             setV0(dmaId);
             return true;
@@ -123,7 +190,7 @@ namespace ps2x::iop::detail
             setV0(0xFFFFFFFFu);
             return true;
         case 29: // sceSifCheckInit
-            setV0(m_sifInitialized ? 1u : 0u);
+            setV0((m_sifInitialized || (m_memory.read32(IopMemory::SifBase) & 1u) != 0u) ? 1u : 0u);
             return true;
         default:
             setV0(0u);
@@ -133,8 +200,22 @@ namespace ps2x::iop::detail
 
     bool IopRpcBridge::dispatchSifCmdImport(uint16_t ordinal, IopCpuState &cpu)
     {
+        if (sifLogEnabled())
+        {
+            std::fprintf(stderr, "[iop:sif] sifcmd ord=%u pc=0x%08x a0=0x%08x a1=0x%08x a2=0x%08x a3=0x%08x%s\n",
+                         static_cast<unsigned>(ordinal), cpu.pc,
+                         cpu.gpr[4], cpu.gpr[5], cpu.gpr[6], cpu.gpr[7],
+                         (cpu.pc >= 0x11000u && cpu.pc < 0x14000u) ? " mod=dbcman" : " mod=other");
+        }
+        bool logged = false;
         const auto setV0 = [&](uint32_t value)
         {
+            if (!logged)
+            {
+                logged = true;
+                if (sifLogEnabled())
+                    std::fprintf(stderr, "[iop:sif] sifcmd ret=0x%08x\n", value);
+            }
             cpu.gpr[2] = value;
         };
         switch (ordinal)
@@ -269,6 +350,9 @@ namespace ps2x::iop::detail
             setV0(0);
             return true;
         default:
+            if (sifLogEnabled())
+                std::fprintf(stderr, "[iop:sif] sifcmd MISSING ord=%u pc=0x%08x\n",
+                             static_cast<unsigned>(ordinal), cpu.pc);
             return false;
         }
     }

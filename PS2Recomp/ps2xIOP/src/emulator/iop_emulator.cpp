@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cstdio>
 #include <map>
 #include <optional>
 #include <span>
@@ -64,6 +65,16 @@ namespace ps2x::iop::detail
                     return false;
             }
             return true;
+        }
+
+        // Diagnostic-only: bounded tracing of EE -> IOP SIF transfer
+        // notifications.
+        std::atomic<unsigned> s_sifXferLogCount{0};
+        constexpr unsigned kSifXferLogLimit = 200u;
+
+        bool sifXferLogEnabled()
+        {
+            return s_sifXferLogCount.fetch_add(1u, std::memory_order_relaxed) < kSifXferLogLimit;
         }
 
     }
@@ -891,6 +902,11 @@ namespace ps2x::iop::detail
 
     void IopEmulator::onSifTransfer(const SifTransfer &transfer)
     {
+        if (sifXferLogEnabled())
+        {
+            std::fprintf(stderr, "[iop:sifxfer] dir=%d addr=0x%08x size=0x%x\n",
+                         static_cast<int>(transfer.kind), transfer.destinationAddress, transfer.size);
+        }
         m_impl->idleUntil = 0;
         m_impl->rpc.onSifTransfer(transfer);
     }
