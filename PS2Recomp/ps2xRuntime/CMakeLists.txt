@@ -547,6 +547,31 @@ foreach(runner_dir IN LISTS PS2X_RUNNER_DIRS)
     list(APPEND RUNNER_SRC_FILES ${runner_dir_files})
 endforeach()
 
+# Game overrides (game/overrides, next to PS2Recomp): the Vita and Windows
+# builds pass this directory through PS2X_RUNNER_DIRS, but the
+# linux-aarch64 (R36S) build was configured without it, so none of the
+# *_overrides.cpp files -- including sotc_overrides.cpp (the idle wait, the
+# host clock sync) -- were compiled there. Add the directory to the runner
+# sources (and to the include path below) whenever a non-Vita build did
+# not already list it. Vita always passes it, so it is left alone.
+if(NOT PS2X_IS_VITA)
+    set(PS2X_GAME_OVERRIDES_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../game/overrides")
+    if(EXISTS "${PS2X_GAME_OVERRIDES_DIR}")
+        # PS2X_RUNNER_DIRS may spell the directory differently (e.g.
+        # /d/celosia_upstream/game/overrides); normalise before testing so
+        # the files are not added twice.
+        set(PS2X_RUNNER_DIRS_NORM "${PS2X_RUNNER_DIRS}")
+        string(REPLACE "\\" "/" PS2X_RUNNER_DIRS_NORM "${PS2X_RUNNER_DIRS_NORM}")
+        if(NOT PS2X_RUNNER_DIRS_NORM MATCHES "game/overrides")
+            file(GLOB PS2X_GAME_OVERRIDES_SRC
+                 CONFIGURE_DEPENDS "${PS2X_GAME_OVERRIDES_DIR}/*.cpp")
+            list(APPEND RUNNER_SRC_FILES ${PS2X_GAME_OVERRIDES_SRC})
+            list(REMOVE_DUPLICATES RUNNER_SRC_FILES)
+            list(APPEND PS2X_RUNNER_DIRS "${PS2X_GAME_OVERRIDES_DIR}")
+        endif()
+    endif()
+endif()
+
 set(RUNNER_MAIN_CPP "${CMAKE_CURRENT_SOURCE_DIR}/src/runner/main.cpp")
 set(ROOT_MAIN_CPP "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp")
 
