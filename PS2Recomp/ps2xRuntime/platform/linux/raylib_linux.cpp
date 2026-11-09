@@ -30,6 +30,7 @@ namespace
 {
     SDL_Window *g_window = nullptr;
     SDL_GLContext g_context = nullptr;
+    SDL_Window *g_nativeWindow = nullptr;
     bool g_glReady = false;
     bool g_quit = false;
     int g_width = 960, g_height = 544;
@@ -595,7 +596,7 @@ void InitWindow(int width, int height, const char *title)
     g_startCounter = SDL_GetPerformanceCounter();
 }
 
-void *CreateSharedGLContext(void)
+void *CreateNativeGLContext(void)
 {
     if (!g_glReady || !g_window || !g_context)
         return nullptr;
@@ -609,18 +610,29 @@ void *CreateSharedGLContext(void)
         return nullptr;
     }
 
-    SDL_GL_SetAttribute(SDL_GL_SHARE_WITH_CURRENT_CONTEXT, 1);
-    SDL_GLContext context = SDL_GL_CreateContext(g_window);
-    SDL_GL_SetAttribute(SDL_GL_SHARE_WITH_CURRENT_CONTEXT, 0);
+    g_nativeWindow = SDL_CreateWindow("Celosia native renderer",
+                                      SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+                                      16, 16, SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
+    if (!g_nativeWindow)
+    {
+        std::fprintf(stderr, "[linux] hidden native window creation failed: %s\n", SDL_GetError());
+        return nullptr;
+    }
+
+    SDL_GLContext context = SDL_GL_CreateContext(g_nativeWindow);
     if (!context)
     {
-        std::fprintf(stderr, "[linux] shared GLES context creation failed: %s\n", SDL_GetError());
+        std::fprintf(stderr, "[linux] native GLES context creation failed: %s\n", SDL_GetError());
+        SDL_DestroyWindow(g_nativeWindow);
+        g_nativeWindow = nullptr;
         return nullptr;
     }
     if (SDL_GL_MakeCurrent(g_window, g_context) != 0)
     {
         std::fprintf(stderr, "[linux] could not restore the host GLES context: %s\n", SDL_GetError());
         SDL_GL_DeleteContext(context);
+        SDL_DestroyWindow(g_nativeWindow);
+        g_nativeWindow = nullptr;
         return nullptr;
     }
     return context;
@@ -628,7 +640,7 @@ void *CreateSharedGLContext(void)
 
 void MakeGLContextCurrent(void *context)
 {
-    if (!context || !g_window || SDL_GL_MakeCurrent(g_window, static_cast<SDL_GLContext>(context)) != 0)
+    if (!context || !g_nativeWindow || SDL_GL_MakeCurrent(g_nativeWindow, static_cast<SDL_GLContext>(context)) != 0)
         std::fprintf(stderr, "[linux] could not make the native GLES context current: %s\n", SDL_GetError());
 }
 
@@ -697,8 +709,8 @@ void BeginDrawing(void)
     g_lastFrameTime = now;
     if (!initQuadProgram())
         return;
-    // The native renderer uses a separate shared context on its render
-    // thread, so this host/UI context keeps its own GL state.
+    // The native renderer uses its own hidden window and context on the
+    // render thread, leaving this host/UI context independent.
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glUseProgram(g_quadProgram);
     glDepthRangef(0.0f, 1.0f);
