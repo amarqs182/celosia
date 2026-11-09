@@ -70,8 +70,6 @@ if(PS2X_IS_ARM_TARGET)
     elseif(PS2X_IS_AARCH64_TARGET)
         # Linux ARM64 - add NEON flags
         message(STATUS "Non-Apple ARM64 - adding NEON compiler flags")
-        add_compile_options(-march=armv8-a+fp+simd)
-
         # Optional ARMv8 extensions must be enabled only after checking the
         # target CPU. A successful compiler-flag check cannot detect CPU support.
         set(PS2X_AARCH64_MARCH "-march=armv8-a+fp+simd")
