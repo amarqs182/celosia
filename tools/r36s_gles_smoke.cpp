@@ -14,6 +14,7 @@
 #include <GLES3/gl3.h>
 
 #include <cstdio>
+#include <initializer_list>
 
 static bool compileShader(GLenum type, const char *source)
 {
