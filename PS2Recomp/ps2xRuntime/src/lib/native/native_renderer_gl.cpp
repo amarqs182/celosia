@@ -1536,6 +1536,30 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         uint32_t width = 0, height = 0;
     };
 
+#if defined(PS2X_GLES3)
+#ifndef GL_DEPTH_CLAMP_EXT
+#define GL_DEPTH_CLAMP_EXT 0x864F
+#endif
+
+    static void attachDepthStencil(GLuint depthTexture)
+    {
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depthTexture, 0);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_TEXTURE_2D, depthTexture, 0);
+    }
+
+    static bool hasGlExtension(const char *name)
+    {
+        const char *extensions = reinterpret_cast<const char *>(glGetString(GL_EXTENSIONS));
+        if (!extensions || !name || !*name)
+            return false;
+        const size_t length = std::strlen(name);
+        for (const char *at = extensions; (at = std::strstr(at, name)) != nullptr; at += length)
+            if ((at == extensions || at[-1] == ' ') && (at[length] == ' ' || at[length] == 0))
+                return true;
+        return false;
+    }
+#endif
+
     struct Renderer
     {
         GLuint mainProgram = 0, quadProgram = 0;
@@ -1547,6 +1571,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         bool regionReady = false; // every one of them built // by mode (8 and 11: the bloom mask's, see kQuadFragment; 12 unused; 15-18 the GS bloom chain, round 65b)
 #endif
         GLuint quadBuffer = 0, blurBuffer = 0, vao = 0;
+#if defined(PS2X_GLES3)
+        bool depthClamp = false;
+#endif
         // Uniform locations by (program, name): the names are string literals,
         // so their address is the key (no string built per call: that was 41%
         // of the Vita's time). A few dozen: a list looked through, the last
@@ -1691,7 +1718,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #else
             // The rest of the frame is drawn on the picture's depth.
             glBindFramebuffer(GL_FRAMEBUFFER, blurOut.fbo);
-            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, color.depth, 0);
+            attachDepthStencil(color.depth);
 #endif
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
             boundFbo = ~0u;
@@ -2869,6 +2896,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 std::fprintf(stderr, "[native:gl] OpenGL ES 3.1 required, got %d.%d\n", major, minor);
                 return false;
             }
+            depthClamp = hasGlExtension("GL_EXT_depth_clamp");
+            const auto *version = glGetString(GL_VERSION);
+            const auto *glsl = glGetString(GL_SHADING_LANGUAGE_VERSION);
+            std::fprintf(stderr, "[native:gl] %s; GLSL %s; near-plane clamp: %s\n",
+                         version ? reinterpret_cast<const char *>(version) : "unknown",
+                         glsl ? reinterpret_cast<const char *>(glsl) : "unknown",
+                         depthClamp ? "GL_EXT_depth_clamp" : "off (extension unavailable)");
 #endif
             if (const char *e = std::getenv("SOTC_GL_PX98")) // round 98 (the pixel estimate's frames)
                 px98.every = std::max(std::atoi(e), 0);
@@ -3355,11 +3389,17 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 // Depth = 1 - 0.1 / w, read back by the bloom mask and the depth of field.
                 glGenTextures(1, &t.depth);
                 glBindTexture(GL_TEXTURE_2D, t.depth);
+#if defined(PS2X_GLES3)
+                // GLES 3.1 uses 24-bit depth plus 8-bit stencil.
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH24_STENCIL8, static_cast<GLsizei>(w), static_cast<GLsizei>(h), 0,
+                             GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, nullptr);
+#else
                 glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH32F_STENCIL8, static_cast<GLsizei>(w), static_cast<GLsizei>(h), 0, GL_DEPTH_STENCIL,
                              GL_FLOAT_32_UNSIGNED_INT_24_8_REV, nullptr);
+#endif
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, t.depth, 0);
+                attachDepthStencil(t.depth);
             }
             if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
                 std::cerr << "[native:gl] incomplete framebuffer " << w << "x" << h << std::endl;
@@ -3570,10 +3610,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #if !defined(PS2X_NATIVE_VITA)
             // The shadow mask pass tests the main picture's stencil.
             glBindFramebuffer(GL_FRAMEBUFFER, shadowMask.fbo);
-            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, color.depth, 0);
+            attachDepthStencil(color.depth);
             // Layer 8 drawn apart on the picture's depth.
             glBindFramebuffer(GL_FRAMEBUFFER, glowLayer.fbo);
-            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, color.depth, 0);
+            attachDepthStencil(color.depth);
 #endif
             if (blurOut.texture)
                 makeBlurOut(w, h); // (the Vita's were let go above: made again at first use)
@@ -6835,7 +6875,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     glStencilFuncSeparate(GL_FRONT_AND_BACK, GL_ALWAYS, 0, 0xFF);
                     glStencilOpSeparate(GL_FRONT, GL_KEEP, GL_KEEP, GL_INCR_WRAP);
                     glStencilOpSeparate(GL_BACK, GL_KEEP, GL_KEEP, GL_DECR_WRAP);
-#if !defined(PS2X_NATIVE_VITA) && !defined(PS2X_GLES3)
+#if defined(PS2X_GLES3)
+                    if (depthClamp)
+                        glEnable(GL_DEPTH_CLAMP_EXT);
+#elif !defined(PS2X_NATIVE_VITA)
                     glEnable(GL_DEPTH_CLAMP); // the GS does not cut at the near plane
 #endif
                     drawMesh(mesh, firstVertex);
@@ -6851,7 +6894,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     shadowStats.vertices += mesh.count;
                     if (shadowStats.lastFrame != arenaFrame)
                         shadowStats.lastFrame = arenaFrame, ++shadowStats.framesWithVolumes;
-#if !defined(PS2X_NATIVE_VITA) && !defined(PS2X_GLES3)
+#if defined(PS2X_GLES3)
+                    if (depthClamp)
+                        glDisable(GL_DEPTH_CLAMP_EXT);
+#elif !defined(PS2X_NATIVE_VITA)
                     glDisable(GL_DEPTH_CLAMP);
 #endif
                     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
