@@ -595,6 +595,43 @@ void InitWindow(int width, int height, const char *title)
     g_startCounter = SDL_GetPerformanceCounter();
 }
 
+void *CreateSharedGLContext(void)
+{
+    if (!g_glReady || !g_window || !g_context)
+        return nullptr;
+
+    GLint major = 0, minor = 0;
+    glGetIntegerv(GL_MAJOR_VERSION, &major);
+    glGetIntegerv(GL_MINOR_VERSION, &minor);
+    if (major < 3 || (major == 3 && minor < 1))
+    {
+        std::fprintf(stderr, "[linux] native renderer requires OpenGL ES 3.1; got %d.%d\n", major, minor);
+        return nullptr;
+    }
+
+    SDL_GL_SetAttribute(SDL_GL_SHARE_WITH_CURRENT_CONTEXT, 1);
+    SDL_GLContext context = SDL_GL_CreateContext(g_window);
+    SDL_GL_SetAttribute(SDL_GL_SHARE_WITH_CURRENT_CONTEXT, 0);
+    if (!context)
+    {
+        std::fprintf(stderr, "[linux] shared GLES context creation failed: %s\n", SDL_GetError());
+        return nullptr;
+    }
+    if (SDL_GL_MakeCurrent(g_window, g_context) != 0)
+    {
+        std::fprintf(stderr, "[linux] could not restore the host GLES context: %s\n", SDL_GetError());
+        SDL_GL_DeleteContext(context);
+        return nullptr;
+    }
+    return context;
+}
+
+void MakeGLContextCurrent(void *context)
+{
+    if (!context || !g_window || SDL_GL_MakeCurrent(g_window, static_cast<SDL_GLContext>(context)) != 0)
+        std::fprintf(stderr, "[linux] could not make the native GLES context current: %s\n", SDL_GetError());
+}
+
 void CloseWindow(void)
 {
     for (auto &[id, slot] : g_textures)
@@ -660,9 +697,8 @@ void BeginDrawing(void)
     g_lastFrameTime = now;
     if (!initQuadProgram())
         return;
-    // TODO(r36s): when native_renderer_gl.cpp grows its GLES path here,
-    // the GS renderer's own GL state takes over under an interlock like
-    // the Vita's ps2xVitaGlMutex (host and GS share one GL state).
+    // The native renderer uses a separate shared context on its render
+    // thread, so this host/UI context keeps its own GL state.
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glUseProgram(g_quadProgram);
     glDepthRangef(0.0f, 1.0f);
