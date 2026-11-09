@@ -1,6 +1,6 @@
 // The native renderer's front: picks a backend (native_backend.h) the first
 // time it is used. macOS: Metal, or OpenGL with SOTC_NATIVE_GL=1 (to check
-// the GL path against Metal); the Vita: OpenGL (vitaGL); elsewhere none.
+// the GL path against Metal); the Vita: OpenGL (vitaGL); Linux: OpenGL ES 3.1.
 #include "native_backend.h"
 #include "runtime/ps2_diag.h"
 #include "runtime/native_tuning.h"
