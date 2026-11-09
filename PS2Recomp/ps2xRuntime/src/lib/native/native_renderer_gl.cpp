@@ -1,7 +1,7 @@
 // Native renderer on OpenGL (see runtime/native_renderer.h and the Metal
-// backend, which this follows pass for pass): GL 3.3 core with GLSL on
-// macOS (SOTC_NATIVE_GL=1, to check it against Metal), vitaGL with CG on the
-// Vita. Render targets are GL textures, so the picture is y-up: screen
+// backend, which this follows pass for pass): GL 3.3 core on macOS, GLES 3.1
+// with GLSL ES on Linux, and vitaGL with CG on the Vita. Render targets are
+// GL textures, so the picture is y-up: screen
 // positions come from the clip position (no gl_FragCoord), and the output is
 // flipped once when it is read back.
 //
