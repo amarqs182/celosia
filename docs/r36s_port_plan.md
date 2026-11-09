@@ -79,3 +79,32 @@ the device. Items marked **(check)** are assumptions to verify first.
    unit)**.
 7. **Measure** with the existing frame log and `[gl:mem]`, before deciding
    what else to cut.
+
+## Progress
+
+**Step 4, first cut (branch `r36s/gles-shaders`, not merged).** Everything is
+behind a new `PS2X_GLES3` macro that no current build defines, so the Mac and
+Vita preprocessor output is unchanged (every added condition is `|| defined(
+PS2X_GLES3)` / `&& !defined(PS2X_GLES3)` or inside `#if defined(PS2X_GLES3)`):
+
+- `native_renderer.cpp` and the first `#if` of `native_renderer_gl.cpp` accept
+  `PS2X_GLES3`; `<GLES3/gl3.h>` is included for it.
+- `compile()` rewrites a leading `#version 330 core` to `#version 300 es` plus
+  default precisions (`float`, `int`, `sampler2D` at highp).
+- The two `glClearDepth(1.0)` calls use `glClearDepthf`.
+- `GL_DEPTH_CLAMP` (shadow volumes) is skipped, as the Vita build already does;
+  ES 3.0 has no depth clamp.
+
+**Not verified.** No GLES headers and no GLSL validator were available where
+this was written, so none of it has been compiled or run. Open points:
+
+- The shaders were only read for ES differences: `uMode` is an `int`, the
+  integer literals found are in constructors or int-only expressions, and
+  nothing uses `noperspective`, `fma`, `double`, `textureGather` or
+  `#extension`. GLSL ES 3.00 does not convert `int` to `float` implicitly
+  (330 does), so a validator run over every shader and `#define` variant
+  (`MODE` 0-26, `CLAMPED`, the `BG` / `CUT` / `NOLOD` / `SOFT` / `UNTEX`
+  combinations) is the real check.
+- Render targets: which colour and depth formats the code asks for, and whether
+  the Mali driver accepts them as attachments **(check)**.
+- Nothing yet creates a GLES context on the device: that is step 3.

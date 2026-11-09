@@ -36,7 +36,7 @@
 extern "C" unsigned int _pthread_stack_default_user; // ps2_vita_runtime.cpp
 #endif
 
-#if defined(__APPLE__) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
+#if defined(__APPLE__) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)) || defined(PS2X_GLES3)
 #define PS2X_NATIVE_GL 1
 #endif
 

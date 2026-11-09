@@ -18,12 +18,18 @@
 #include "runtime/ps2_stats.h"
 #include "runtime/ps2_thread_load.h"
 
-#if defined(__APPLE__) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
+#if defined(__APPLE__) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)) || defined(PS2X_GLES3)
 
 #if defined(__APPLE__)
 #define GL_SILENCE_DEPRECATION
 #include <OpenGL/gl3.h>
 #include <malloc/malloc.h>
+#elif defined(PS2X_GLES3)
+// OpenGL ES 3.0 target (docs/r36s_port_plan.md). Not defined by any build that
+// exists today; the desktop GLSL below is turned into ES by esShader().
+#include <GLES3/gl3.h>
+#include <malloc.h>
+#include <mutex>
 #else
 #include <mutex>
 #include <malloc.h>
@@ -2694,10 +2700,31 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             bloomStages.push_back(std::move(st));
         }
 
+#if defined(PS2X_GLES3)
+        // The desktop shaders start with "#version 330 core". GLSL ES 3.00 takes
+        // the same in / out / layout(location) / texelFetch / textureLod syntax;
+        // what it adds is the version line, and a fragment shader needs a default
+        // float precision (sampler2D defaults to lowp there, too narrow for the
+        // depth textures the quad programs read).
+        static std::string esShader(const char *source)
+        {
+            static const char kDesktop[] = "#version 330 core";
+            std::string s(source);
+            if (s.compare(0, sizeof(kDesktop) - 1, kDesktop) == 0)
+                s.replace(0, sizeof(kDesktop) - 1,
+                          "#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;");
+            return s;
+        }
+#endif
+
         static GLuint compile(GLenum type, const char *source)
         {
 #if defined(PS2X_NATIVE_VITA)
             type = type == GL_VERTEX_SHADER ? GL_CG_VERTEX_SHADER_EXT : GL_CG_FRAGMENT_SHADER_EXT;
+#endif
+#if defined(PS2X_GLES3)
+            const std::string es = esShader(source);
+            source = es.c_str();
 #endif
             GLuint shader = glCreateShader(type);
             glShaderSource(shader, 1, &source, nullptr);
@@ -6323,7 +6350,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     glClearColor(fog.colour[0], fog.colour[1], fog.colour[2], 1.0f);
                 else
                     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-#if defined(PS2X_NATIVE_VITA)
+#if defined(PS2X_NATIVE_VITA) || defined(PS2X_GLES3)
                 glClearDepthf(1.0f);
 #else
                 glClearDepth(1.0);
@@ -6485,7 +6512,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     if (reset)
                     {
                         glDepthMask(GL_TRUE);
-#if defined(PS2X_NATIVE_VITA)
+#if defined(PS2X_NATIVE_VITA) || defined(PS2X_GLES3)
                         glClearDepthf(1.0f);
 #else
                         glClearDepth(1.0);
@@ -6805,7 +6832,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     glStencilFuncSeparate(GL_FRONT_AND_BACK, GL_ALWAYS, 0, 0xFF);
                     glStencilOpSeparate(GL_FRONT, GL_KEEP, GL_KEEP, GL_INCR_WRAP);
                     glStencilOpSeparate(GL_BACK, GL_KEEP, GL_KEEP, GL_DECR_WRAP);
-#if !defined(PS2X_NATIVE_VITA)
+#if !defined(PS2X_NATIVE_VITA) && !defined(PS2X_GLES3) // no depth clamp in ES 3.0: the shadow volumes are cut at the near plane, as on the Vita
                     glEnable(GL_DEPTH_CLAMP); // the GS does not cut at the near plane
 #endif
                     drawMesh(mesh, firstVertex);
@@ -6821,7 +6848,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     shadowStats.vertices += mesh.count;
                     if (shadowStats.lastFrame != arenaFrame)
                         shadowStats.lastFrame = arenaFrame, ++shadowStats.framesWithVolumes;
-#if !defined(PS2X_NATIVE_VITA)
+#if !defined(PS2X_NATIVE_VITA) && !defined(PS2X_GLES3)
                     glDisable(GL_DEPTH_CLAMP);
 #endif
                     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
