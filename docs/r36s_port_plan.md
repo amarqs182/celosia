@@ -97,9 +97,11 @@ file /bin/sh
 ```
 
 Then record the actual SDL2 video drivers, EGL version, GLES version and GLSL
-version exposed by the image. Previous device experiments with libmali and
-Vulkan are useful evidence that the GPU driver works, but they do not prove
-that SDL2 can create the required EGL/GLES context.
+version exposed by the image. The old R36S renderer implementation explicitly
+requires OpenGL ES 3.1 / GLSL ES 3.10 and stays disabled below that version;
+do not treat an ES 3.0 context as sufficient. Previous device experiments
+with libmali and Vulkan are useful evidence that the GPU driver works, but
+they do not prove that SDL2 can create the required EGL/GLES context.
 
 ## Work sequence
 
@@ -108,7 +110,8 @@ that SDL2 can create the required EGL/GLES context.
    `aarch64-linux-gnu` toolchain with a sysroot copied from the target
    firmware; a native AArch64 build on the R36S is an alternative only if its
    compiler and available memory are sufficient. Build a tiny SDL2/EGL/GLES
-   smoke test before changing Celosia.
+   smoke test that requests ES 3.1 and reports the actual EGL, GLES and GLSL
+   versions before changing Celosia.
 2. **Validate host setup.** Run the existing setup pipeline on Linux x86_64,
    including module capture and generation of runner sources.
 3. **Add the target build.** Add an explicit R36S/Linux AArch64 build option
