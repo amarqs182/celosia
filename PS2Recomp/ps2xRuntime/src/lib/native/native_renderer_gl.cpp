@@ -18,12 +18,16 @@
 #include "runtime/ps2_stats.h"
 #include "runtime/ps2_thread_load.h"
 
-#if defined(__APPLE__) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
+#if defined(__APPLE__) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)) || defined(PS2X_GLES3)
 
 #if defined(__APPLE__)
 #define GL_SILENCE_DEPRECATION
 #include <OpenGL/gl3.h>
 #include <malloc/malloc.h>
+#elif defined(PS2X_GLES3)
+#include <GLES3/gl3.h>
+#include <malloc.h>
+#include <mutex>
 #else
 #include <mutex>
 #include <malloc.h>
@@ -387,6 +391,8 @@ namespace
     {
 #if defined(PS2X_NATIVE_VITA)
         return mallinfo().uordblks;
+#elif defined(PS2X_GLES3)
+        return mallinfo2().uordblks;
 #else
         malloc_statistics_t stats{};
         malloc_zone_statistics(nullptr, &stats);
@@ -2696,6 +2702,20 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 
         static GLuint compile(GLenum type, const char *source)
         {
+#if defined(PS2X_GLES3)
+            static const std::string version = "#version 330 core";
+            static const std::string esVersion =
+                "#version 310 es\n"
+                "precision highp float;\n"
+                "precision highp int;\n"
+                "precision highp sampler2D;\n";
+            std::string esSource;
+            if (std::strncmp(source, version.c_str(), version.size()) == 0)
+            {
+                esSource = esVersion + (source + version.size());
+                source = esSource.c_str();
+            }
+#endif
 #if defined(PS2X_NATIVE_VITA)
             type = type == GL_VERTEX_SHADER ? GL_CG_VERTEX_SHADER_EXT : GL_CG_FRAGMENT_SHADER_EXT;
 #endif
@@ -2840,6 +2860,16 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 
         bool init()
         {
+#if defined(PS2X_GLES3)
+            GLint major = 0, minor = 0;
+            glGetIntegerv(GL_MAJOR_VERSION, &major);
+            glGetIntegerv(GL_MINOR_VERSION, &minor);
+            if (major < 3 || (major == 3 && minor < 1))
+            {
+                std::fprintf(stderr, "[native:gl] OpenGL ES 3.1 required, got %d.%d\n", major, minor);
+                return false;
+            }
+#endif
             if (const char *e = std::getenv("SOTC_GL_PX98")) // round 98 (the pixel estimate's frames)
                 px98.every = std::max(std::atoi(e), 0);
             const GLuint mainVertex = compile(GL_VERTEX_SHADER, kMainVertex);
@@ -6323,7 +6353,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     glClearColor(fog.colour[0], fog.colour[1], fog.colour[2], 1.0f);
                 else
                     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-#if defined(PS2X_NATIVE_VITA)
+#if defined(PS2X_NATIVE_VITA) || defined(PS2X_GLES3)
                 glClearDepthf(1.0f);
 #else
                 glClearDepth(1.0);
@@ -6485,7 +6515,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     if (reset)
                     {
                         glDepthMask(GL_TRUE);
-#if defined(PS2X_NATIVE_VITA)
+#if defined(PS2X_NATIVE_VITA) || defined(PS2X_GLES3)
                         glClearDepthf(1.0f);
 #else
                         glClearDepth(1.0);
@@ -6805,7 +6835,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     glStencilFuncSeparate(GL_FRONT_AND_BACK, GL_ALWAYS, 0, 0xFF);
                     glStencilOpSeparate(GL_FRONT, GL_KEEP, GL_KEEP, GL_INCR_WRAP);
                     glStencilOpSeparate(GL_BACK, GL_KEEP, GL_KEEP, GL_DECR_WRAP);
-#if !defined(PS2X_NATIVE_VITA)
+#if !defined(PS2X_NATIVE_VITA) && !defined(PS2X_GLES3)
                     glEnable(GL_DEPTH_CLAMP); // the GS does not cut at the near plane
 #endif
                     drawMesh(mesh, firstVertex);
@@ -6821,7 +6851,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     shadowStats.vertices += mesh.count;
                     if (shadowStats.lastFrame != arenaFrame)
                         shadowStats.lastFrame = arenaFrame, ++shadowStats.framesWithVolumes;
-#if !defined(PS2X_NATIVE_VITA)
+#if !defined(PS2X_NATIVE_VITA) && !defined(PS2X_GLES3)
                     glDisable(GL_DEPTH_CLAMP);
 #endif
                     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
