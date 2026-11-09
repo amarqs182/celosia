@@ -1094,10 +1094,10 @@ bool PS2Runtime::initialize(const char *title)
         const char *nativeGl = std::getenv("SOTC_NATIVE_GL");
         if (!nativeGl || std::atoi(nativeGl) != 0 || std::string(nativeGl) == "check")
         {
-            if (void *nativeContext = CreateSharedGLContext())
+            if (void *nativeContext = CreateNativeGLContext())
                 native_renderer::setGlContext([nativeContext] { MakeGLContextCurrent(nativeContext); });
             else
-                std::cerr << "[native] GLES 3.1 shared context unavailable; native renderer disabled" << std::endl;
+                std::cerr << "[native] GLES 3.1 context unavailable; native renderer disabled" << std::endl;
         }
 #endif
 #if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
