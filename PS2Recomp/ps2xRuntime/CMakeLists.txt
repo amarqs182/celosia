@@ -482,8 +482,8 @@ add_library(ps2_runtime STATIC
     src/lib/games_database.cpp
 )
 
-# Native renderer: the front picks Metal (macOS) or OpenGL (macOS with
-# SOTC_NATIVE_GL=1, the Vita through vitaGL).
+# Native renderer: Metal on macOS, OpenGL on macOS when selected, vitaGL on
+# the Vita, and GLES 3.1 on Linux/AArch64.
 target_sources(ps2_runtime PRIVATE src/lib/native/native_renderer.cpp src/lib/native/native_renderer_gl.cpp src/lib/native/native_recorder.cpp)
 if(PS2X_IS_LINUX)
     target_compile_definitions(ps2_runtime PRIVATE PS2X_GLES3=1)
