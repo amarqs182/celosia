@@ -1,81 +1,100 @@
-# R36S port: first plan
+# R36S port: initial engineering plan
 
-Goal of this fork: run the Vita build's design on the R36S (RK3326: quad
-Cortex-A35, Mali-G31, ARM 32-bit userland on dArkOS). Written from a static
-read of the tree on 2026-11-09; nothing here has been built or measured on
-the device. Items marked **(check)** are assumptions to verify first.
+Goal: adapt Celosia's existing PS2 recompilation/runtime and native renderer to the
+R36S, reusing the Vita and macOS work where the abstractions are portable. This
+document is a static source review, not a claim that a Linux/ARM64 build or the
+game has already run on the device.
 
-## What the tree already gives
+Target hardware: RK3326, four Cortex-A35 cores, Mali-G31 MP2 and 1 GB shared
+system memory. The CPU supports AArch64, but the target image's **userspace ABI
+must be checked** before choosing a compiler or sysroot. A 64-bit kernel does
+not by itself prove that the installed userspace is 64-bit.
 
-- **Recompiled game code is plain C++.** `./celosia vita` reuses
-  `build/runner` from `setup` with another toolchain; an R36S target can do
-  the same (`cmd_r36s`, modelled on `cmd_vita`).
-- **A 32-bit ARM + NEON path exists and is not Vita-only.**
-  `ps2_runtime_macros.h` (about line 178) is gated on
-  `__arm__ && !__aarch64__ && __ARM_NEON && USE_SSE2NEON`. The Vita-specific
-  tuning is under `__vita__` (16 blocks in `native_tuning.h`, plus
-  `ps2_runtime_macros.h` around lines 626-722 and `EeScheduler.cpp`).
-- **The GL backend is small.** `native_renderer_gl.cpp` (10 051 lines) uses
-  about 70 distinct GL calls. No geometry shaders, no compute.
-- **The platform layer is a small raylib subset.**
-  `platform/vita/raylib/raylib.h` is 202 lines (window, textures, keys and
-  gamepad, an audio stream callback); `raylib_vita.cpp` implements it on SDL2
-  and vitaGL in 1 428 lines.
+## What can be reused
 
-## What is in the way
+- The game code emitted by PS2Recomp is C++. The setup pipeline generates the
+  runner sources; a separate target build can compile those sources for the
+  R36S without recompiling the game's MIPS code on the device.
+- The runtime, PS2 subsystem emulation, game overrides and most of the native
+  renderer's draw logic are valuable starting points. Vita-specific kernel,
+  allocator, display and GXM calls are not portable platform abstractions.
+- The renderer already has a backend interface in
+  `PS2Recomp/ps2xRuntime/src/lib/native/native_backend.h`. Keep that seam:
+  add a Linux/GLES implementation rather than pretending the R36S is a Vita.
+- The Vita raylib shim documents the small host API Celosia uses (window,
+  input, texture and audio functions). Reuse the API contract, not its
+  Vita-specific implementation.
 
-1. **The GL backend only compiles on macOS and on the Vita.** Its first
-   `#if` is `defined(__APPLE__) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))`;
-   on any other platform the file is empty.
-2. **Shaders are `#version 330 core`** (`kMainVertex`, `kMainFragment`,
-   `kQuadVertex`, the world fragment, and others). Mali-G31 is a GLES part
-   **(check: which driver dArkOS ships, libmali or Panfrost, and the
-   GLES version it reports)**. They need `#version 300 es` plus precision
-   qualifiers.
-3. **Desktop-only calls:** `glClearDepth(1.0)` (2 sites, around lines 6329 and
-   6491 of `native_renderer_gl.cpp`; GLES has `glClearDepthf`, which the Vita
-   branches already use). `glMapBuffer(GL_WRITE_ONLY)` (around lines 3944 and
-   4234) is not a problem: both sites are inside
-   `#if defined(PS2X_NATIVE_VITA)` blocks (vitaGL buffer memory), so a
-   non-Vita target does not compile them. `texelFetch` on depth textures is
-   fine in GLES 3.0.
-   Because of that, decide how the R36S relates to `PS2X_NATIVE_VITA`: if it
-   does not define it, every such block takes its desktop `#else` branch,
-   and those branches must be read for GLES problems **(check)**; if it
-   defines it, the vitaGL-only code under it will not compile.
-4. **Vita-only extensions** (`vglCelo*`, `vgl_celo_scenes`, `blend_info`,
-   `gxm_context`) are declared under `PS2X_NATIVE_VITA`; they must stay behind
-   that guard.
-5. **The pipeline is documented for macOS only.** `./celosia setup` captures
-   each module by running the game on the host. Whether that works on
-   Linux x86_64 is untested **(check)**: the Metal path is Apple-only and
-   other hosts fall back to the emulated GS (`gs_metal_raster_stub.cpp`).
-   If it does not, the generated `build/runner` from a Mac can be copied.
-6. **GPU, not CPU, may be the limit.** The A35 cores at ~1.3 GHz should beat
-   the Vita's A9s at 444 MHz, but Mali-G31 MP2 and the RK3326's memory
-   bandwidth are probably weaker than the Vita's SGX543MP4 **(check by
-   measuring)**. Bloom, depth of field, reflections and refraction are the
-   multi-pass cost.
+## Main blockers found in the source
 
-## Steps, in order
+1. **Native GL compilation is gated to macOS and Vita.**
+   `native_renderer_gl.cpp` is compiled only for those paths, and the GL
+   backend factory does not select it on generic Linux. Add an explicit Linux
+   target path; do not define `PS2X_NATIVE_VITA` for the R36S because that
+   enables vitaGL/GXM and Vita kernel code.
+2. **The current shaders target desktop GLSL.**
+   The native GL shaders use `#version 330 core`. Mali-G31 is a GLES GPU, so
+   the target needs a GLES 3.x shader variant (or a controlled source
+   translation) with the required precision declarations. Keep desktop GL
+   shaders unchanged.
+3. **GL API differences need a branch-by-branch audit.**
+   GLES uses `glClearDepthf`; desktop GL uses `glClearDepth`. Buffer mapping
+   and other desktop-only calls must be checked in the non-Vita branch that
+   Linux will compile. Do not globally replace calls without checking the
+   Vita and macOS paths.
+4. **Linux host integration is missing.**
+   The existing Linux CMake path is not the same as the Vita SDL2/vitaGL
+   shim. Add a host adapter for the target's SDL2 + EGL/GLES stack. Select
+   SDL's video driver only after checking which drivers and DRM/KMS access
+   the installed firmware actually provides; KMSDRM is a candidate, not an
+   assumption.
+5. **The setup pipeline needs a host runner.**
+   `./celosia setup` captures module state by running the generated host
+   runner. First validate this flow on the Linux development machine. The
+   R36S target runner should then be cross-compiled using a sysroot that
+   matches the device ABI and its SDL2/EGL/GLES libraries.
+6. **Memory and performance must be measured on the device.**
+   The R36S has 1 GB shared memory. Revisit render-target and texture budgets
+   before enabling all effects. Do not infer CPU/GPU performance from clock
+   rates or Vita results alone; record frame time, GPU behavior and memory
+   use on the R36S.
 
-1. **Host bootstrap.** Run `./celosia setup` on the Linux machine; record
-   what breaks. Fallback: use the runner sources from a Mac.
-2. **Toolchain.** `arm-linux-gnueabihf` cross compiler and a sysroot taken
-   from the device (SDL2, EGL, GLESv2). Add `cmd_r36s` next to `cmd_vita`.
-3. **Platform shim.** `platform/r36s/raylib`: the same 202-line API on SDL2
-   with KMSDRM + EGL (GLES), gamepad through `SDL_GameController`, audio
-   through the SDL callback. Start by copying `raylib_vita.cpp` and removing
-   GXM.
-4. **GLES shaders.** Add a `#version 300 es` prologue chosen at compile time;
-   replace the two `glClearDepth` calls with `glClearDepthf`; widen the first
-   `#if` to the new target and settle the `PS2X_NATIVE_VITA` question (item 3
-   above).
-5. **First picture.** Boot to the logos with every effect off; then the
-   title screen; then the intro.
-6. **Defaults.** Start from the Vita's: render scale 1 (512x448 on a 640x480
-   screen), fewer particles, 30 fps cap in scenes (`SOTC_CAP30`), and the
-   `[gl:mem]` budget lowered for ~1 GB total RAM **(check the RAM of this
-   unit)**.
-7. **Measure** with the existing frame log and `[gl:mem]`, before deciding
-   what else to cut.
+## First target checks
+
+Run these on the exact R36S image that will launch the game:
+
+```sh
+uname -m
+getconf LONG_BIT
+dpkg --print-architecture 2>/dev/null || true
+file /bin/sh
+```
+
+Then record the actual SDL2 video drivers, EGL version, GLES version and GLSL
+version exposed by the image. Previous device experiments with libmali and
+Vulkan are useful evidence that the GPU driver works, but they do not prove
+that SDL2 can create the required EGL/GLES context.
+
+## Work sequence
+
+1. **Freeze the target ABI.** Record kernel architecture, userspace ABI,
+   compiler triple, libc and the exact SDL2/EGL/GLES libraries. Build a tiny
+   SDL2/EGL/GLES smoke test before changing Celosia.
+2. **Validate host setup.** Run the existing setup pipeline on Linux x86_64,
+   including module capture and generation of runner sources.
+3. **Add the target build.** Add an explicit R36S/Linux ARM build option and
+   toolchain configuration selected from the ABI check. Keep it separate from
+   Vita options and do not hard-code ARMHF or AArch64 until the device result
+   is recorded.
+4. **Add the platform adapter.** Implement only the raylib API surface Celosia
+   uses, backed by SDL2 and EGL/GLES. Keep Vita kernel/GXM code isolated.
+5. **Enable the native renderer on GLES.** Add the Linux backend selection,
+   GLES shader variants and the minimal API compatibility changes. Preserve
+   macOS and Vita implementations.
+6. **Reach the first picture.** Test boot logos, title screen and intro with
+   expensive effects disabled; then enable effects incrementally.
+7. **Tune against measurements.** Set conservative render-target and texture
+   budgets for 1 GB shared memory, then profile frame time and memory before
+   adding CPU-specific optimizations.
+
+Each step should land as a small change with a build or device test attached.
