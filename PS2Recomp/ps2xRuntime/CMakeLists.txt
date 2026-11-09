@@ -96,6 +96,8 @@ else()
 
     if(PS2X_IS_ANDROID)
         set(PLATFORM "Android" CACHE STRING "" FORCE)
+    elseif(PS2X_IS_LINUX)
+        set(PLATFORM "SDL" CACHE STRING "" FORCE)
     endif()
 
     FetchContent_Declare(
