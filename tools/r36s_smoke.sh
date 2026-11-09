@@ -24,7 +24,7 @@
 # Entrada (PS2X_INPUT_SCRIPT): 300v:START:12;+120v:START:12;+120v:START:12;+120v:START:12;+150v:CROSS:8;+150v:CROSS:8;+150v:CROSS:8;+150v:CROSS:8
 #
 # Binario no device: /roms/ports/SotC_Celosia/ps2sotc_aarch64_pie_sdl (md5 d9a17982dc91bcefb1beb895c27521b6, 51.350.952 B)
-# Rodar como SCUS_974.72 (copia do NICO.ELF no mesmo dir).
+# Rodar com ./ps2sotc_aarch64_pie_sdl SCUS_974.72 (copia do NICO.ELF via cp -f no mesmo dir); sem PS2X_DEFAULT_BOOT_ELF, o binario exige o guest ELF em argv[1].
 #
 # Acesso: WSL Ubuntu com sshpass; ark@192.168.2.121 senha ark. Usar SEMPRE arquivo + ssh 'bash -s' < arquivo.
 #   sshpass -p ark ssh ark@192.168.2.121 'bash -s -- <tag> <outdir> [duracao] [envs...]' < tools/r36s_smoke.sh
@@ -168,7 +168,7 @@ ls -lh /roms/ports/SotC_Celosia/ps2sotc_aarch64_pie_sdl
 md5sum /roms/ports/SotC_Celosia/ps2sotc_aarch64_pie_sdl
 } >> "$SUMMARY" 2>&1
 
-timeout "$DURATION" env SOTC_NATIVE="$SOTC_NATIVE" PS2X_NATIVE_IOP_BOOT="$PS2X_NATIVE_IOP_BOOT" PS2X_NATIVE_IOP="$PS2X_NATIVE_IOP" PS2X_GS_NODRAW="$PS2X_GS_NODRAW" PS2X_NO_SPU2_AUDIO="$PS2X_NO_SPU2_AUDIO" PS2X_STATS="$PS2X_STATS" PS2X_TRACE_PAD="$PS2X_TRACE_PAD" PS2X_INPUT_CLOCK="$PS2X_INPUT_CLOCK" PS2X_TRACE_SYSCALLS="$PS2X_TRACE_SYSCALLS" PS2X_DUMP_RAM_AT_SECONDS="$PS2X_DUMP_RAM_AT_SECONDS" PS2X_DUMP_RAM_PATH="$RAM_BIN" PS2X_INPUT_SCRIPT="$INPUT_FILE" "${ENVS[@]}" ./ps2sotc_aarch64_pie_sdl > "$GAME_LOG" 2>&1 || true
+timeout "$DURATION" env SOTC_NATIVE="$SOTC_NATIVE" PS2X_NATIVE_IOP_BOOT="$PS2X_NATIVE_IOP_BOOT" PS2X_NATIVE_IOP="$PS2X_NATIVE_IOP" PS2X_GS_NODRAW="$PS2X_GS_NODRAW" PS2X_NO_SPU2_AUDIO="$PS2X_NO_SPU2_AUDIO" PS2X_STATS="$PS2X_STATS" PS2X_TRACE_PAD="$PS2X_TRACE_PAD" PS2X_INPUT_CLOCK="$PS2X_INPUT_CLOCK" PS2X_TRACE_SYSCALLS="$PS2X_TRACE_SYSCALLS" PS2X_DUMP_RAM_AT_SECONDS="$PS2X_DUMP_RAM_AT_SECONDS" PS2X_DUMP_RAM_PATH="$RAM_BIN" PS2X_INPUT_SCRIPT="$INPUT_FILE" "${ENVS[@]}" ./ps2sotc_aarch64_pie_sdl SCUS_974.72 > "$GAME_LOG" 2>&1 || true
 
 {
 echo "=== SUMMARY TAG=$TAG OUTDIR=$OUTDIR_ABS DURATION=$DURATION ==="
