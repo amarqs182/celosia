@@ -39,8 +39,10 @@ namespace sotc_decomp
 
 namespace
 {
-    // Entry point of GAMECORE.XFF as laid out by the game's own loader.
-    constexpr uint32_t kGamecoreEntry = 0x01344788u;
+    // First recompiled function of GAMECORE.XFF. The loader's JALR lands at
+    // +8 (0x01344788), inside it; dispatchGuestBranch runs the containing
+    // function (start=0x01344780), so the hook must wrap the start.
+    constexpr uint32_t kGamecoreEntry = 0x01344780u;
 
     PS2Runtime::RecompiledFunction g_gamecoreEntry = nullptr;
 
