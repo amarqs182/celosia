@@ -485,6 +485,9 @@ add_library(ps2_runtime STATIC
 # Native renderer: the front picks Metal (macOS) or OpenGL (macOS with
 # SOTC_NATIVE_GL=1, the Vita through vitaGL).
 target_sources(ps2_runtime PRIVATE src/lib/native/native_renderer.cpp src/lib/native/native_renderer_gl.cpp src/lib/native/native_recorder.cpp)
+if(PS2X_IS_LINUX)
+    target_compile_definitions(ps2_runtime PRIVATE PS2X_GLES3=1)
+endif()
 # The scene recorder's blocks are zlib-compressed (the Vita SDK has libz).
 target_link_libraries(ps2_runtime PUBLIC z)
 
