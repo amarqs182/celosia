@@ -74,6 +74,28 @@ namespace
             if (ps2x::iop::IopSubsystem *iop = runtime->iopSubsystem())
                 iop->enterNativeMode();
         }
+        // SOTC_GAMECORE_ENTRY=0x13447c8: controlled experiment on where the
+        // GAMECORE should start. The loader's JALR lands at 0x01344788, inside
+        // the 0x01344780 function; with this set, resume at the given address
+        // instead of running the rest of that function. Read once; unset or
+        // invalid leaves the behaviour identical to before.
+        static const uint32_t redirectTarget = [] {
+            const char *env = std::getenv("SOTC_GAMECORE_ENTRY");
+            if (!env)
+                return 0u;
+            char *end = nullptr;
+            const unsigned long v = std::strtoul(env, &end, 0);
+            if (end == env || *end != '\0' || v == 0ul || v > 0xfffffffful)
+                return 0u;
+            return static_cast<uint32_t>(v);
+        }();
+        if (ctx->pc == 0x01344788u && redirectTarget != 0u)
+        {
+            std::fprintf(stderr, "[ovr] gamecoreEntryRedirect from=0x%08x to=0x%08x\n",
+                         static_cast<unsigned>(ctx->pc), static_cast<unsigned>(redirectTarget));
+            ctx->pc = redirectTarget;
+            return;
+        }
         g_gamecoreEntry(rdram, ctx, runtime);
     }
 
