@@ -265,7 +265,7 @@ Corrections vs. the previous revision (marked): the statement that "0x0d/0x0e
 are the bottleneck" is **corrected** — they were probed at boot only and are
 not the stall cause (see H3). The statement that "input does not reach the
 game" is **corrected/refined** — input reaches libpad (`[pad2] input
-buttons=`) but the guest ring buffer in 0x118d680 is never written (see H4).
+buttons=`) but the guest ring buffer in 0x118d680 is never written (see H4). The statement that the stall is a post-JALR semaphore deadlock (gid=14), and that `PS2X_GS_NODRAW=0` is mandatory with `SOTC_NATIVE=1`, is **corrected** (2026-11-09 — ver « Sessão 2026-11-09 », itens A e C).
 
 #### Matriz A/B/C (3 runs × 70 s, RAM dump at t=35 s)
 
@@ -301,7 +301,9 @@ does **not** depend on input — it is the loading-screen redraw.
   never via `sceCdRead` (0 post-boot calls) nor logged `vfs:read`.
 - `[sotc] GAMECORE entered` (`sotc_overrides.cpp:67-68`) **never** appears.
 
-#### Semaphore deadlock — central finding (measured)
+#### Semaphore deadlock — central finding (measured) — **corrigido (2026-11-09, item A)**
+
+> **Corrigido (2026-11-09):** `gid=14` (`sceMc2Init`, global em `rdram+0x151E24`, 5 funções `sceMc2*Async`) e `gid=3` (`PreparePowerOff`, `rdram+0x13A118`) são workers ociosos — threads 7 e 2, comportamento normal, **não** deadlock. Ver « Sessão 2026-11-09 », item A.
 
 - 16 semaphores created (gid 1..16); gid=14 and gid=15 with init count **0**,
   max 127.
@@ -396,7 +398,7 @@ does **not** depend on input — it is the loading-screen redraw.
    `mach-o/dyld.h` (commit `5380723`).
 5. **Environment `PS2X_GS_NODRAW=0` is mandatory with `SOTC_NATIVE=1`** —
    without it, `skipRaster()` returns true (because `SOTC_NATIVE=1` enables
-   `native_renderer::shown()`) and **no** drawing happens.
+   `native_renderer::shown()`) and **no** drawing happens. **corrigido (2026-11-09, item C):** só vale com `shown()==true`; no R36S atual `shown()==false`, logo `skipRaster()` é false, o desenho continua, e `PS2X_GS_NODRAW=1` não alivia o stall.
 6. **Input injection works** in libpad: `[pad2] input buttons=0xfff7`
    (START), `0xbfff` (CROSS), `0xffbf` (DOWN).
 
@@ -405,6 +407,8 @@ does **not** depend on input — it is the loading-screen redraw.
 - `skipRaster()` (`gs_frontend.cpp:826-832`): with `SOTC_NATIVE=1` and
   without `PS2X_GS_NODRAW=0`, `m_backend->SubmitVuBatch` is never called →
   0 draws.
+
+  **corrigido/refinado (2026-11-09, item C):** o « 0 draws » só vale com `shown()==true`; com `shown()==false` (caso atual) `skipRaster()` é false, `SubmitVuBatch` **é** chamado (gs_frontend.cpp:818) e os uploads seguem (gs_frontend.cpp:1937).
 - `shownFps` ≠ real swaps: `ps2_runtime.cpp:3450` measures
   `ps2_stats::presentedFrames/5` (incremented only in
   `gs_async_backend.cpp:263`), while `SDL_GL_SwapWindow` is called **every
@@ -493,7 +497,7 @@ does **not** depend on input — it is the loading-screen redraw.
   91 s at 2.3 fps, `gsWait(space 417.1)`), so the primitive explosion
   (ln 1952→16160, sprite 123→1010 in A; 38720/2419 in A3) **does not depend
   on input** — it is the loading-screen redraw.
-- **Central finding (confirmed): post-JALR semaphore deadlock.** 16
+- **Central finding (corrigido 2026-11-09, item A): post-JALR semaphore deadlock — a leitura de gid=14/gid=3 como causa foi refutada (são workers ociosos; ver « Sessão 2026-11-09 », item A).** 16
   semaphores created (gid 1..16; gid=14 and gid=15 with init count **0**,
   max 127) and at least **one** `signal` in the whole log
   (`[ee:sema] signal gid=6 cnt=0 waiters=1`, mx_A.log:10509). Loader thread
@@ -508,14 +512,14 @@ does **not** depend on input — it is the loading-screen redraw.
   (not a cause).
 - `displayFbp=0` + black `/dev/fb0` = presentation gap (loading screen
   probably on FBP 224, or the upload does not mirror into what the dump
-  reads).
+  reads). **refinado (2026-11-09, item C):** sem `sceGsResetGraph` do guest o display env nunca é programado (`Kernel/Stubs/GS.cpp:786` -> `gs_cpu_backend.cpp:3613-3617`), logo `Present` não recebe request válido e a imagem nunca chega ao swap (uploads continuam).
 
 ### Next steps (ordered)
 
 1. **Diff with the upstream**: `git diff origin/main..HEAD` = 20 files /
    +2.418 (the whole Linux layer is local) — compare and decide what is
    missing (worklist item 36).
-2. **Resolve the semaphore deadlock**: who should signal gid=9 and gid=14
+2. **Semaphore residuals (gid=9) — corrigido (2026-11-09, item A):** gid=14/gid=3 sao workers ociosos, nao deadlock; quem deve sinalizar gid=9
    (thread 1? loader id=6? an interrupt handler?). Use `PS2X_TRACE_SCHED`
    (`EeScheduler.cpp:2138`) and `[ee:sema]` to instrument; resolve PCs
    0x103ab0/0x105018/0x11b488/0x1344788 via `tools/guest_profile.py` (needs
@@ -556,3 +560,45 @@ does **not** depend on input — it is the loading-screen redraw.
   (20.640 / 81.965 / 20.570 non-black pixels), pad ring at 0x118d680
   100% zero in all runs.
 - Smoke test made repeatable: `tools/r36s_smoke.sh` (see docs/r36s_port.md).
+
+### Sessão 2026-11-09 — semáforos ociosos, baseline do run e caminho de apresentação
+
+Medido em 09/11/2026, sobre a seção R36S acima. As linhas de código citadas foram
+reconferidas nesta sessão. Onde a revisão anterior estava factualmente errada, o
+texto original foi preservado e marcado como **corrigido**.
+
+#### A) Semáforos ociosos — hipóteses refutadas
+
+- `gid=14` **não** é deadlock: é criado por `sceMc2Init` (`0x11a208/0x11a22c/0x11a250`, cria gid13/14/15); o global fica em `rdram+0x151E24` e é sinalizado por 5 funções `sceMc2*Async`. A thread 7 é o worker MC2 ocioso — comportamento normal.
+- `gid=3` **não** é o bloqueio: pertence a `PreparePowerOff` (global `rdram+0x13A118`); a thread 2 é worker de power-off ocioso.
+- Refutadas também: IOP nativo sinalizando gid=14; falta de `.cmd`; syscalls 0x0d/0x0e como gargalo; `PS2X_GS_NODRAW=1` aliviando o stall (ver item C); redirect do entry do GAMECORE alterando o resultado (ver item D).
+
+#### B) Baseline do run (150 s)
+
+- 98% do log é churn de scheduler; só a thread 5 (`iosRecvMsg`, `pc=0x1b11a8`) acorda a ~32 Hz.
+- `sceCdRead=0` e `sceCdSync=0` no run inteiro; apenas 2 `sceCdSearchFile` OK: `MANAGER.XFF` e `GAMECORE.XFF`.
+- 128 uploads (`frame:upload`) sem wrap.
+- Imagens do device idênticas às do host (md5): `GAMECORE.XFF 4c297ea0…`, `MANAGER.XFF fe2252e5…`, `KERNEL.XFF 607aa94a…`, `NICO.ELF 0c08d02e…` -> sem mismatch de versão.
+- Threads ao fim: tid1 `0x103ab0` (sleep), tid2 `waitId=3`, tid5 RUNNING `0x1b11a8`, tid7 `waitId=14`, tid4/8/9/10 dormindo.
+
+#### C) Caminho de apresentação (código, arquivo:linha reconferidos)
+
+- Não existe `GS::Present` em `platform/linux/raylib_linux.cpp`. O swap real é `EndDrawing()` -> `SDL_GL_SwapWindow` (`raylib_linux.cpp:673-676`), e o desenho de textura GL nativa é `DrawTexturePro` (`:703-718`).
+- O loop principal (`src/main.cpp`, `PS2Recomp/ps2xRuntime/src/main.cpp`) **não** chama `BeginDrawing`/`EndDrawing`/`DrawTexturePro`; o present do renderer nativo vem de `native_renderer_gl.cpp`: `endFrame()` (`:7010`) -> `presentPending` (`:6766-6769`) -> `presentNow()` (`:4485`).
+- `PS2X_GS_NODRAW` suprime raster/VU1; o upload também é suprimido **quando** `skipRaster()` é true **e** `m_trxdir != 1` (`gs_frontend.cpp:1936-1937`). No estado atual `native_renderer::shown()` é false → `skipRaster()` é false → os uploads continuam. `GS::skipRaster()` (`gs_frontend.cpp:826-832`, comentário `:822-825`) retorna `noDraw != 0 && native_renderer::shown()`; em `:818` `if (!skipRaster()) m_backend->SubmitVuBatch(*batch)` -> explica por que `PS2X_GS_NODRAW=1` não aliviou o stall.
+- Ring de frames é 8 (`native_renderer_gl.cpp:213-214` `kFrames = 8`, `:269` `g_frames[g_presents % kFrames]`) — o « 128 » **não** é índice de ring; o valor 128 aparece em `:290` como delta de cena (`b.last - a.last < 128u`). « Estagnação do idx em 127 » é hipótese, não fato de código.
+- Nenhum `#ifdef`/`getenv("DISPLAY")`/`getenv("RENDERER")` desativa o present no Linux/aarch64; o único `#ifdef` em `gs_cpu_backend.cpp:3601` `Present()` é `__vita__` (`:3607-3612`).
+- Ligação GS->present: `sceGsResetGraph` (`Kernel/Stubs/GS.cpp:786`, pacote GIF com PMODE/SMODE2/DISPFB/DISPLAY/BGCOLOR em `:805-841`) -> `gs_cpu_backend.cpp:3613-3617` (`dispfb1`/`display1`, `decodeDisplaySize`). **Sem `sceGsResetGraph` do guest, o display env nunca é programado e `Present` não recebe request válido** — uploads continuam, imagem nunca chega ao swap. (Outros stubs: `sceGsSetDefDispEnv` `:999`, `sceGsSyncV` `:1281`.)
+
+#### D) Experimento de entry do GAMECORE (refutado)
+
+- `SOTC_GAMECORE_ENTRY` é opt-in, default desligado; commits `1fc8703` (hook em `0x01344780`) e `4502ab1` (experimento).
+- Rodadas E1 (`->0x13447c8`) e E2 (`->0x1344708`) produziram estado final idêntico ao controle F3: mesmos 10 `vfs:open`, 128 uploads, `mscal=0`, `sceCdRead=0`; thread 6 termina com `pc=0x3196860` (endereço inválido, > 32 MB).
+- Após o JALR do loader (`source=0x1b5bcc -> target=0x1344788`) nenhum evento novo do guest (sem `vfs:open`, `printf`, `ios:*`, `guest-branch`); sem `sceGsResetGraph`/`scePadInit` em 150 s; VU1 parado; `shownFps≈0`.
+- `0x1344788` cai no meio de `gamecore_sub_01344708` (`jal GAMEUTIL_get_node_posi_by_id`); o init aparente é `0x13447C8` (`init gc/initgcmain/initgcmaingp/initgcchartest`). Entry vem de `lw 0x1C($s1)` -> `lw 0x10($v0)` -> `jalr` em `IosCdvdManagerSimulation_0x1b5a00`.
+- **Refutado (2026-11-09):** não existe deslocamento de base de 0x40. Os encodings do recompilado (`jal 0x0C41FDC8` em `0x1344788`, `jal 0x0C4D16EC` em `0x13447D0`, `lui 0x3C020146` em `0x134470C`) não ocorrem em nenhum byte de `build/watch/GAMECORE.XFF` em LE nem BE — mas isso **não** indica build diferente: o `.text` do XFF é relocável (6 tabelas de relocação, ~39 mil entradas, `R_MIPS_26` para os `jal`), logo o alvo absoluto não é armazenado literalmente. O container `xff2` **não é comprimido** (varredura completa: nenhum fluxo zlib/gzip/xz/lz4/zstd válido); `.text` = offset `0x6968`, tamanho `0x12b580`, base de carga `0x40000000` (`filePt 0x40016968 = 0x6968 + 0x40000000`); `0x1339e68` é o espaço de vínculo declarado no `.cmd`, um terceiro espaço de endereço. Correspondência de build entre o módulo do XFF e a recompilação permanece **inconclusiva** — exigiria aplicar as ~39k relocações ao `.text` e só então comparar. Ferramenta offline existente: `tools/xff.py` (lê header/sections/imports; não aplica relocações).
+
+#### E) Insumos no host
+
+- `build/watch/GAMECORE.XFF`, `MANAGER.XFF` e `GAMECORE.XFF.cmd` (o `.cmd` define `SECTIONS { .text 0x1339e68 … }` e `isysGetXffEntryPointPreRelocation = 0x001b5cd0`); ELF do guest em `build/SCUS_974.72`.
+- Evidências: `build/fix2_game.log`, `build/sem_game.log`, `build/disc_D0.log`, `build/entry_E1.log`, `build/entry_E2.log`, `build/nod_F1.log`, `build/nod_F2.log`, `build/nod_F3.log`.

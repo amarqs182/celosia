@@ -63,8 +63,8 @@ reflection detail) is what exists so far (STATUS.md, Settings).
 ## R36S (Linux aarch64)
 
 Target: boot and play SotC (SCUS-97472) on R36S (aarch64, SDL2/KMSDRM +
-GLES) with no x86 CPU emulation. State as of 2026-11-08: loading spinner
-on screen, game stuck at loading (see STATUS.md, "R36S").
+GLES) with no x86 CPU emulation. State as of 2026-11-09: loading spinner
+on screen, game stuck at loading (ver STATUS.md, « Sessão 2026-11-09 »; 2026-11-08 em STATUS.md « R36S »).
 
 | # | Item | Status | Notes |
 |---|------|--------|-------|
@@ -75,17 +75,23 @@ on screen, game stuck at loading (see STATUS.md, "R36S").
 | 36 | Compare with the upstream (HenryKun55 r36s) | todo | PRIORIDADE 1: git diff origin/main..HEAD = 20 arquivos/+2.418 (toda a camada Linux é local); upstream com IOP nativo também não leva CDROM/FILEIO e roda no Mac/Vita |
 | 37 | `enableHostClockSync` in `applySotcOverrides` | done | dd53b12; sotc_overrides.cpp:941; gameFps=60, idle spin eliminado |
 | 38 | `hostFps=` metric (real `SDL_GL_SwapWindow` swaps) | done | 11a9b6d; ps2_runtime.cpp:3450; hostFps≈57-60 real (SDL_GL_SwapWindow swaps) |
-| 39 | `PS2X_GS_NODRAW=0` in the run environment | done | PS2X_GS_NODRAW=0 obrigatório com SOTC_NATIVE=1 (skipRaster()) |
+| 39 | `PS2X_GS_NODRAW=0` in the run environment | done | corrigido 2026-11-09 (item C): PS2X_GS_NODRAW=0 só é obrigatório com shown()==true; no R36S atual shown()==false -> skipRaster() false, o desenho continua e PS2X_GS_NODRAW=1 não alivia o stall |
 | 40 | CMakeLists includes `game/overrides/*.cpp` in non-Vita builds | done | 5380723 (game/overrides em builds não-Vita) |
 | 41 | `#if defined(__APPLE__)` around `mach-o/dyld.h` | done | 5380723 (dyld.h sob __APPLE__ → dlfcn.h/dladdr) |
 | 42 | VMQ | done | citado concluído em rodadas w37-w44 |
-| 43 | Deadlock de semáforos após o entry do GAMECORE (gid 7/9/14; 1 signal) | doing | PS2X_TRACE_SCHED=1 + [ee:sema]; ver docs/r36s_port.md |
+| 43 | Deadlock de semáforos após o entry do GAMECORE (gid 7/9/14; 1 signal) — **CORRIGIDO 2026-11-09**: gid=14 (sceMc2Init, rdram+0x151E24) e gid=3 (PreparePowerOff, rdram+0x13A118) são workers ociosos, não deadlock | doing | gid 7/9 seguem em investigação; PS2X_TRACE_SCHED=1 + [ee:sema]; STATUS 2026-11-09 item A; ver docs/r36s_port.md |
 | 44 | Resolver PCs do guest (0x103ab0, 0x105018, 0x11b488, 0x1344788) | todo | tools/guest_profile.py via functions.csv, ou mapas dos .XFF;1.cmd (FlushPadHistory=0x114b0a8, padSysGet=0x104e78) |
 | 45 | Confirmar fioRead do .cmd (fd=12) devolve 77.395 bytes | todo | Kernel/Syscalls/FileIO.cpp:160; sem [vfs:read] no log |
 | 46 | Caminho do CD/IOP no Linux (CDREAD/FILEIO HLE ou EE-side) | todo | ver item 34 |
 | 47 | Popular anel de pad em 0x118d680 (30 amostras × 0x78, botões +0x70) | todo | Hipótese do IOP nativo REFUTADA (zero em A emulado, B nativo, C emulado); achar quem escreve (decomp_padhist.cpp:5-16) |
 | 48 | Memory card com save (memcards/Mcd001.ps2) p/ rota de gameplay | todo | memcards/ vazio; MemoryCard2.cpp:116-123 cria em branco sem bloquear; tools/native_run.sh exige o save |
 | 49 | VU1 (VIF MSCAL) após loading avançar | todo | idem item 35 |
-| 50 | Apresentação GS→GLES (displayFbp=0, sourceFbp=224) | todo | conteúdo fica no VRAM; shownFps≈0 |
+| 50 | Apresentação GS→GLES (displayFbp=0, sourceFbp=224) | todo | conteúdo fica no VRAM; shownFps≈0; sem sceGsResetGraph do guest o display env nunca e programado (Kernel/Stubs/GS.cpp:786 -> gs_cpu_backend.cpp:3613-3617) — Present nao recebe request valido |
 | 51 | Caminho de screenshot no Linux (ExportImage) | todo | raylib_linux.cpp:894 stub → PS2X_SNAPSHOT_DIR só index.txt |
 | 52 | Script tools/r36s_smoke.sh | done | teste repetível no device com restore do EmulationStation |
+| 53 | Semáforos ociosos gid=14 (MC2) e gid=3 (power-off) refutados como deadlock | done | gid=14 criado por sceMc2Init (0x11a208/0x11a22c/0x11a250), global rdram+0x151E24, sinalizado por 5 sceMc2*Async; gid=3 é PreparePowerOff (rdram+0x13A118); threads 7/2 são workers ociosos. STATUS 2026-11-09 item A |
+| 54 | Baseline do run de 150 s no R36S | done | 98% churn de scheduler, só tid5 (iosRecvMsg, pc=0x1b11a8) a ~32 Hz; sceCdRead=0/sceCdSync=0, só 2 sceCdSearchFile OK (MANAGER.XFF, GAMECORE.XFF); 128 uploads sem wrap; md5 device=host (GAMECORE 4c297ea0…, MANAGER fe2252e5…, KERNEL 607aa94a…, NICO.ELF 0c08d02e…); tid1 0x103ab0 sleep, tid2 waitId=3, tid5 RUNNING 0x1b11a8, tid7 waitId=14, tid4/8/9/10 dormindo. Item B |
+| 55 | Caminho de apresentação (present path) | done | sem GS::Present no Linux; swap real EndDrawing->SDL_GL_SwapWindow (raylib_linux.cpp:673-676), textura GL nativa em DrawTexturePro :703-718; present nativo via endFrame (native_renderer_gl.cpp:7010) -> presentPending (:6766-6769) -> presentNow (:4485); main.cpp não chama Begin/EndDrawing/DrawTexturePro; PS2X_GS_NODRAW suprime raster/VU1; o upload também é suprimido **quando** `skipRaster()` é true **e** `m_trxdir != 1` (`gs_frontend.cpp:1936-1937`). No estado atual `native_renderer::shown()` é false → `skipRaster()` é false → os uploads continuam (gs_frontend.cpp:818, :822-832); ring kFrames=8 (:213-214, :269; 128 é delta de cena :290); único #ifdef em Present é __vita__ (gs_cpu_backend.cpp:3607-3612); sem sceGsResetGraph do guest o display env nunca é programado (Kernel/Stubs/GS.cpp:786 :805-841 -> gs_cpu_backend.cpp:3613-3617): uploads continuam, imagem nunca chega ao swap. Item C |
+| 56 | Experimento de entry do GAMECORE (SOTC_GAMECORE_ENTRY) | done | opt-in, default off; 1fc8703 (hook 0x01344780), 4502ab1; E1 (->0x13447c8) e E2 (->0x1344708) identicos ao controle F3 (10 vfs:open, 128 uploads, mscal=0, sceCdRead=0); thread 6 pc=0x3196860 (>32 MB, inválido); apos JALR 0x1b5bcc->0x1344788 nenhum evento novo do guest; sem sceGsResetGraph/scePadInit em 150 s; 0x1344788 no meio de gamecore_sub_01344708; init aparente 0x13447C8. Item D |
+| 57 | Verificação de bytes: base .text 0x1339e68 vs endereços da recompilação (delta 0x40) | done | **REFUTADO 2026-11-09**: sem deslocamento de base 0x40. `.text` do XFF é relocável (~39k relocs `R_MIPS_26`), container `xff2` não comprimido, `.text` offs `0x6968` size `0x12b580` base de carga `0x40000000`; `0x1339e68` é o espaço de vínculo do `.cmd`. Ausência dos encodings do recompilado no XFF é esperada e não prova build diferente; correspondência de build **inconclusiva** (exigiria aplicar as relocações). Item D |
+| 58 | Insumos no host (build/watch, logs) | done | build/watch/GAMECORE.XFF, MANAGER.XFF, GAMECORE.XFF.cmd (SECTIONS .text 0x1339e68, isysGetXffEntryPointPreRelocation=0x001b5cd0); build/SCUS_974.72; evidencias fix2_game.log, sem_game.log, disc_D0.log, entry_E1.log, entry_E2.log, nod_F1/F2/F3.log. Item E |
