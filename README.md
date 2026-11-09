@@ -23,7 +23,7 @@ it talks to (DMA, IOP, SPU2) is reimplemented as host code.
 | Area | State |
 | --- | --- |
 | Boot, logos, intro cinematic | ✅ |
-| Native renderer (models, characters, 2D, fog, bloom, shadows, reflections, water…) | ✅ all 49 tracked features native |
+| Native renderer (models, characters, 2D, fog, bloom, shadows, reflections, water…) | ✅ all 35 tracked renderer features native |
 | Audio (SPU2: voices, ADSR, reverb, streaming) | ✅ |
 | Title screen, menus | ✅ |
 | Memory card (libmc2, PCSX2-compatible `memcards/Mcd001.ps2`) | ✅ |
