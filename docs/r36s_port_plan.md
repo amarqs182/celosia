@@ -2,13 +2,17 @@
 
 Goal: adapt Celosia's existing PS2 recompilation/runtime and native renderer to the
 R36S, reusing the Vita and macOS work where the abstractions are portable. This
-document is a static source review, not a claim that a Linux/ARM64 build or the
-game has already run on the device.
+document reviews the current `main` branch. The older experimental `r36s`
+branch records a Debian 13/AArch64 target and a successful start of an ELF64
+binary on the device, but its run log still stops before gameplay. Those
+results do not mean the current `main` branch contains the Linux port or that
+the game is playable on the R36S.
 
 Target hardware: RK3326, four Cortex-A35 cores, Mali-G31 MP2 and 1 GB shared
-system memory. The CPU supports AArch64, but the target image's **userspace ABI
-must be checked** before choosing a compiler or sysroot. A 64-bit kernel does
-not by itself prove that the installed userspace is 64-bit.
+system memory. The previous R36S work log identifies Debian 13/AArch64 and
+records execution of an AArch64 ELF64 binary on the device. Treat AArch64 as
+the evidenced target ABI for this port; repeat the checks below when preparing
+a clean build environment and record the exact libc and sysroot versions.
 
 ## What can be reused
 
@@ -42,18 +46,26 @@ not by itself prove that the installed userspace is 64-bit.
    and other desktop-only calls must be checked in the non-Vita branch that
    Linux will compile. Do not globally replace calls without checking the
    Vita and macOS paths.
-4. **Linux host integration is missing.**
-   The existing Linux CMake path is not the same as the Vita SDL2/vitaGL
-   shim. Add a host adapter for the target's SDL2 + EGL/GLES stack. Select
-   SDL's video driver only after checking which drivers and DRM/KMS access
-   the installed firmware actually provides; KMSDRM is a candidate, not an
-   assumption.
-5. **The setup pipeline needs a host runner.**
+4. **Linux host integration is missing from `main`.**
+   The old `r36s` branch contains an experimental SDL2/GLES raylib subset and
+   a Linux CMake path, but those changes are not in `main` and should not be
+   copied wholesale: the shim still contains unimplemented input/misc
+   functions and TODOs. Rebase the useful parts onto current `main` in small
+   changes. Select SDL's video driver only after checking which drivers and
+   DRM/KMS access the installed firmware actually provides.
+5. **The Linux GL context is not connected to the native renderer.**
+   Current `ps2_runtime.cpp` calls `native_renderer::setGlContext` for
+   macOS and Vita, but has no Linux path. The old branch's Linux GL shader
+   code alone therefore does not establish a working native GLES backend.
+   Design the SDL context ownership/sharing between the main and render
+   threads before enabling `SOTC_NATIVE_GL`; a single SDL GL context cannot
+   be current on two threads at once.
+6. **The setup pipeline needs a host runner.**
    `./celosia setup` captures module state by running the generated host
    runner. First validate this flow on the Linux development machine. The
    R36S target runner should then be cross-compiled using a sysroot that
    matches the device ABI and its SDL2/EGL/GLES libraries.
-6. **Memory and performance must be measured on the device.**
+7. **Memory and performance must be measured on the device.**
    The R36S has 1 GB shared memory. Revisit render-target and texture budgets
    before enabling all effects. Do not infer CPU/GPU performance from clock
    rates or Vita results alone; record frame time, GPU behavior and memory
@@ -61,7 +73,9 @@ not by itself prove that the installed userspace is 64-bit.
 
 ## First target checks
 
-Run these on the exact R36S image that will launch the game:
+Repeat these on the exact R36S image that will launch the game. The previous
+work log already identifies the device as Debian 13/AArch64; these commands
+make that environment reproducible:
 
 ```sh
 uname -m
@@ -77,15 +91,14 @@ that SDL2 can create the required EGL/GLES context.
 
 ## Work sequence
 
-1. **Freeze the target ABI.** Record kernel architecture, userspace ABI,
-   compiler triple, libc and the exact SDL2/EGL/GLES libraries. Build a tiny
+1. **Freeze the build environment.** Reconfirm AArch64 userspace, compiler
+   triple, libc and the exact SDL2/EGL/GLES libraries. Build a tiny
    SDL2/EGL/GLES smoke test before changing Celosia.
 2. **Validate host setup.** Run the existing setup pipeline on Linux x86_64,
    including module capture and generation of runner sources.
-3. **Add the target build.** Add an explicit R36S/Linux ARM build option and
-   toolchain configuration selected from the ABI check. Keep it separate from
-   Vita options and do not hard-code ARMHF or AArch64 until the device result
-   is recorded.
+3. **Add the target build.** Add an explicit R36S/Linux AArch64 build option
+   and toolchain configuration matching the recorded device sysroot. Keep it
+   separate from Vita options.
 4. **Add the platform adapter.** Implement only the raylib API surface Celosia
    uses, backed by SDL2 and EGL/GLES. Keep Vita kernel/GXM code isolated.
 5. **Enable the native renderer on GLES.** Add the Linux backend selection,
