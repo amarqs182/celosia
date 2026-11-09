@@ -1536,16 +1536,20 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         uint32_t width = 0, height = 0;
     };
 
+    static void attachDepthStencil(GLuint depthTexture)
+    {
+#if defined(PS2X_GLES3)
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depthTexture, 0);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_TEXTURE_2D, depthTexture, 0);
+#else
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, depthTexture, 0);
+#endif
+    }
+
 #if defined(PS2X_GLES3)
 #ifndef GL_DEPTH_CLAMP_EXT
 #define GL_DEPTH_CLAMP_EXT 0x864F
 #endif
-
-    static void attachDepthStencil(GLuint depthTexture)
-    {
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depthTexture, 0);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_TEXTURE_2D, depthTexture, 0);
-    }
 
     static bool hasGlExtension(const char *name)
     {
