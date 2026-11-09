@@ -19,6 +19,10 @@ a clean build environment and record the exact libc and sysroot versions.
 - The game code emitted by PS2Recomp is C++. The setup pipeline generates the
   runner sources; a separate target build can compile those sources for the
   R36S without recompiling the game's MIPS code on the device.
+- The top-level `PS2Recomp/CMakeLists.txt` already recognizes `aarch64`,
+  `arm64` and `ARM64`, and enables the AArch64 NEON/SSE2NEON path. Use an
+  AArch64 toolchain and firmware-matched sysroot for cross-compilation; do not
+  use the 32-bit ARMHF toolchain or the `__arm__ && !__aarch64__` code path.
 - The runtime, PS2 subsystem emulation, game overrides and most of the native
   renderer's draw logic are valuable starting points. Vita-specific kernel,
   allocator, display and GXM calls are not portable platform abstractions.
@@ -91,9 +95,12 @@ that SDL2 can create the required EGL/GLES context.
 
 ## Work sequence
 
-1. **Freeze the build environment.** Reconfirm AArch64 userspace, compiler
-   triple, libc and the exact SDL2/EGL/GLES libraries. Build a tiny
-   SDL2/EGL/GLES smoke test before changing Celosia.
+1. **Freeze the build environment.** Reconfirm the exact AArch64 compiler
+   triple, libc and SDL2/EGL/GLES libraries. For cross-compilation, use an
+   `aarch64-linux-gnu` toolchain with a sysroot copied from the target
+   firmware; a native AArch64 build on the R36S is an alternative only if its
+   compiler and available memory are sufficient. Build a tiny SDL2/EGL/GLES
+   smoke test before changing Celosia.
 2. **Validate host setup.** Run the existing setup pipeline on Linux x86_64,
    including module capture and generation of runner sources.
 3. **Add the target build.** Add an explicit R36S/Linux AArch64 build option
