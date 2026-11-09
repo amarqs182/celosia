@@ -93,6 +93,26 @@ namespace
         return 0;
     }
 
+    // PS2X_TRACE_SEMA_PC=1: [ee:sema] create/block/signal gain caller pc/ra
+    // (the running thread's context already carries them; no signature change).
+    bool traceSemaPc()
+    {
+        static const bool enabled = std::getenv("PS2X_TRACE_SEMA_PC") != nullptr;
+        return enabled;
+    }
+
+    void semaCallerPcRa(EeScheduler &scheduler, uint32_t &pc, uint32_t &ra)
+    {
+        pc = 0;
+        ra = 0;
+        if (const GuestThread *self = scheduler.currentThread())
+        {
+            const R5900Context &ctx = self->activeContext();
+            pc = ctx.pc;
+            ra = getRegU32(&ctx, 31);
+        }
+    }
+
 }
 
 EeScheduler::EeScheduler(PS2Runtime &runtime)
@@ -1154,7 +1174,15 @@ int EeScheduler::createSemaphore(int initCount, int maxCount, uint32_t attr, uin
         static std::atomic<unsigned> semaCreateCount{0};
         if (semaCreateCount.fetch_add(1u) < 400u)
         {
-            std::fprintf(stderr, "[ee:sema] create gid=%d init=%d max=%d\n", id, initCount, maxCount);
+            if (traceSemaPc())
+            {
+                uint32_t callerPc = 0, callerRa = 0;
+                semaCallerPcRa(*this, callerPc, callerRa);
+                std::fprintf(stderr, "[ee:sema] create gid=%d init=%d max=%d pc=0x%08x ra=0x%08x\n",
+                             id, initCount, maxCount, callerPc, callerRa);
+            }
+            else
+                std::fprintf(stderr, "[ee:sema] create gid=%d init=%d max=%d\n", id, initCount, maxCount);
         }
     }
     publishSnapshot();
@@ -1192,9 +1220,19 @@ int EeScheduler::signalSemaphore(int id, bool interruptSafe)
         static std::atomic<unsigned> semaSignalCount{0};
         if (semaSignalCount.fetch_add(1u) < 400u)
         {
-            std::fprintf(stderr, "[ee:sema] signal gid=%d cnt=%d waiters=%d\n",
-                         id, object ? object->count : -1,
-                         object ? static_cast<int>(object->waiters.size()) : -1);
+            if (traceSemaPc())
+            {
+                uint32_t callerPc = 0, callerRa = 0;
+                semaCallerPcRa(*this, callerPc, callerRa);
+                std::fprintf(stderr, "[ee:sema] signal gid=%d cnt=%d waiters=%d pc=0x%08x ra=0x%08x\n",
+                             id, object ? object->count : -1,
+                             object ? static_cast<int>(object->waiters.size()) : -1,
+                             callerPc, callerRa);
+            }
+            else
+                std::fprintf(stderr, "[ee:sema] signal gid=%d cnt=%d waiters=%d\n",
+                             id, object ? object->count : -1,
+                             object ? static_cast<int>(object->waiters.size()) : -1);
         }
     }
     if (!object)
@@ -1272,7 +1310,15 @@ void EeScheduler::waitSemaphore(int id)
         static std::atomic<unsigned> semaBlockCount{0};
         if (semaBlockCount.fetch_add(1u) < 400u)
         {
-            std::fprintf(stderr, "[ee:sema] block gid=%d tid=%d\n", id, m_currentThreadId);
+            if (traceSemaPc())
+            {
+                uint32_t callerPc = 0, callerRa = 0;
+                semaCallerPcRa(*this, callerPc, callerRa);
+                std::fprintf(stderr, "[ee:sema] block gid=%d tid=%d pc=0x%08x ra=0x%08x\n",
+                             id, m_currentThreadId, callerPc, callerRa);
+            }
+            else
+                std::fprintf(stderr, "[ee:sema] block gid=%d tid=%d\n", id, m_currentThreadId);
         }
     }
     std::fprintf(stderr, "[ee:th] waitsema id=%d sema=%d\n", self->id, id);
