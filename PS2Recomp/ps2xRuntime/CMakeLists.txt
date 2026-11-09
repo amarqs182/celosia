@@ -96,17 +96,17 @@ else()
 
     if(PS2X_IS_ANDROID)
         set(PLATFORM "Android" CACHE STRING "" FORCE)
-    elseif(PS2X_IS_LINUX)
-        set(PLATFORM "SDL" CACHE STRING "" FORCE)
     endif()
 
-    FetchContent_Declare(
-        raylib
-        GIT_REPOSITORY "https://github.com/raysan5/raylib.git"
-        GIT_TAG "5.5" # we will migrate to 4.2.0 later, trust me it will be better
-        GIT_PROGRESS TRUE
-    )
-    FetchContent_MakeAvailable(raylib)
+    if(NOT PS2X_IS_LINUX)
+        FetchContent_Declare(
+            raylib
+            GIT_REPOSITORY "https://github.com/raysan5/raylib.git"
+            GIT_TAG "5.5" # we will migrate to 4.2.0 later, trust me it will be better
+            GIT_PROGRESS TRUE
+        )
+        FetchContent_MakeAvailable(raylib)
+    endif()
 
     if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_ANDROID AND NOT PS2X_IS_LINUX)
         FetchContent_Declare(
