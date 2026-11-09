@@ -2,7 +2,7 @@
 # Scripted New Game -> skip intro -> walk in the shrine, then prints real game
 # frames per second (iosGPFrameInit calls, sampled every 10) per 5 s window.
 # Usage: tools/gameplay_fps.sh [seconds]   (PS2X_* switches pass through)
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 IN="35:START:0.3;45:START:0.3"
 for t in $(seq 56 2 90); do IN="$IN;$t:CROSS:0.3"; done
 IN="$IN;110:START:0.3;125:LS_UP:20"

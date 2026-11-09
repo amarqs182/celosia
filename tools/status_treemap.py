@@ -86,7 +86,7 @@ def main():
          f'<rect width="{width}" height="{total_h}" fill="#0d1117"/>']
     counts = {k: sum(1 for f in features if f['status'] == k) for k in COLOURS}
     native = counts['native']
-    s.append(f'<text x="16" y="34" fill="#e6edf3" font-size="22" font-weight="600">Celosia: what is native</text>')
+    s.append('<text x="16" y="34" fill="#e6edf3" font-size="22" font-weight="600">Celosia: what is native</text>')
     s.append(f'<text x="16" y="56" fill="#8b949e" font-size="13">{native} of {len(features)} features native '
              f'({100 * native // max(1, len(features))}%). Generated from docs/port_status.json by tools/status_treemap.py.</text>')
     lx = width - 300
