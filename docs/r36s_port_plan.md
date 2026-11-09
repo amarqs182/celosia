@@ -27,8 +27,12 @@ a clean build environment and record the exact libc and sysroot versions.
   renderer's draw logic are valuable starting points. Vita-specific kernel,
   allocator, display and GXM calls are not portable platform abstractions.
 - The renderer already has a backend interface in
-  `PS2Recomp/ps2xRuntime/src/lib/native/native_backend.h`. Keep that seam:
-  add a Linux/GLES implementation rather than pretending the R36S is a Vita.
+  `PS2Recomp/ps2xRuntime/src/lib/native/native_backend.h`. Keep that seam.
+- The old `r36s` branch contains an experimental Linux GLES renderer path:
+  `native_renderer_gl.cpp` uses GLSL ES 3.10, GLES depth-stencil targets and
+  checks the runtime ES version. This is useful implementation reference,
+  but it is based on an older upstream snapshot and must be reviewed against
+  current `main` before any code is copied.
 - The Vita raylib shim documents the small host API Celosia uses (window,
   input, texture and audio functions). Reuse the API contract, not its
   Vita-specific implementation.
@@ -54,16 +58,20 @@ a clean build environment and record the exact libc and sysroot versions.
    The old `r36s` branch contains an experimental SDL2/GLES raylib subset and
    a Linux CMake path, but those changes are not in `main` and should not be
    copied wholesale: the shim still contains unimplemented input/misc
-   functions and TODOs. Rebase the useful parts onto current `main` in small
-   changes. Select SDL's video driver only after checking which drivers and
-   DRM/KMS access the installed firmware actually provides.
+   functions and TODOs. Its `BeginDrawing()` also has an explicit TODO for
+   coordinating the host GL state with the renderer thread. Rebase useful
+   parts onto current `main` in small changes. Select SDL's video driver only
+   after checking which drivers and DRM/KMS access the installed firmware
+   actually provides.
 5. **The Linux GL context is not connected to the native renderer.**
    Current `ps2_runtime.cpp` calls `native_renderer::setGlContext` for
-   macOS and Vita, but has no Linux path. The old branch's Linux GL shader
-   code alone therefore does not establish a working native GLES backend.
-   Design the SDL context ownership/sharing between the main and render
-   threads before enabling `SOTC_NATIVE_GL`; a single SDL GL context cannot
-   be current on two threads at once.
+   macOS and Vita, but has no Linux path. The old branch also lacks a Linux
+   `setGlContext` hookup even though its renderer has an experimental
+   `__linux__` GLES implementation. That old renderer requires OpenGL ES
+   3.1 (GLSL ES 3.10) and refuses to initialize below it. Design SDL context
+   ownership/sharing between the main and render threads before enabling
+   `SOTC_NATIVE_GL`; a single SDL GL context cannot be current on two threads
+   at once.
 6. **The setup pipeline needs a host runner.**
    `./celosia setup` captures module state by running the generated host
    runner. First validate this flow on the Linux development machine. The
