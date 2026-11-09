@@ -14,6 +14,30 @@ it talks to (DMA, IOP, SPU2) is reimplemented as host code.
 
 > **No game data is included.** You need your own copy of the game.
 
+## This fork: Shadow of the Colossus on R36S
+
+This fork (`amarqs182/celosia`) carries the native port to the **R36S** handheld (aarch64 Linux). Contributions go to the **`main`** branch — the shared base with the upstream project — while **`r36s`** is the port's working line (adapted runtime, game overrides, build/smoke scripts and technical status docs), which stays behind `main` and catches up by merging. Please open pull requests against `main`, never against `r36s`.
+
+| Area | R36S (confirmed on device, 2026-11-09) |
+| --- | --- |
+| SoC | Rockchip RK3326, 4× Cortex-A35 |
+| GPU | Mali Midgard family |
+| RAM / swap | 916 MB / 512 MB |
+| Panel | 640×480 |
+| OS | Debian GNU/Linux 13 (trixie), kernel 4.4.189, `rockchip-drm` |
+| Backend | SDL2 + KMSDRM + GLES (no X11, no Wayland) |
+
+What works today:
+
+- The game ELF loads and the runtime executes the guest; the loader resolves `MANAGER.XFF` and `GAMECORE.XFF`.
+- The EE thread/semaphore system runs (16 semaphores mapped); the renderer receives image uploads.
+
+Current blocker:
+
+- After the loader's `jalr`, the guest produces no new events (no `vfs:open`, no `printf`, `sceCdRead=0`, `shownFps≈0`): nothing reaches the screen yet.
+
+Further reading: [docs/R36S_PORT.md](docs/R36S_PORT.md) (canonical port document, PT-BR), [docs/STATUS.md](https://github.com/amarqs182/celosia/blob/r36s/docs/STATUS.md) and [docs/r36s_port.md](https://github.com/amarqs182/celosia/blob/r36s/docs/r36s_port.md) (on the `r36s` branch), and [AGENTS.md](AGENTS.md) for the project's governance.
+
 ## Status
 
 ![What is native](docs/port_status.svg)
@@ -28,6 +52,7 @@ it talks to (DMA, IOP, SPU2) is reimplemented as host code.
 | New Game, intro, riding Agro, gameplay | ✅ |
 | Performance, Mac (M4 Pro) | 60 fps, drawn at 1536×1344 |
 | PS Vita | ✅ builds and runs (18–25 fps in Vita3K's intro); fidelity and speed in progress |
+| R36S (aarch64, Linux) | 🚧 in progress — port branch `r36s`; not yet at gameplay ([docs/R36S_PORT.md](docs/R36S_PORT.md)) |
 | Decompilation | started: software doubles rewritten and proven ([docs/decomp.md](docs/decomp.md)) |
 
 ## Requirements
@@ -38,6 +63,7 @@ it talks to (DMA, IOP, SPU2) is reimplemented as host code.
   `.iso` or a `.zip` containing one
 - About 10 GB of free disk space and an internet connection for the first build
   (CMake downloads raylib, imgui and sse2neon)
+- For the R36S port: aarch64 Linux (Debian 13 on the device) with SDL2 + GLES — see [docs/R36S_PORT.md](docs/R36S_PORT.md) (status: in progress)
 
 ## Quick start
 
