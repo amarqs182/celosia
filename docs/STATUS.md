@@ -229,3 +229,330 @@ Guide: [`decomp.md`](decomp.md).
 A note for fidelity work: the emulated picture's GPU rasterizer has no GS
 fog. Compare the native picture against `PS2X_GS_GPU=0` (CPU raster, exact
 GS fog), not against the default emulated view.
+
+## R36S (Linux aarch64) — status recorded 2026-11-08
+
+### Objective
+
+Port recompilation of **Shadow of the Colossus (USA SCUS-97472)** via
+PS2Recomp/Celosia to **R36S (aarch64, SDL2/KMSDRM + GLES)** so the game boots
+and runs playable, with no x86 CPU emulation.
+
+### Current state (measured, 08/11/2026)
+
+All values below were measured in this session; none are estimated. The
+working build is 51.350.952 B, md5 `d9a17982dc91bcefb1beb895c27521b6`, run
+as `SCUS_974.72` (copy of `NICO.ELF`) so that the overrides apply.
+
+| Metric | Measured value | Source |
+|---|---|---|
+| `gameFps` (EE) | 60 | `[stats]` / `enableHostClockSync()` fix (sotc_overrides.cpp:941) |
+| `hostFps` (real `SDL_GL_SwapWindow` swaps) | ≈57–60 | `ps2_runtime.cpp:3450-3452` (new metric) |
+| idle spin | eliminated (35k/s → ~445/s) | after fix 1 |
+| `mscal` / `vu1Instr` / `xgkick` | 0 / 0 / 0 | 14 samples (A2) + 35 samples (A3) |
+| triangles | **0** always | all runs |
+| lines / sprites | ~1900/frame / ~120/frame | all runs → loading screen |
+| `ps2sotc_aarch64_pie_sdl` | 51.350.952 B, md5 `d9a17982dc91bcefb1beb895c27521b6` | current build |
+| run-as name | `SCUS_974.72` (copy of `NICO.ELF`) | overrides apply |
+| GS buffers (PPMs 640×512) | 20.640 / 81.965 / 20.570 non-black pixels, bbox `x=8..639, y=192..447` and `x=3..639, y=196..511` | `PS2X_DUMP_GS_BUFFERS` |
+| `/dev/fb0` | 100% black (1.228.800 bytes zero) | measured |
+| `ExportImage` / `PS2X_SNAPSHOT_DIR` | stub on Linux (`raylib_linux.cpp:894`) → only `index.txt` | measured |
+| `[sotc] GAMECORE entered` | **never** appears | `sotc_overrides.cpp:67-68` |
+| `[ee:sema] signal` | exactly **one** in the whole log (`gid=6 cnt=0 waiters=1`, mx_A.log:10509) | measured |
+| `[syscall]` after boot | **none** (33 lines total, all before `[ld:enter]`) | `PS2X_TRACE_SYSCALLS=1` trace |
+
+Corrections vs. the previous revision (marked): the statement that "0x0d/0x0e
+are the bottleneck" is **corrected** — they were probed at boot only and are
+not the stall cause (see H3). The statement that "input does not reach the
+game" is **corrected/refined** — input reaches libpad (`[pad2] input
+buttons=`) but the guest ring buffer in 0x118d680 is never written (see H4).
+
+#### Matriz A/B/C (3 runs × 70 s, RAM dump at t=35 s)
+
+RAM dump block 0x118d680 (2×0xF98) was **100% zero** in all three runs
+(`head=0x118d638`=0, `count=0x118d63c`=0, 30 ring samples `0x00000000`,
+cur/pressed/released/any=0, analog `00 00 00 00`).
+
+| Run | Env | Result |
+|---|---|---|
+| A | `SOTC_NATIVE=1 PS2X_NATIVE_IOP_BOOT=0 PS2X_NATIVE_IOP=0` (emulated IOP, dropped=0) | pad block 100% zero |
+| B | `SOTC_NATIVE=2` (native IOP, dropped=2) | pad block 100% zero |
+| C | `SOTC_NATIVE=0` (emulated) | pad block 100% zero |
+
+Input injection works at libpad level: `[pad2] input buttons=0xfff7` (START),
+`0xbfff` (CROSS), `0xffbf` (DOWN). The stall is worse without input (run A3
+without input: t=60→151, 91 s at 2.3 fps, `gsWait(space 417.1)`); the
+primitive explosion (ln 1952→16160, sprite 123→1010 in A; 38720/2419 in A3)
+does **not** depend on input — it is the loading-screen redraw.
+
+#### Boot chain confirmed (all measured)
+
+- Loader reaches GAMECORE entry: `[ee:th] printf id=6 text=ld: output linker
+  script .cdrom0:\GAMECORE.XFF;1.cmd.` + `[vfs:open]
+  path="cdrom0:\GAMECORE.XFF;1.cmd" flags=0x602 -> fd=12` (mx_A.log:974/976)
+  + `[guest-branch:containing-function] source=0x1b5bcc target=0x1344788
+  kind=IndirectCall name=JALR` (mx_A.log:980).
+- `sceCdSearchFile` works host-side: `\MANAGER.XFF;1` → lsn `0x100000`, size
+  `0x1930bc`, 0x327 sectors; `\GAMECORE.XFF;1` → lsn `0x100328`, size
+  `0x20aea8`, 0x416 sectors.
+- The `cdrom0:` tree is served host-side from the VFS `cdRoot` =
+  `elfDirectory` (`ps2_runtime.cpp:1452-1454`, `ps2_vfs.cpp:366`). The file
+  is opened via `fioOpen`/`fioRead` (`Kernel/Syscalls/FileIO.cpp:77,160`),
+  never via `sceCdRead` (0 post-boot calls) nor logged `vfs:read`.
+- `[sotc] GAMECORE entered` (`sotc_overrides.cpp:67-68`) **never** appears.
+
+#### Semaphore deadlock — central finding (measured)
+
+- 16 semaphores created (gid 1..16); gid=14 and gid=15 with init count **0**,
+  max 127.
+- Exactly **one** `signal` in the whole log: `[ee:sema] signal gid=6 cnt=0
+  waiters=1` (mx_A.log:10509).
+- Loader thread id=6 (entry `0x1b34a0`) waits on gid=7 and gid=9, never woken.
+- Game threads id=1 (`entry=0x100010`, `pc=0x103ab0`), id=2 (`entry=0x104ff0`,
+  `pc=0x105018`, `waitId=3`) and id=7 (`entry=0x11b458`, `pc=0x11b488`,
+  waits gid=14 with cnt=0) sleep forever.
+- Kernel thread id=5 stays `RUNNING` in the idle loop (`pc=0x1b11a8`).
+- No new syscalls during the stall (trace empty after line 209).
+
+#### VU1 / GS (measured)
+
+- VU1 **never** executes in any sample (`mscal=0`, `vu1Instr=0`, `xgkick=0`
+  in all 14 samples of A2 and 35 of A3).
+- Triangles **0** always; only lines (~1900/frame) and sprites (~120/frame) —
+  the loading screen.
+- The GS **draws real content** that does not reach the screen:
+  `PS2X_DUMP_GS_BUFFERS` (PPMs 640×512) → 20.640 / 81.965 / 20.570 non-black
+  pixels, bbox `x=8..639, y=192..447` and `x=3..639, y=196..511`;
+  `/dev/fb0` is 100% black (1.228.800 bytes zero) and `ExportImage` is a
+  stub on Linux (`raylib_linux.cpp:894`) → `PS2X_SNAPSHOT_DIR` writes only
+  `index.txt`.
+
+#### Memory / cards (measured)
+
+- `memcards/`, `mc0/`, `mc1/` empty; the runtime creates a blank
+  `Mcd001.ps2` (0xFF) accepted as valid (`MemoryCard2.cpp:116-123`);
+  `CheckNewCard` does not block.
+- `MC2_D` loaded; `MCMAN`/`MCSERV` (MODULES2/) never loaded.
+- `tools/native_run.sh` requires `memcards/Mcd001.ps2`.
+
+### Environment (device facts)
+
+- Device **R36S (Debian 13 aarch64, 192.168.2.121, `ark/ark`)**, WSL Ubuntu +
+  `sshpass`; ES restored after each run (verified PID + fd card0). `/tmp` =
+  tmpfs 448M.
+- Game dir `/roms/ports/SotC_Celosia/`: `NICO.DAT` 2.667.340.678 B (NOT
+  ISO9660 — custom header, no `CD001`), `NICO.ELF` 242.940 B,
+  `GAMECORE.XFF` 2.141.864, `MANAGER.XFF` 1.650.876, `KERNEL.XFF` 415.908,
+  `STARTUP.XFF` 26, `SYSTEM.CNF` 57, `IOPRP300.IMG` 275.345, `MODULES/`
+  (SIO2MAN, DBCMAN, SIO2D, DS1O_D, USBD, PL2303, LIBSD, MC2_D, SG2IOPM1),
+  `MODULES2/` (MCMAN, MCSERV), plus the **linker scripts**
+  `GAMECORE.XFF;1.cmd` 77.395 B, `MANAGER.XFF;1.cmd` 14.366 B,
+  `KERNEL.XFF;1.cmd` 127 B (the game's symbol maps; e.g. `FlushPadHistory =
+  0x114b0a8`, `padSysGet` = `0x104e78` — they resolve guest addresses without
+  the upstream `functions.csv`).
+- Binary `ps2sotc_aarch64_pie_sdl`, 51.350.952 B, md5
+  `d9a17982dc91bcefb1beb895c27521b6`; must run as `SCUS_974.72` (copy of
+  `NICO.ELF`) for the overrides to apply.
+- Build: `D:\tools\dev\ninja\ninja.exe -C D:/celosia_upstream/build/linux-aarch64
+  -j4 ps2EntryRunner`, LTO off, sysroot `D:\celosia_sysroot`.
+- **FORBIDDEN** on the device: `ls /proc/[0-9]*/fd/*` (froze the R36S once),
+  `ffmpeg -f fbdev`, `ffmpeg -f kmsgrab`, `pkill` outside the atomic script.
+  See `docs/r36s_port.md` (h) and `tools/r36s_smoke.sh` (header).
+
+### Infrastructure
+
+- Device: **ark@192.168.2.121** (Debian 13 aarch64, EmulationStation).
+- Binary: `D:\celosia_upstream\build\linux-aarch64\ps2xRuntime\ps2EntryRunner`
+  → `/roms/ports/SotC_Celosia/ps2sotc_aarch64_pie_sdl`; **51,350,952 bytes,
+  MD5 `d9a17982dc91bcefb1beb895c27521b6`** (current build).
+- Runs as **`SCUS_974.72`** (copy of `NICO.ELF`; symlink blocked by the
+  sandbox). Running as `SCUS_974.72` **activates the overrides**
+  (`[ovr] match check ... matched`).
+- Run environment: `PS2X_GS_NODRAW=0` (see fix 3) and, for captures,
+  `PS2X_CAPTURE_DUMP=/tmp/cap:0` (dumps GS frame PPMs, up to 24,
+  `cap_%06llu.ppm`).
+- `/tmp` is a 448M tmpfs (clean after each run). **Never** use `pkill` on ES
+  outside the atomic script (the script already restores it).
+- `/dev/fb0` exists on the device; `ffmpeg` at `/usr/bin/ffmpeg`;
+  `kmsprint`/`fbgrab` absent.
+- ⚠️ **NIM 02 account rate-limited** (`free-models-per-day`) — for device
+  execution, use `or-roterista` (OpenRouter free).
+
+### Fixes applied (code)
+
+1. **`game\overrides\sotc_overrides.cpp:941`** —
+   `runtime.eeScheduler().enableHostClockSync()` unconditionally in
+   `applySotcOverrides` (commit `dd53b12`). Effect: `idleWait()` blocks when
+   there is no work → `gameFps=60`, idle spin eliminated (35k/s → ~445/s).
+   Root cause: `enableHostClockSync()` was only called in
+   `gamecoreEntryHook` (which never fires because boot stops at GAMECORE's
+   linker script).
+2. **`PS2Recomp\ps2xRuntime\src\lib\ps2_runtime.cpp:3450-3452`** — new
+   `hostFps=` metric (real `SDL_GL_SwapWindow` swaps, `hostFps≈57–60` real;
+   before, `shownFps` measured only async GS captures `presentedFrames`).
+3. **`PS2Recomp\ps2xRuntime\CMakeLists.txt`** — includes
+   `game/overrides/*.cpp` in non-Vita builds (commit `5380723`).
+4. **`game\overrides\decomp_lines67.cpp`** — `#if defined(__APPLE__)` around
+   `mach-o/dyld.h` (commit `5380723`).
+5. **Environment `PS2X_GS_NODRAW=0` is mandatory with `SOTC_NATIVE=1`** —
+   without it, `skipRaster()` returns true (because `SOTC_NATIVE=1` enables
+   `native_renderer::shown()`) and **no** drawing happens.
+6. **Input injection works** in libpad: `[pad2] input buttons=0xfff7`
+   (START), `0xbfff` (CROSS), `0xffbf` (DOWN).
+
+### Key diagnostics (recorded)
+
+- `skipRaster()` (`gs_frontend.cpp:826-832`): with `SOTC_NATIVE=1` and
+  without `PS2X_GS_NODRAW=0`, `m_backend->SubmitVuBatch` is never called →
+  0 draws.
+- `shownFps` ≠ real swaps: `ps2_runtime.cpp:3450` measures
+  `ps2_stats::presentedFrames/5` (incremented only in
+  `gs_async_backend.cpp:263`), while `SDL_GL_SwapWindow` is called **every
+  iteration** (`raylib_linux.cpp:676` via `ps2_runtime.cpp:3785`) and is
+  measured as `hostFps` (~59).
+- `native_renderer` on Linux: `SOTC_NATIVE_GL=1` activates the GL backend
+  (`wantGl()` in `native_renderer.cpp:1047-1054`), but the code
+  (`native_renderer_gl.cpp:78`) uses `#version 330 core` with a GLES3 header
+  → **incompatible with SDL2's GLES3 context**; no `makeCurrent` via
+  `SDL_GL_*`.
+- VU1 never runs: `ps2_memory.cpp:287-289` creates the VU1 thread lazily and
+  waits on `m_mtvuWork.wait` (line 317), woken by `notify_one` (line 300)
+  only via `mtvuEnqueue`; `execute(startPC)` is never called (no MSCAL from
+  VIF and no XGKICK, `xgkick=0` in the stats).
+- Native IOP: `sg2iop_driver` is replaced by the native driver
+  (`iop_emulator.cpp:772`); `CDREAD`/`CDROM`/`FILEIO` **absent**; RPCs to SIDs
+  without HLE are "dropped" (completed without data) in
+  `iop_subsystem.cpp:254`.
+- `sceCdRead` (`CD.cpp:573-707`): unresolvable LBN → `memset` + `return 0`
+  (line 681/706). `sceCdSync(0)` blocks via `waitExternal` (`CD.cpp:725`)
+  until the worker's `ExternalWake` (line 436). `sceCdGetInfo`/`sceCdGetType`/
+  `sceCdReadParam` **absent**.
+- **Correção (H3):** EE syscalls 0x0d/0x0e are **not** the bottleneck. Trace
+  with `PS2X_TRACE_SYSCALLS=1` (`ps2_runtime.cpp:2104`): only 33 `[syscall]`
+  lines in the whole log (1.065.761 B / 35.028 lines), all before `[ld:enter]`
+  (lines 27–208). IDs: `0x74` (10, SetSyscall), `0xe` (9), `0x5b` (6,
+  GetEntryAddress), `0xd` (3), `0x83` (2, FindAddress), `0x3c`, `0x3d`, `0x5a`.
+  **No syscall is traced during the stall.** The `v1=0xd` calls (PC=0x106c98,
+  RA=0x10f330, a0=1,2,3) and `v1=0xe` calls (PC=0x106ca8, RA=0x10f348,
+  a0=4,5,6,7,9,a,b,c,d) are the **kernel syscall-table enumeration at boot**
+  (`SetSyscall`/`GetEntryAddress` in sequence) — then boot continues. For the
+  upstream, the IOP is also native (`tools/native_run.sh:24` uses
+  `SOTC_NATIVE=2`), and the game works there — so 0x0d/0x0e are not the
+  blocker.
+- The `Dispatcher.cpp` has no `case` 0x07–0x0f, and the 37 `sceCd*` stubs of
+  `CD.cpp` have **no call site** (grep over the whole repo = 0 outside
+  `CD.cpp`/`CD.h` and one test) → dead code.
+- `PS2X_NATIVE_IOP=0` alone does **not** prevent native boot
+  (`iop_subsystem.cpp:22-28` `nativeIopBoot()` uses `PS2X_NATIVE_IOP_BOOT`
+  with fallback to `SOTC_NATIVE`; `:30-36` `nativeIopAllowed()` uses
+  `PS2X_NATIVE_IOP` and only blocks the **runtime transition** via
+  `enterNativeMode()`). With `PS2X_NATIVE_IOP_BOOT=0` the IOP boots emulated
+  (dropped=0) — but the game does not advance either.
+- **Correção (H4):** input **does** reach libpad (`[pad2] input buttons=`)
+  but the guest ring at 0x118d680 is never written (the guest pad thread
+  `padSysGet` is called 4.694×, but the block stays zero).
+
+### Root causes confirmed / hypotheses
+
+- **Confirmed via the user and via GS dumps**: the screen (GS buffers) shows
+  real content (20.640 / 81.965 / 20.570 non-black pixels, bbox
+  `x=8..639, y=192..447` and `x=3..639, y=196..511`) → GS rasterization
+  **works** (that is the `ln`+sprites). `/dev/fb0` is black because
+  presentation to the framebuffer does not happen on this path
+  (`displayFbp=0`, `sourceFbp=224`; item 50).
+- **H1 — "Native IOP drops pad RPCs (0x8000131e/f) → zeroed pad block → game
+  does not advance": REFUTED.** Matrix of 3 runs × 70 s with RAM dump at
+  t=35 s: A (`SOTC_NATIVE=1 PS2X_NATIVE_IOP_BOOT=0 PS2X_NATIVE_IOP=0` →
+  emulated IOP, dropped=0), B (`SOTC_NATIVE=2` → native, dropped=2),
+  C (`SOTC_NATIVE=0` → emulated): in all 3 the block 0x118d680 (2×0xF98) was
+  **100% zero** (`head=0x118d638`=0, `count=0x118d63c`=0, 30 samples of the
+  ring `0x00000000`, cur/pressed/released/any=0, analog `00 00 00 00`). That
+  is, with **emulated** IOP the pad was still invisible to the game.
+- **H2 — "missing `.cmd` files (linker scripts)": REFUTED.** They exist:
+  `GAMECORE.XFF;1.cmd` 77.395 B, `MANAGER.XFF;1.cmd` 14.366 B,
+  `KERNEL.XFF;1.cmd` 127 B in `/roms/ports/SotC_Celosia/`, and runs after
+  their creation (11:07) stay stuck the same way.
+- **H3 — "EE syscalls 0x0d/0x0e are the bottleneck": REFUTED as direct
+  cause.** Trace `PS2X_TRACE_SYSCALLS=1` (`ps2_runtime.cpp:2104`): 33 lines
+  `[syscall]` in the whole log (1.065.761 B / 35.028 lines), all before
+  `[ld:enter]` (lines 27–208). IDs `0x74` (10, SetSyscall), `0xe` (9),
+  `0x5b` (6, GetEntryAddress), `0xd` (3), `0x83` (2, FindAddress), `0x3c`,
+  `0x3d`, `0x5a`. **No syscall traced during the stall.** `v1=0xd`
+  (PC=0x106c98, RA=0x10f330, a0=1,2,3) and `v1=0xe` (PC=0x106ca8,
+  RA=0x10f348, a0=4,5,6,7,9,a,b,c,d) are the **kernel syscall-table
+  enumeration at boot**; boot then continues. `Dispatcher.cpp` has no `case`
+  0x07–0x0f; the 37 `sceCd*` stubs of `CD.cpp` have **no call site** (whole-
+  repo grep = 0 outside `CD.cpp`/`CD.h` and one test) → dead code. For the
+  upstream, **the IOP is also native** (`tools/native_run.sh:24` uses
+  `SOTC_NATIVE=2`), and the game works there — so 0x0d/0x0e are not the
+  blocker.
+- **H4 — "input does not reach the game": partially refuted** — it reaches
+  libpad (`[pad2] input buttons=`) but the guest ring at 0x118d680 is never
+  written (guest pad thread `padSysGet` called 4.694×, block stays zero).
+  The stall is worse **without** input (run A3 without input: t=60→151,
+  91 s at 2.3 fps, `gsWait(space 417.1)`), so the primitive explosion
+  (ln 1952→16160, sprite 123→1010 in A; 38720/2419 in A3) **does not depend
+  on input** — it is the loading-screen redraw.
+- **Central finding (confirmed): post-JALR semaphore deadlock.** 16
+  semaphores created (gid 1..16; gid=14 and gid=15 with init count **0**,
+  max 127) and at least **one** `signal` in the whole log
+  (`[ee:sema] signal gid=6 cnt=0 waiters=1`, mx_A.log:10509). Loader thread
+  id=6 (entry `0x1b34a0`) waits on gid=7 and gid=9 and is never woken; game
+  threads id=1 (`entry=0x100010`, `pc=0x103ab0`), id=2 (`entry=0x104ff0`,
+  `pc=0x105018`, `waitId=3`) and id=7 (`entry=0x11b458`, `pc=0x11b488`,
+  waits gid=14 with cnt=0) sleep forever; kernel thread id=5 stays `RUNNING`
+  in the idle loop (`pc=0x1b11a8`). `[sotc] GAMECORE entered`
+  (`sotc_overrides.cpp:67-68`) **never** appears. No new syscall during the
+  stall (trace empty after line 209).
+- `mscal=0`/`vu1Instr=0` = effect of the game not having reached 3D geometry
+  (not a cause).
+- `displayFbp=0` + black `/dev/fb0` = presentation gap (loading screen
+  probably on FBP 224, or the upload does not mirror into what the dump
+  reads).
+
+### Next steps (ordered)
+
+1. **Diff with the upstream**: `git diff origin/main..HEAD` = 20 files /
+   +2.418 (the whole Linux layer is local) — compare and decide what is
+   missing (worklist item 36).
+2. **Resolve the semaphore deadlock**: who should signal gid=9 and gid=14
+   (thread 1? loader id=6? an interrupt handler?). Use `PS2X_TRACE_SCHED`
+   (`EeScheduler.cpp:2138`) and `[ee:sema]` to instrument; resolve PCs
+   0x103ab0/0x105018/0x11b488/0x1344788 via `tools/guest_profile.py` (needs
+   `recomp/game/functions.csv` ← `tools/funcmap_elf.py` ←
+   `docs/scus_symbols.txt` ← `tools/xff.py` over the disk; fallback: the
+   `.cmd` symbol maps).
+3. **CD/IOP path**: how the upstream reads the disk with native IOP and
+   without `CDROM.IRX`/`FILEIO.IRX` (absent in the emulated IOP; no code
+   loads `IOPRP300.IMG`); confirm whether the `fioRead` of the `.cmd`
+   (fd=12) returns the 77.395 bytes (no `vfs:read` in the log).
+4. **Pad**: find who writes the 30-sample ring at 0x118d680 (the guest pad
+   thread; `decomp_padhist.cpp:5-16` describes the format) and why it never
+   writes.
+5. **VU1** after loading advances (item 35).
+6. **GS→GLES presentation** (`displayFbp=0`, `sourceFbp=224`) and the
+   screenshot path on Linux (item 32).
+7. **Memory card**: generate an `Mcd001.ps2` with a save to unlock the
+   gameplay route (item in `native_run.sh`).
+
+### Session log (2026-11-08, continued)
+
+- 4 new commits on top of `c9216ae` (build verified, md5
+  `d9a17982dc91bcefb1beb895c27521b6`):
+  - `a02ac0d` chore(r36s): normalize whitespace / line endings of the working
+    tree.
+  - `5380723` build(r36s): include `game/overrides` in non-Vita builds and
+    port `dyld.h` for `dladdr`.
+  - `11a9b6d` runtime(r36s): real `hostFps` metric and EE/overrides diagnostic
+    instrumentation.
+  - `dd53b12` overrides(sotc): `enableHostClockSync` unconditional in
+    `applySotcOverrides`.
+- Build command:
+  `D:\tools\dev\ninja\ninja.exe -C D:/celosia_upstream/build/linux-aarch64 -j4 ps2EntryRunner`
+  (LTO off, sysroot `D:\celosia_sysroot`).
+- Matrix A/B/C (3 × 70 s, RAM dump at t=35 s), syscall trace
+  (`PS2X_TRACE_SYSCALLS=1`, 33 `[syscall]` lines), semaphore deadlock
+  (gid 1..16; gid=14/15 init 0; single signal `gid=6`), GS-buffer PPMs
+  (20.640 / 81.965 / 20.570 non-black pixels), pad ring at 0x118d680
+  100% zero in all runs.
+- Smoke test made repeatable: `tools/r36s_smoke.sh` (see docs/r36s_port.md).

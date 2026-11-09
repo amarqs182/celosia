@@ -59,3 +59,33 @@ reflection detail) is what exists so far (STATUS.md, Settings).
 | 26 | Anisotropic filtering and MSAA on the Vita | not cheap: vitaGL's MSAA is for the screen only (the renderer draws into its own targets) and the GXM has no anisotropic filter |
 | 27 | Sharper effect buffers (soft shadow mask, bloom) at high resolution | easy-medium: the soft shadow mask is reduced to a quarter of the render size; the bloom is the PS2's GS chain at its fixed 256 / 128 / 64 sizes (kept for fidelity) |
 | 28 | Effect detail "High" as the Mac's default | easy, a decision: it is what fixes the blocky, pixelated DoF-blurred far cliffs at 3x (the copies averaged instead of one aliased tap); left off so the High preset stays exactly the old picture |
+
+## R36S (Linux aarch64)
+
+Target: boot and play SotC (SCUS-97472) on R36S (aarch64, SDL2/KMSDRM +
+GLES) with no x86 CPU emulation. State as of 2026-11-08: loading spinner
+on screen, game stuck at loading (see STATUS.md, "R36S").
+
+| # | Item | Status | Notes |
+|---|------|--------|-------|
+| 32 | Real screenshot of the device framebuffer (`/dev/fb0` + `ffmpeg`) | doing | /dev/fb0 100% preto (1.228.800 bytes zero); GS desenha conteúdo real (PPMs 640×512: 20.640/81.965/20.570 px não-pretos, bbox x=8..639 y=192..447) que nunca chega à tela; ExportImage é stub no Linux (raylib_linux.cpp:894) |
+| 33 | EE syscalls 0x0d/0x0e (table in `Dispatcher.cpp`) | parked | REFUTADO como causa: só 3 chamadas v1=0xd (PC=0x106c98) + 9 v1=0xe (PC=0x106ca8) no boot = enumeração da tabela do kernel (a0=1..13); nenhuma syscall é traceada durante o stall; Dispatcher.cpp não tem case 0x07-0x0f e os 37 sceCd* de CD.cpp não têm call site (código morto) |
+| 34 | CD data path (IOP CDREAD HLE or `sceCdGetInfo`/`sceCdGetType`/`sceCdReadParam`; `cdRoot`/`cdImage`) | doing | sceCdSearchFile OK host-side (MANAGER.XFF → lsn 0x100000, GAMECORE.XFF → lsn 0x100328); vfs:open OK (cdRoot = elfDirectory, ps2_runtime.cpp:1452); 0 sceCdRead pós-boot; nenhum CDROM.IRX/FILEIO.IRX no IOP e nenhum código carrega IOPRP300.IMG (275.345 B no device) |
+| 35 | VU1 thread after loading advances (VIF MSCAL → `execute(startPC)`) | todo | bloqueado pelo 43; mscal=0/vu1Instr=0/xgkick=0 em todas as amostras |
+| 36 | Compare with the upstream (HenryKun55 r36s) | todo | PRIORIDADE 1: git diff origin/main..HEAD = 20 arquivos/+2.418 (toda a camada Linux é local); upstream com IOP nativo também não leva CDROM/FILEIO e roda no Mac/Vita |
+| 37 | `enableHostClockSync` in `applySotcOverrides` | done | dd53b12; sotc_overrides.cpp:941; gameFps=60, idle spin eliminado |
+| 38 | `hostFps=` metric (real `SDL_GL_SwapWindow` swaps) | done | 11a9b6d; ps2_runtime.cpp:3450; hostFps≈57-60 real (SDL_GL_SwapWindow swaps) |
+| 39 | `PS2X_GS_NODRAW=0` in the run environment | done | PS2X_GS_NODRAW=0 obrigatório com SOTC_NATIVE=1 (skipRaster()) |
+| 40 | CMakeLists includes `game/overrides/*.cpp` in non-Vita builds | done | 5380723 (game/overrides em builds não-Vita) |
+| 41 | `#if defined(__APPLE__)` around `mach-o/dyld.h` | done | 5380723 (dyld.h sob __APPLE__ → dlfcn.h/dladdr) |
+| 42 | VMQ | done | citado concluído em rodadas w37-w44 |
+| 43 | Deadlock de semáforos após o entry do GAMECORE (gid 7/9/14; 1 signal) | doing | PS2X_TRACE_SCHED=1 + [ee:sema]; ver docs/r36s_port.md |
+| 44 | Resolver PCs do guest (0x103ab0, 0x105018, 0x11b488, 0x1344788) | todo | tools/guest_profile.py via functions.csv, ou mapas dos .XFF;1.cmd (FlushPadHistory=0x114b0a8, padSysGet=0x104e78) |
+| 45 | Confirmar fioRead do .cmd (fd=12) devolve 77.395 bytes | todo | Kernel/Syscalls/FileIO.cpp:160; sem [vfs:read] no log |
+| 46 | Caminho do CD/IOP no Linux (CDREAD/FILEIO HLE ou EE-side) | todo | ver item 34 |
+| 47 | Popular anel de pad em 0x118d680 (30 amostras × 0x78, botões +0x70) | todo | Hipótese do IOP nativo REFUTADA (zero em A emulado, B nativo, C emulado); achar quem escreve (decomp_padhist.cpp:5-16) |
+| 48 | Memory card com save (memcards/Mcd001.ps2) p/ rota de gameplay | todo | memcards/ vazio; MemoryCard2.cpp:116-123 cria em branco sem bloquear; tools/native_run.sh exige o save |
+| 49 | VU1 (VIF MSCAL) após loading avançar | todo | idem item 35 |
+| 50 | Apresentação GS→GLES (displayFbp=0, sourceFbp=224) | todo | conteúdo fica no VRAM; shownFps≈0 |
+| 51 | Caminho de screenshot no Linux (ExportImage) | todo | raylib_linux.cpp:894 stub → PS2X_SNAPSHOT_DIR só index.txt |
+| 52 | Script tools/r36s_smoke.sh | done | teste repetível no device com restore do EmulationStation |
