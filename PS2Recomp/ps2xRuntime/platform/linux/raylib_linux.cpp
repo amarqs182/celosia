@@ -576,8 +576,14 @@ void InitWindow(int width, int height, const char *title)
     SDL_GL_GetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, &glProfile);
     SDL_GL_GetAttribute(SDL_GL_DEPTH_SIZE, &glDepth);
     SDL_GL_GetAttribute(SDL_GL_STENCIL_SIZE, &glStencil);
-    std::fprintf(stderr, "[linux] GL context: %s %d.%d (%s), depth %d stencil %d\n", glProfile == SDL_GL_CONTEXT_PROFILE_ES ? "ES" : "compatibility",
-                 glMajor, glMinor, reinterpret_cast<const char *>(glGetString(GL_VERSION)), glDepth, glStencil);
+    const char *videoDriver = SDL_GetCurrentVideoDriver();
+    const auto *glVersion = glGetString(GL_VERSION);
+    const auto *glslVersion = glGetString(GL_SHADING_LANGUAGE_VERSION);
+    std::fprintf(stderr, "[linux] SDL video driver: %s\n", videoDriver ? videoDriver : "unknown");
+    std::fprintf(stderr, "[linux] GL context: %s %d.%d (%s), GLSL %s, depth %d stencil %d\n",
+                 glProfile == SDL_GL_CONTEXT_PROFILE_ES ? "ES" : "compatibility",
+                 glMajor, glMinor, glVersion ? reinterpret_cast<const char *>(glVersion) : "unknown",
+                 glslVersion ? reinterpret_cast<const char *>(glslVersion) : "unknown", glDepth, glStencil);
     g_glReady = true;
     initQuadProgram();
     glViewport(0, 0, width, height);
