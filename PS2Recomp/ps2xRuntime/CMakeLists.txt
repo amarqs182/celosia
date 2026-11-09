@@ -64,6 +64,12 @@ if(ANDROID)
     set(PS2X_IS_ANDROID ON)
 endif()
 
+set(PS2X_IS_LINUX OFF)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(PS2X_IS_LINUX ON)
+endif()
+
 option(PS2X_VITA_CREATE_PACKAGE "Create Vita eboot/vpk targets" ON)
 set(PS2X_VITA_APP_NAME "PS2 Retro X" CACHE STRING "Display name for the Vita bubble")
 set(PS2X_VITA_TITLEID "RANJ00001" CACHE STRING "9-character Vita title id")
@@ -100,7 +106,7 @@ else()
     )
     FetchContent_MakeAvailable(raylib)
 
-    if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_ANDROID)
+    if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_ANDROID AND NOT PS2X_IS_LINUX)
         FetchContent_Declare(
             imgui
             GIT_REPOSITORY https://github.com/ocornut/imgui.git
@@ -284,6 +290,29 @@ elseif(PS2X_IS_VITA)
         c
         pthread
     )
+elseif(PS2X_IS_LINUX)
+    # Linux (including R36S/AArch64): the runtime's raylib subset on SDL2
+    # and OpenGL ES. SDL selects its video driver (KMSDRM on the R36S).
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(PS2X_LINUX_SDL2 REQUIRED IMPORTED_TARGET GLOBAL sdl2)
+    find_library(PS2X_LINUX_GLES_LIBRARY NAMES GLESv3 GLESv2 GLES REQUIRED)
+
+    add_library(ps2x_linux_raylib STATIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/platform/linux/raylib_linux.cpp"
+    )
+    target_include_directories(ps2x_linux_raylib PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/platform/linux"
+    )
+    target_link_libraries(ps2x_linux_raylib PUBLIC
+        PkgConfig::PS2X_LINUX_SDL2
+        ${PS2X_LINUX_GLES_LIBRARY}
+        m
+    )
+    target_compile_definitions(ps2_host_backend INTERFACE
+        PLATFORM_LINUX
+        PS2X_LINUX_SDL2_SHIM=1
+    )
+    target_link_libraries(ps2_host_backend INTERFACE ps2x_linux_raylib)
 else()
     target_link_libraries(ps2_host_backend INTERFACE raylib)
 
@@ -605,7 +634,7 @@ target_link_libraries(ps2EntryRunner
 )
 target_include_directories(ps2EntryRunner PRIVATE ${PS2X_RUNNER_DIRS})
 
-if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_VITA AND NOT PS2X_IS_ANDROID)
+if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_VITA AND NOT PS2X_IS_ANDROID AND NOT PS2X_IS_LINUX)
     target_sources(ps2EntryRunner PRIVATE
         src/lib/ps2_debug_panel.cpp
     )
