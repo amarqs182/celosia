@@ -374,5 +374,5 @@ void SetSoundPitch(Sound sound, float pitch);
 bool IsSoundPlaying(Sound sound);
 
 // Separate shared SDL GL context for the native renderer's worker thread.
-void *CreateSharedGLContext(void);
+void *CreateNativeGLContext(void);
 void MakeGLContextCurrent(void *context);
