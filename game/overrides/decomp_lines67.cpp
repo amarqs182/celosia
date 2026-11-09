@@ -1,13 +1,13 @@
-// Round 67: the walks' cache-line proxy (lines67.h; SOTC_LINES67=1, Mac only).
+// Round 67: the walks' cache-line proxy (lines67.h; SOTC_LINES67=1, macOS/Linux).
 #include "lines67.h"
 
-#if !defined(__vita__)
+#if defined(__APPLE__) || defined(__linux__)
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
 #include <unordered_map>
 #include <algorithm>
-#include <mach-o/dyld.h>
+#include <dlfcn.h>
 
 namespace lines67
 {
@@ -51,7 +51,13 @@ namespace lines67
             static State s;
             return s;
         }
-        uint64_t base() { return reinterpret_cast<uint64_t>(_dyld_get_image_header(0)); }
+        uint64_t base()
+        {
+            Dl_info info{};
+            return dladdr(reinterpret_cast<void *>(&base), &info)
+                ? reinterpret_cast<uint64_t>(info.dli_fbase)
+                : 0u;
+        }
         uint64_t every()
         {
             static const uint64_t n = std::getenv("SOTC_LINES67_EVERY") ? std::strtoull(std::getenv("SOTC_LINES67_EVERY"), nullptr, 10) : 300u;
