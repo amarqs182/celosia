@@ -3277,6 +3277,9 @@ void PS2Runtime::run()
         });
         uint32_t presentWidth = FB_WIDTH;
         uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
+#if defined(PS2X_GLES3)
+        native_renderer::setShown(native_renderer::tuning().showNative);
+#endif
 #if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
         // The Vita shows the native picture from the render thread (its
         // present hook): the GS's display read out of local memory and
