@@ -16,7 +16,7 @@
 #include <cstdio>
 #include <initializer_list>
 
-static bool compileShader(GLenum type, const char *source)
+static GLuint compileShader(GLenum type, const char *source)
 {
     const GLuint shader = glCreateShader(type);
     glShaderSource(shader, 1, &source, nullptr);
@@ -31,13 +31,13 @@ static bool compileShader(GLenum type, const char *source)
         glGetShaderInfoLog(shader, sizeof(log), &length, log);
         std::fprintf(stderr, "[smoke] GLSL compile failed: %.*s\n",
                      static_cast<int>(length), log);
+        glDeleteShader(shader);
+        return 0;
     }
-
-    glDeleteShader(shader);
-    return compiled == GL_TRUE;
+    return shader;
 }
 
-static bool testRendererContext()
+static bool linkProgram()
 {
     static constexpr char vertex[] =
         "#version 310 es\n"
@@ -49,8 +49,42 @@ static bool testRendererContext()
         "out vec4 color;\n"
         "void main() { color = vec4(1.0); }\n";
 
-    if (!compileShader(GL_VERTEX_SHADER, vertex) ||
-        !compileShader(GL_FRAGMENT_SHADER, fragment))
+    const GLuint vertexShader = compileShader(GL_VERTEX_SHADER, vertex);
+    const GLuint fragmentShader = compileShader(GL_FRAGMENT_SHADER, fragment);
+    if (!vertexShader || !fragmentShader)
+    {
+        if (vertexShader)
+            glDeleteShader(vertexShader);
+        if (fragmentShader)
+            glDeleteShader(fragmentShader);
+        return false;
+    }
+
+    const GLuint program = glCreateProgram();
+    glAttachShader(program, vertexShader);
+    glAttachShader(program, fragmentShader);
+    glLinkProgram(program);
+
+    GLint linked = GL_FALSE;
+    glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    if (linked != GL_TRUE)
+    {
+        char log[2048] = {};
+        GLsizei length = 0;
+        glGetProgramInfoLog(program, sizeof(log), &length, log);
+        std::fprintf(stderr, "[smoke] GLSL link failed: %.*s\n",
+                     static_cast<int>(length), log);
+    }
+
+    glDeleteProgram(program);
+    glDeleteShader(vertexShader);
+    glDeleteShader(fragmentShader);
+    return linked == GL_TRUE;
+}
+
+static bool testRendererContext()
+{
+    if (!linkProgram())
         return false;
 
     GLuint fbo = 0, color = 0, depth = 0;
