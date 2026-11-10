@@ -1,16 +1,27 @@
 #!/usr/bin/env python3
 """Compare the route frames of two tools/measure.sh runs (needs Pillow).
 
+Inputs:
+  <dir before>  directory with run-1 frames: gameframe_<n>.ppm or snap_<n>.ppm
+  <dir after>   directory with run-2 frames compared against run 1
+  [threshold]   max per-channel difference for a pixel to count as equal
+                (default 24)
+
+Output:
+  One line per after-frame: '<name>  mean %5.2f  changed %6.2f%%', plus
+  '  <-- look' when over 1.5% of pixels changed. Frames present in only one
+  run are reported by name. Flagged frames get diff_<name>.png next to the
+  after frame (changed pixels in red over the darkened after frame). Exit
+  status 1 when any frame is flagged, 0 otherwise.
+
 Usage: tools/framediff.py <dir before> <dir after> [threshold]
 
-For each gameframe_<n>.ppm or snap_<n>.ppm in both: a pixel counts as changed when no pixel
-of the other frame within one pixel of it is within <threshold> (default 24)
-in every channel, so sub-pixel camera sway and edge jitter between runs are
-not counted, while wrong colours, textures or missing geometry are. Frames
-with over 1.5% changed pixels are flagged and get diff_<name>.png next to the
-after frame (changed pixels in red over the darkened after frame). Exit
-status 1 when any frame is flagged.
+A pixel counts as changed when no pixel of the other frame within one pixel
+of it is within <threshold> (default 24) in every channel, so sub-pixel
+camera sway and edge jitter between runs are not counted, while wrong
+colours, textures or missing geometry are.
 """
+import argparse
 import os
 import re
 import sys
@@ -40,8 +51,23 @@ def changed_mask(a, b, threshold):
 
 
 def main():
-    before, after = sys.argv[1], sys.argv[2]
-    threshold = int(sys.argv[3]) if len(sys.argv) > 3 else 24
+    parser = argparse.ArgumentParser(
+        description='Compare route frames of two tools/measure.sh runs (needs Pillow).')
+    parser.add_argument('before', metavar='<dir before>',
+                        help='directory with run-1 frames (gameframe_<n>.ppm / snap_<n>.ppm)')
+    parser.add_argument('after', metavar='<dir after>',
+                        help='directory with run-2 frames compared against run 1')
+    parser.add_argument('threshold', metavar='[threshold]', type=int, nargs='?', default=24,
+                        help='max per-channel difference for equal pixels (default 24)')
+    args = parser.parse_args()
+
+    before, after, threshold = args.before, args.after, args.threshold
+    if not os.path.isdir(before):
+        print('error: input directory not found: %s' % before)
+        sys.exit(2)
+    if not os.path.isdir(after):
+        print('error: compare directory not found: %s' % after)
+        sys.exit(2)
     picture = re.compile(r'(gameframe|snap)_\d+\.ppm$')
     names = sorted((n for n in os.listdir(after) if picture.match(n)),
                    key=lambda n: (n[0], int(re.findall(r'\d+', n)[0])))
