@@ -12,14 +12,26 @@ option(PS2_GS_CACHE_BUILD_MEMORY_TESTS "Build tests for the new shared cached-re
 
 find_package(Threads REQUIRED)
 add_library(ps2_gs_cache_backend_under_test STATIC
+    "${PS2_GS_RUNTIME_DIR}/src/lib/gs/gs_async_backend.cpp"
     "${PS2_GS_RUNTIME_DIR}/src/lib/gs/gs_cpu_backend.cpp"
     "${PS2_GS_RUNTIME_DIR}/src/lib/gs/gs_frontend.cpp"
     "${PS2_GS_RUNTIME_DIR}/src/lib/gs/ps2_gs_memory.cpp"
 )
-target_include_directories(ps2_gs_cache_backend_under_test PUBLIC "${PS2_GS_RUNTIME_DIR}/include")
+if(NOT APPLE)
+    target_sources(ps2_gs_cache_backend_under_test PRIVATE
+        "${PS2_GS_RUNTIME_DIR}/src/lib/gs/gs_metal_raster_stub.cpp"
+    )
+endif()
+target_include_directories(ps2_gs_cache_backend_under_test PUBLIC
+    "${PS2_GS_RUNTIME_DIR}/include"
+    "${PS2_GS_RUNTIME_DIR}/../ps2xIOP/include"
+)
 target_compile_features(ps2_gs_cache_backend_under_test PUBLIC cxx_std_20)
 target_compile_definitions(ps2_gs_cache_backend_under_test PRIVATE PS2_RUNTIME_LOGS=0 AGRESSIVE_LOGS=0)
 target_link_libraries(ps2_gs_cache_backend_under_test PUBLIC Threads::Threads)
+if(TARGET ps2_runtime)
+    target_link_libraries(ps2_gs_cache_backend_under_test PUBLIC ps2_runtime)
+endif()
 set_target_properties(ps2_gs_cache_backend_under_test PROPERTIES CXX_EXTENSIONS OFF)
 
 if(PS2_GS_CACHE_SANITIZERS)
