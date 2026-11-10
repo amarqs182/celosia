@@ -7,7 +7,6 @@ ongoing decompilation of the game's hot code into host C++.
 - Upstream (read-only reference): `https://github.com/HenryKun55/celosia`
 - This fork (where work happens): `https://github.com/amarqs182/celosia`
   - `origin` = this fork, `upstream` = HenryKun55/celosia
-- Local clone: `/home/amarqs/Projects/celosia`
 
 ## Hard rules
 
@@ -39,7 +38,7 @@ Per `docs/decomp.md`:
    result in v0 or f0; end with `returnTo(ctx)`.
 4. Prove it — `SOTC_DIFFTEST=name` compares the native against the
    recompiled code (registers + every RAM byte).
-5. Measure it — profiler, on the Mac and the Vita.
+5. Measure it — with the profiler on the host or target that is actually available. Treat Mac/Vita figures as upstream reference data, never as R36S measurements.
 
 Every native must keep: relocated code in the XFF modules
 (`sotc_decomp::relocated`, `sotc_decomp::jalTarget`), guest calls
