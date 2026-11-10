@@ -70,6 +70,18 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(PS2X_IS_LINUX ON)
 endif()
 
+# The SDL2/GLES shim is the R36S Linux backend, not a requirement for every
+# Linux desktop build. Default it on for AArch64 and leave x86_64 on raylib.
+set(PS2X_LINUX_SDL2_GLES_DEFAULT OFF)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+    set(PS2X_LINUX_SDL2_GLES_DEFAULT ON)
+endif()
+option(PS2X_LINUX_SDL2_GLES "Use the SDL2/GLES Linux backend (R36S)" ${PS2X_LINUX_SDL2_GLES_DEFAULT})
+set(PS2X_IS_LINUX_SDL2_GLES OFF)
+if(PS2X_IS_LINUX AND PS2X_LINUX_SDL2_GLES)
+    set(PS2X_IS_LINUX_SDL2_GLES ON)
+endif()
+
 option(PS2X_VITA_CREATE_PACKAGE "Create Vita eboot/vpk targets" ON)
 set(PS2X_VITA_APP_NAME "PS2 Retro X" CACHE STRING "Display name for the Vita bubble")
 set(PS2X_VITA_TITLEID "RANJ00001" CACHE STRING "9-character Vita title id")
@@ -98,7 +110,7 @@ else()
         set(PLATFORM "Android" CACHE STRING "" FORCE)
     endif()
 
-    if(NOT PS2X_IS_LINUX)
+    if(NOT PS2X_IS_LINUX_SDL2_GLES)
         FetchContent_Declare(
             raylib
             GIT_REPOSITORY "https://github.com/raysan5/raylib.git"
@@ -108,7 +120,7 @@ else()
         FetchContent_MakeAvailable(raylib)
     endif()
 
-    if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_ANDROID AND NOT PS2X_IS_LINUX)
+    if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_ANDROID AND NOT PS2X_IS_LINUX_SDL2_GLES)
         FetchContent_Declare(
             imgui
             GIT_REPOSITORY https://github.com/ocornut/imgui.git
@@ -292,8 +304,8 @@ elseif(PS2X_IS_VITA)
         c
         pthread
     )
-elseif(PS2X_IS_LINUX)
-    # Linux (including R36S/AArch64): the runtime's raylib subset on SDL2
+elseif(PS2X_IS_LINUX_SDL2_GLES)
+    # R36S/Linux AArch64: the runtime's raylib subset on SDL2
     # and OpenGL ES. SDL selects its video driver (KMSDRM on the R36S).
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(PS2X_LINUX_SDL2 REQUIRED IMPORTED_TARGET GLOBAL sdl2)
@@ -485,7 +497,7 @@ add_library(ps2_runtime STATIC
 # Native renderer: Metal on macOS, OpenGL on macOS when selected, vitaGL on
 # the Vita, and GLES 3.1 on Linux/AArch64.
 target_sources(ps2_runtime PRIVATE src/lib/native/native_renderer.cpp src/lib/native/native_renderer_gl.cpp src/lib/native/native_recorder.cpp)
-if(PS2X_IS_LINUX)
+if(PS2X_IS_LINUX_SDL2_GLES)
     target_compile_definitions(ps2_runtime PRIVATE PS2X_GLES3=1)
 endif()
 # The scene recorder's blocks are zlib-compressed (the Vita SDK has libz).
@@ -639,7 +651,7 @@ target_link_libraries(ps2EntryRunner
 )
 target_include_directories(ps2EntryRunner PRIVATE ${PS2X_RUNNER_DIRS})
 
-if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_VITA AND NOT PS2X_IS_ANDROID AND NOT PS2X_IS_LINUX)
+if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_VITA AND NOT PS2X_IS_ANDROID AND NOT PS2X_IS_LINUX_SDL2_GLES)
     target_sources(ps2EntryRunner PRIVATE
         src/lib/ps2_debug_panel.cpp
     )
