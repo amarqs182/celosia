@@ -1,10 +1,13 @@
-"""Function-start discovery for MIPS code, plus a CSV builder for stripped ELFs.
+"""Build a function-start CSV from a boot ELF and an optional symbol list.
+
+Input: a boot ELF plus an optional symbol list.
+Output: a function CSV with a Name,Start,End,Size header.
 
 Function starts come from: known symbols, JAL targets, lui/addiu code pointers,
 data words pointing at prologues/post-return code, and stack-frame prologues
 following a return.
 """
-import bisect, sys, struct
+import argparse, bisect, os, sys, struct
 from elfmini import Elf
 
 JR_RA = 0x03E00008
@@ -178,6 +181,30 @@ def hidden_entries(words, starts):
     return sorted(out)
 
 
+def parse_args(argv):
+    """Parse and validate the command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Build a function CSV from a boot ELF and optional symbol list.")
+    parser.add_argument("elf_path", help="boot ELF to scan")
+    parser.add_argument("sym_path", nargs="?", help="optional symbol list")
+    parser.add_argument("out_csv", help="output CSV path")
+    if len(argv) == 2:
+        # Disambiguate the optional middle positional: with two arguments,
+        # they are the ELF and output CSV, so no symbol list was supplied.
+        args = parser.parse_args([argv[0], "\0", argv[1]])
+        args.sym_path = None
+    else:
+        args = parser.parse_args(argv)
+    if not os.path.isfile(args.elf_path):
+        parser.error(f"ELF file does not exist or is not a file: {args.elf_path}")
+    if args.sym_path is not None and not os.path.isfile(args.sym_path):
+        parser.error(f"symbol file does not exist or is not a file: {args.sym_path}")
+    out_dir = os.path.dirname(os.path.abspath(args.out_csv))
+    if not os.path.isdir(out_dir):
+        parser.error(f"output directory does not exist for {args.out_csv}: {out_dir}")
+    return args
+
+
 def main(elf_path, sym_path, out_csv, merge=False, pinned=()):
     """Writes the function map; with merge, false splits are merged
     (merge_split_starts) and the dropped starts are returned."""
@@ -186,7 +213,7 @@ def main(elf_path, sym_path, out_csv, merge=False, pinned=()):
     in_text = lambda a: any(lo <= a < hi for lo, hi in ranges)
     names = {}
     if sym_path:
-        for line in open(sym_path):
+        for line in open(sym_path, encoding="utf-8"):
             a, n = line.split()
             a = int(a, 16)
             if in_text(a):
@@ -199,7 +226,7 @@ def main(elf_path, sym_path, out_csv, merge=False, pinned=()):
     if merge:
         strong = set(names) | {elf.entry} | {p for p in pinned if p in set(starts)}
         starts, dropped = merge_split_starts(words, starts, strong, {})
-    with open(out_csv, "w") as f:
+    with open(out_csv, "w", encoding="utf-8", newline="\n") as f:
         f.write("Name,Start,End,Size\n")
         for i, st in enumerate(starts):
             hi = next(h for l, h in ranges if l <= st < h)
@@ -211,4 +238,5 @@ def main(elf_path, sym_path, out_csv, merge=False, pinned=()):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else None, sys.argv[3])
+    args = parse_args(sys.argv[1:])
+    main(args.elf_path, args.sym_path, args.out_csv)

@@ -146,3 +146,64 @@ the emulated path (`PS2X_NATIVE_SG2=0`).
    status, read the stream data from the disc on the host. Then the IOP CPU,
    sg2iop_driver and libsd are no longer run.
 3. Measure: the route's audio against the emulated path (PS2X_SPU2_WAV).
+
+## Current state and open work
+
+The Mac side of phase 6 is done: the native SG2 driver (`Sg2Driver`,
+`ps2xIOP/src/emulator/services/iop_sg2.cpp`) and the native mixer
+(`SoundMixer`, `ps2xIOP/src/native/sound_mixer.cpp`), both 2026-10-16, as
+the sections above describe. The EE side is not: in
+`PS2Recomp/ps2xRuntime/src/lib/Kernel/Stubs/Audio.cpp` (657 lines) there are
+90 `TODO_NAMED` calls (`rg -c 'TODO_NAMED\('` -> 90), so each of those
+functions logs a warning and then throws `std::runtime_error` from
+`PS2Recomp/ps2xRuntime/src/lib/Kernel/Stubs/Unimplemented.cpp:47`. Two of the
+90 are libsd (`sceSdCallBack`, `sceSdTransToIOP`); the other 88 are the SSyn
+and `sceSynthesizer*` entries, plus the two spellings that are misspelled in
+the file itself (`sceSynthsizer*`, `sceSynthSizer*`).
+
+Counts below come from the symbol names in that file, not from an assumed
+list (`rg -o 'TODO_NAMED\("([^"]+)'` then grouped by name):
+
+| Family | TODO_NAMED | Selected by |
+|---|---|---|
+| SSyn entry points | 13 | name starts with `sceSSyn_` |
+| Synthesizer voice management | 8 | `sceSynthesizerAssign*`, `SetRVoice`, `ResetPart`, `SelectPatch` |
+| LFO | 10 | name contains `Lfo` |
+| TVF | 5 | name contains `Tvf` |
+| DMA / SPR | 8 | name contains `Dma`, `SPR` or `Spr` |
+| Other | 46 | everything left (breakdown below) |
+| Total | 90 | `rg -c 'TODO_NAMED\('` |
+
+The LFO row includes `sceSynthsizerLfoNoise` and `sceSynthSizerLfoTriangle`
+(spelled that way in the file) and the two `ChangeNrpnLfo*` functions. The 46
+in Other: `sceSd*` 2, `Change*` 15 (the two LFO ones are in the LFO row and
+`AssignHoldChange` is in voice management), `Read*` 6, `Setup*` 6 (the LFO,
+TVF and DMA ones are in their rows), `Get*` 5, and 12 single functions (amp
+processing, envelope and pitch math, tone generator, messages, master
+volume).
+
+### How to implement one stub
+
+Every stub has the same signature, for example `sceSdCallBack` at
+`PS2Recomp/ps2xRuntime/src/lib/Kernel/Stubs/Audio.cpp:72`:
+
+```cpp
+void name(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+```
+
+1. Read the arguments from `ctx` with `getRegU32`
+   (`PS2Recomp/ps2xRuntime/include/ps2_runtime.h:199`; `$a0` is register 4)
+   and guest memory through `rdram`.
+2. Return the result with `setReturnS32(ctx, value)`
+   (`PS2Recomp/ps2xRuntime/include/ps2_runtime.h:215`, writes `$v0`); use
+   `setReturnU32` for unsigned results.
+3. Replace the `TODO_NAMED("name", rdram, ctx, runtime);` line with the real
+   logic. State that outlives a call belongs in the audio stub state:
+   `AudioStubState` and `g_audio_stub_state` at `Audio.cpp:42-50`, guarded by
+   `g_audio_stub_mutex`, cleared by `resetAudioStubState()` (`Audio.cpp:66`).
+4. Add a regression test in `PS2Recomp/ps2xTest`, next to the `sceSdRemote`
+   cases in `PS2Recomp/ps2xTest/src/ps2_runtime_expansion_tests.cpp:814`: set
+   the argument registers, call the stub, then assert `getRegU32(ctx, 2)` and
+   the state it changed.
+5. `TODO_NAMED` throws after its first warnings, so a stub left in a path the
+   game takes is a hard failure, not a silent no-op.

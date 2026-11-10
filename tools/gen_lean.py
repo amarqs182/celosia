@@ -24,17 +24,40 @@ Usage:
   tools/gen_lean.py                       # from game/lean_hot.txt
   tools/gen_lean.py --from calls.txt [calls2.txt ...] [--min 1000]
                                           # rewrites game/lean_hot.txt first
+  tools/gen_lean.py --help                # this message
 """
+import argparse
 import glob
 import os
+import pathlib
 import re
 import sys
 
-ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
-RUNNER = os.path.join(ROOT, 'build', 'runner')
-LIST = os.path.join(ROOT, 'game', 'lean_hot.txt')
-OUT = os.path.join(RUNNER, 'lean')
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+RUNNER = ROOT / 'build' / 'runner'
+LIST = ROOT / 'game' / 'lean_hot.txt'
+OUT = RUNNER / 'lean'
 PARTS = 12  # game/overrides/lean_part0.cpp .. lean_part11.cpp
+
+PARSER = argparse.ArgumentParser(
+    prog='gen_lean.py',
+    description='Write lean copies of the hot recompiled functions (build/runner/lean).',
+    epilog=('usage:\n'
+            '  tools/gen_lean.py\n'
+            '  tools/gen_lean.py --from calls.txt [calls2.txt ...] [--min 1000]\n'),
+    formatter_class=argparse.RawDescriptionHelpFormatter)
+PARSER.add_argument('--from', dest='from_', nargs='*', metavar='CALLS',
+                     help='rewrite game/lean_hot.txt from these call-count dumps')
+PARSER.add_argument('--min', type=int, default=1000, metavar='N',
+                     help='minimum number of calls kept (default: 1000)')
+
+
+def open_text(path, mode='r'):
+    """Open a text file with UTF-8; exit with a clear error if it is missing."""
+    try:
+        return open(path, mode, encoding='utf-8')
+    except FileNotFoundError:
+        sys.exit(f'gen_lean.py: missing file: {path}')
 
 
 def runner_functions():
@@ -50,13 +73,13 @@ def runner_functions():
 def write_list(dumps, minimum):
     counts = {}
     for path in dumps:
-        for line in open(path):
+        for line in open_text(path):
             if line.startswith('#'):
                 continue
             a, c = line.split()
             counts[int(a, 16)] = max(counts.get(int(a, 16), 0), int(c))
     hot = sorted((a for a, c in counts.items() if c >= minimum), key=lambda a: -counts[a])
-    with open(LIST, 'w') as out:
+    with open_text(LIST, 'w') as out:
         out.write('# Hot recompiled functions for the lean copies (tools/gen_lean.py), hottest first.\n')
         out.write('# From %s, at least %d calls.\n' % (', '.join(os.path.basename(d) for d in dumps), minimum))
         for a in hot:
@@ -65,28 +88,19 @@ def write_list(dumps, minimum):
 
 
 def main():
-    args = sys.argv[1:]
-    if args and args[0] == '--from':
-        minimum = 1000
-        dumps = []
-        rest = args[1:]
-        while rest:
-            if rest[0] == '--min':
-                minimum = int(rest[1])
-                rest = rest[2:]
-            else:
-                dumps.append(rest[0])
-                rest = rest[1:]
-        write_list(dumps, minimum)
+    args, _unknown = PARSER.parse_known_args()
+    if args.from_ is not None:
+        write_list(args.from_, args.min)
     funcs = runner_functions()
     names = []
-    for line in open(LIST):
+    for line in open_text(LIST):
         if line.startswith('#') or not line.strip():
             continue
         a = int(line.split()[0], 16)
         if a not in funcs:  # not in build/runner: nothing to copy
             continue
-        src = open(os.path.join(RUNNER, funcs[a] + '.cpp')).read()
+        with open_text(os.path.join(RUNNER, funcs[a] + '.cpp')) as f:
+            src = f.read()
         if '// Function:' not in src:  # a stub into the host kernel (WaitSema ...): no guest code
             continue
         # A syscall inside: left out of the difftest (it can switch threads).
@@ -95,20 +109,20 @@ def main():
     for f in glob.glob(os.path.join(OUT, '*.inc')):
         os.remove(f)
     sig = '(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)'
-    with open(os.path.join(OUT, 'decls.inc'), 'w') as out:
+    with open_text(os.path.join(OUT, 'decls.inc'), 'w') as out:
         for _, n, _ in names:
             out.write('void lean_%s%s;\n' % (n, sig))
-    with open(os.path.join(OUT, 'renames.inc'), 'w') as out:
+    with open_text(os.path.join(OUT, 'renames.inc'), 'w') as out:
         for _, n, _ in names:
             out.write('#define %s lean_%s\n' % (n, n))
     # The second set (round 26, lean_part_tN.cpp, PS2X_EE_TRUST_FINITE): leant_<name>.
-    with open(os.path.join(OUT, 'decls_trust.inc'), 'w') as out:
+    with open_text(os.path.join(OUT, 'decls_trust.inc'), 'w') as out:
         for _, n, _ in names:
             out.write('void leant_%s%s;\n' % (n, sig))
-    with open(os.path.join(OUT, 'renames_trust.inc'), 'w') as out:
+    with open_text(os.path.join(OUT, 'renames_trust.inc'), 'w') as out:
         for _, n, _ in names:
             out.write('#define %s leant_%s\n' % (n, n))
-    with open(os.path.join(OUT, 'table.inc'), 'w') as out:
+    with open_text(os.path.join(OUT, 'table.inc'), 'w') as out:
         for a, n, sys_ in names:
             out.write('LEAN_ENTRY(0x%08xu, lean_%s, %s, "%s", %s)\n' % (a, n, n, n, 'false' if sys_ else 'true'))
     # Spread by size so the parts take about as long to compile.
@@ -120,7 +134,7 @@ def main():
         parts[i].append(n)
         load[i] += size
     for i, part in enumerate(parts):
-        with open(os.path.join(OUT, 'part%d.inc' % i), 'w') as out:
+        with open_text(os.path.join(OUT, 'part%d.inc' % i), 'w') as out:
             for n in sorted(part):
                 out.write('#include "%s.cpp"\n' % n)
     print('%s: %d lean functions in %d parts (%.1f MB of recompiled C++)' % (OUT, len(names), PARTS, sum(load) / 1e6))

@@ -15,6 +15,36 @@ game's own code where it matters.
 
 ![What is native](port_status.svg)
 
+## Documentation
+
+- [`ARCHITECTURE.md`](ARCHITECTURE.md): how the pieces fit together, from
+  the disc to the native renderer.
+- [`BUILD.md`](BUILD.md): the three builds of the repository, the game on
+  macOS, the toolchain and the Vita VPK.
+- [`TESTING.md`](TESTING.md): the unit suites, the CTest suites and the
+  game level checks.
+- [`TOOLS.md`](TOOLS.md): every file under `tools/`, one entry each.
+- [`DECOMP_WORKFLOW.md`](DECOMP_WORKFLOW.md): the five steps that turn a hot
+  recompiled function into a native one, proven equal.
+- [`FAQ.md`](FAQ.md): short answers to the questions that come up most often.
+- [`GLOSSARY.md`](GLOSSARY.md): the terms used by the code and the docs.
+- [`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md): the limitations that are
+  still open, gathered from the status documents.
+- [`../CONTRIBUTING.md`](../CONTRIBUTING.md): how work happens here.
+- [`../SECURITY.md`](../SECURITY.md): what the policy covers and how to
+  report a security issue.
+
+### Where to contribute
+
+- [`../CONTRIBUTING.md`](../CONTRIBUTING.md) says how work happens here: the
+  lifecycle of a change, the rules to follow and how to send it.
+- The open items sit at the top of [`worklist.md`](worklist.md): every row
+  marked **todo**, **doing** or **parked** is work that is not finished.
+- Bugs and feature requests go through the issue forms in
+  `.github/ISSUE_TEMPLATE/`:
+  [`bug_report.yml`](../.github/ISSUE_TEMPLATE/bug_report.yml) and
+  [`feature_request.yml`](../.github/ISSUE_TEMPLATE/feature_request.yml).
+
 ## At a glance
 
 | | macOS (Apple Silicon) | PS Vita |
@@ -253,6 +283,8 @@ Guide: [`decomp.md`](decomp.md).
 - [`worklist.md`](worklist.md) is the ordered list of what is being fixed now.
 - [`known_issues.md`](known_issues.md) has the older ones (the raised-sword
   arm swing, the earlier brightness study).
+- [`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md) gathers the open limitations
+  of this list, of the worklist and of the older list into one table.
 
 A note for fidelity work: the emulated picture's GPU rasterizer has no GS
 fog. Compare the native picture against `PS2X_GS_GPU=0` (CPU raster, exact

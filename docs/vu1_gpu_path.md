@@ -69,3 +69,29 @@ Answers to the open questions:
   Consecutive batches with the same draw state are now merged (triangle
   lists, a batch index per vertex into uM[32]/uBatch[32]): back to 30 fps,
   frames the same as the current path.
+
+## Status and open questions
+
+Status, as the repository documents it:
+
+- The VU1 thread never advances after loading: `mscal=0`, `vu1Instr=0`,
+  `xgkick=0` in all samples (docs/KNOWN_LIMITATIONS.md:27, restated with its
+  sources at docs/KNOWN_LIMITATIONS.md:66). The line references that second
+  entry carries for the measured table (docs/STATUS.md:321-322) do not resolve:
+  docs/STATUS.md is 291 lines long.
+- The native port plan states the exit condition for VU1 as "VU1 instructions
+  are ~0 on the route and no VU1 thread exists"
+  (docs/native_port_plan.md:62-63).
+
+Related notes in this directory: docs/vu1_routines.md (the routines the
+microcode runs) and docs/vu1_fast_recompiler.md (the fast recompiler design).
+
+What would unblock this, as open questions:
+
+- What in the loaded program's path leaves `mscal`, `vu1Instr` and `xgkick` at
+  zero in every sample (docs/KNOWN_LIMITATIONS.md:27)?
+- Does the packet go out at the kick, and does the program stall only on a
+  second XGKICK (docs/vu1_fast_recompiler.md:32-34)?
+- Which of the counters in the measured table are still reproduced by the
+  current tree, given that docs/STATUS.md no longer holds the table that
+  docs/KNOWN_LIMITATIONS.md:66 cites?

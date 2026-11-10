@@ -1,5 +1,21 @@
 # Known issues
 
+Last reviewed: 2026-11-09
+
+Legend for the verification lines in each issue below:
+- "How to verify or report:" one paragraph per issue: the shortest way to
+  reproduce it and keep evidence. Environment variable names are the ones
+  the source reads (a `git grep -n NAME` shows where); when a switch could
+  not be named, the line points to docs/native_port_plan.md instead.
+- Logs: `logs/play.log` for `./celosia run`, `logs/autotest.log` for
+  `./celosia autotest` and tools/bench.sh, `shots/<label>/` for
+  tools/measure.sh (its log and the route pictures).
+- Frames: tools/measure.sh (scripted route, the same moments at any speed),
+  tools/framediff.py (two measure.sh runs, per frame differences),
+  tools/native_compare.py (the `frame_*`/`native_*` pairs of a
+  `SOTC_NATIVE=2` run with `PS2X_SNAPSHOT_FRAMES`), tools/bench.sh (game
+  fps per section; it captures no frames).
+
 ## Raised sword: the arm sweeps back and forth (emulated and native) — gone
 
 **2026-10-19: no longer seen** (reported by the user while playing natively).
@@ -35,6 +51,15 @@ Not yet checked:
 Note: a hook around a recompiled function that calls others sees its result
 too early (the function runs in pieces the dispatcher continues), so the
 SOTC_MATH_CHECK results for sinf/cosf/atanf/acos* are not evidence.
+
+How to verify or report: play `./celosia run` (the native picture is the
+default) and again with `SOTC_NATIVE=1`
+(game/overrides/sotc_native.cpp:11986); the log is logs/play.log.
+`PS2X_STICK_DEADZONE` (0..0.9, default 0.18;
+PS2Recomp/ps2xRuntime/src/lib/ps2_pad.cpp:115) rules the stick out and
+`SOTC_MATH_CHECK=1` (game/overrides/sotc_overrides.cpp:1233) the math
+checks. Keep evidence as two tools/measure.sh runs (`shots/<label>/`)
+compared by tools/framediff.py; one second of frames is enough.
 
 ## Native: brighter than the emulated picture, most in the opening
 
@@ -75,6 +100,20 @@ surface, per draw.
   nothing there, the native one does. Which one the PS2 does needs a real
   reference (PCSX2 with a BIOS, or the console).
 
+How to verify or report: run `SOTC_NATIVE=2` with `PS2X_SNAPSHOT_FRAMES=<n>`
+and `PS2X_SNAPSHOT_DIR=<dir>`
+(PS2Recomp/ps2xRuntime/src/lib/gs/gs_hw_backend.cpp:2770 and :2803) for the
+emulated and native picture of the same frame, then rank the pairs with
+tools/native_compare.py. Toggle one suspect at a time: `SOTC_BLOOM_SCALE=0`
+(PS2Recomp/ps2xRuntime/src/lib/native/native_renderer.cpp:112),
+`SOTC_SKIP_ZFOG=1` (game/overrides/sotc_native.cpp:3006), and
+`PS2X_GS_GPU=0` for the exact CPU GS
+(PS2Recomp/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp:628).
+`PS2X_GS_TEXDUMP` (gs_cpu_backend.cpp:1793) and `SOTC_TEXDUMP_DIR`
+(sotc_native.cpp:1059) compare one texture's decode, and `PS2X_PROBE`
+(gs_cpu_backend.cpp:2391) logs the draws over two pixels; the log is
+logs/play.log.
+
 ## Native vs emulated: bloom over the sky and windows (reference doubtful)
 
 On the new route (tools/native_run.sh) the native sky outdoors and the
@@ -89,6 +128,16 @@ software path sampled sprites half a texel off and dimmed the bloom) points
 at the emulated GS here. Needs a real reference (PCSX2 software or the
 console) before tuning either side.
 
+How to verify or report: run `SOTC_NATIVE=2` with `PS2X_SNAPSHOT_FRAMES` and
+compare the pairs with tools/native_compare.py; add
+`SOTC_BLOOM_LOG=<from>-<to>` (game frames;
+PS2Recomp/ps2xRuntime/include/runtime/ps2_stats.h:39) for the bloom's
+inputs, GS sprites and native targets in the log. `SOTC_BLOOM_SCALE=0`
+(PS2Recomp/ps2xRuntime/src/lib/native/native_renderer.cpp:112) removes the
+native bloom and `PS2X_GS_GPU=0`
+(PS2Recomp/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp:628) gives the exact GS
+chain; the sky outdoors and the shrine window are the places to look.
+
 ## Native zFog (opt-in): layer 1 kept out of the main pass
 
 bgEnd copies the main frame (layer 1 drawn into it) to the 256 x 256
@@ -99,6 +148,15 @@ in the main pass ("shown through the backdrop"), which leaves flat, blurred
 patches where layer 1 surfaces come close to the camera (shrine floor near
 the stairs). To fix before turning zFog on.
 
+How to verify or report: `SOTC_NATIVE_ZFOG=1`
+(PS2Recomp/ps2xRuntime/src/lib/native/native_renderer.cpp:125) turns the
+layer 1 skip on; compare the same frame with `SOTC_NATIVE_ZFOG=0` and with
+the game's own zFog left out (`SOTC_SKIP_ZFOG=1`,
+game/overrides/sotc_native.cpp:3006). Take the pictures from a
+`SOTC_NATIVE=2` run with `PS2X_SNAPSHOT_FRAMES` and rank them with
+tools/native_compare.py; the shrine floor near the stairs is where the flat,
+blurred patches show.
+
 ## Native: Wander's shadow on the plain, Agro up close
 
 On the plain the emulated picture shows Wander's soft shadow on the ground;
@@ -106,4 +164,14 @@ the native one does not (seen 2026-10-16, with or without the glow and the
 native system: older than those). Agro right next to the camera (route
 picture 33, game frame ~2040) is missing natively: likely the near plane
 (the GS does not clip at it).
+
+How to verify or report: on the plain, take the tools/measure.sh route
+pictures (`shots/<label>/`, two runs compared by tools/framediff.py); for
+the Agro frame (route picture 33) use a `SOTC_NATIVE=2` run with
+`PS2X_SNAPSHOT_FRAMES` and rank the pairs with tools/native_compare.py.
+`SOTC_AB_FLAG=shadows,bodyshadows` with `SOTC_AB_PERIOD=n`
+(game/overrides/sotc_native.cpp:3018) turns the shadow switches off in every
+other window of one run, so the pairs separate them from the glow
+(`SOTC_BLOOM_SCALE=0`,
+PS2Recomp/ps2xRuntime/src/lib/native/native_renderer.cpp:112).
 

@@ -1,6 +1,29 @@
-import sys, collections
+"""Display XFF module size, symbols, imports and relocations.
+
+Usage:
+    python tools/xffinfo.py <path-to-xff-file> [...]
+"""
+import argparse
+import collections
+import os
+import sys
+
 from xff import Xff
-for p in sys.argv[1:]:
+
+parser = argparse.ArgumentParser(
+    description="Display XFF module size, symbols, imports and relocations.",
+)
+parser.add_argument(
+    "path",
+    nargs="*",
+    help="Path to XFF file(s)",
+)
+args = parser.parse_args()
+
+for p in args.path:
+    if not os.path.isfile(p):
+        print(f"Error: file not found: {p}", file=sys.stderr)
+        sys.exit(1)
     x = Xff(p)
     print(f"=== {p}: size={x.file_size:#x} syms={x.sym_count} imports={x.imp_count} relocTabs={x.reloc_count} unk0c={x.hdr_unk0c}")
     for s in x.sections:

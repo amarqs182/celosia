@@ -2108,6 +2108,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         }
                         catch (...)
                         {
+                            std::fprintf(stderr, "[dma:translate] translation failed for address %08x\n", tagAddr);
                             break;
                         }
                         const uint8_t *tagBase;
@@ -3495,6 +3496,7 @@ void PS2Memory::walkVif1Chain(Vif1Walker &walker, GifEventScanner &gif, Vif1Chai
             }
             catch (...)
             {
+                std::fprintf(stderr, "[dma:translate] translation failed for address %08x\n", tagAddr);
                 break;
             }
             const uint8_t *tagBase = tagInSPR ? m_scratchpad : m_rdram;

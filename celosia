@@ -89,6 +89,13 @@ cmd_configure() {
         { tail -30 "$LOGS/configure.log"; die "CMake configure failed (log: logs/configure.log)"; }
 }
 
+# Re-runs CMake's configure step so new or removed generated sources are
+# picked up by the source glob; says what failed instead of exiting silently.
+reconfigure() {
+    cmake "$CMAKE_DIR" >"$LOGS/configure.log" 2>&1 ||
+        { tail -30 "$LOGS/configure.log"; die "CMake re-configure failed (log: logs/configure.log)"; }
+}
+
 build_target() {
     [ -f "$CMAKE_DIR/build.ninja" ] || cmd_configure
     say "building $1"
@@ -107,7 +114,7 @@ recompile() {
     find "$RUNNER_DIR" -maxdepth 1 -type f \( -name '*.cpp' -o -name '*.h' \) -delete
     find "$dir/output" -maxdepth 1 -type f \( -name '*.cpp' -o -name '*.h' \) -exec sh -c 'cp "$@" "$0"' "$RUNNER_DIR" {} +
     # New/removed files change the source glob.
-    cmake "$CMAKE_DIR" >"$LOGS/configure.log" 2>&1
+    reconfigure
     build_target ps2EntryRunner
 }
 
@@ -151,13 +158,13 @@ stage_game() {
 # Runs the game until it jumps into code that is not recompiled yet (the next
 # module's entry) and saves guest RAM at that moment.
 capture() {
-    local name=$1 out=$CAPTURES/$(lower "$1").bin pid i
+    local name=$1 out=$CAPTURES/$(lower "$1").bin pid
     mkdir -p "$CAPTURES"
     rm -f "$out"
     say "capturing $name (the game window opens briefly)"
     (cd "$ROOT" && PS2X_DUMP_RAM_ON_MISSING=$out exec "$RUNNER" "$DISC/$BOOT") >"$LOGS/capture-$(lower "$name").log" 2>&1 &
     pid=$!
-    for i in $(seq 240); do
+    for _ in $(seq 240); do
         if [ -f "$out" ] && [ "$(wc -c <"$out")" -ge 33554432 ]; then break; fi
         kill -0 "$pid" 2>/dev/null || break
         sleep 0.5
@@ -175,7 +182,9 @@ cmd_setup() {
     local iso=""
     while [ $# -gt 0 ]; do
         case $1 in
-        --iso) iso=${2:-}; shift 2 ;;
+        --iso)
+            [ $# -ge 2 ] || die "--iso needs a path (./celosia setup --iso <SotC.iso|.zip>)"
+            iso=$2; shift 2 ;;
         *) die "unknown option $1" ;;
         esac
     done
@@ -203,13 +212,13 @@ cmd_vu1() {
     say "recompiling VU1 microcode"
     mkdir -p "$VU1REC_DIR"
     (cd "$ROOT" && PS2X_VU1_GEN=$VU1_DUMPS:$VU1REC_DIR "$RUNNER" "$DISC/$BOOT") 2>&1 | grep vu1rec || true
-    cmake "$CMAKE_DIR" >"$LOGS/configure.log" 2>&1
+    reconfigure
     build_target ps2EntryRunner
 }
 
 cmd_build() {
     [ -d "$WORK/game" ] || die "nothing to build yet (run: ./celosia setup)"
-    cmake "$CMAKE_DIR" >"$LOGS/configure.log" 2>&1
+    reconfigure
     build_target ps2EntryRunner
 }
 

@@ -1,0 +1,27 @@
+# Repository line-ending convention.
+#
+# The repository index is stored with LF line endings only. Enforce that for
+# text files on every platform, so contributors do not introduce CRLF noise in
+# diffs (core.autocrlf may mask the problem locally).
+#
+# Binary assets are marked explicitly to keep Git from applying text
+# conversion or diff/EOL heuristics to them.
+
+* text=auto eol=lf
+
+# Binary assets (no text conversion, no line-ending normalization).
+*.png binary
+*.webp binary
+*.woff2 binary
+*.suprx binary
+*.iso binary
+*.zip binary
+*.bin binary
+*.raw binary
+*.XFF binary
+*.xz binary
+*.ttf binary
+*.ico binary
+
+# SVG is XML text: normalize line endings explicitly.
+*.svg text eol=lf
