@@ -117,19 +117,15 @@ Consequences for your work:
 
 ### The device is reachable over SSH
 
-The R36S is a real machine on the LAN and can be used for verification:
+Use the maintainer's local SSH configuration or an interactive credential
+prompt. Do not store passwords, askpass scripts containing passwords, private
+keys, or other credentials in the repository or in committed agent instructions.
+
+Example (replace the placeholders with local values):
 
 ```sh
-export R36S_PASS=ark
-export SSH_ASKPASS=/tmp/opencode/askpass.sh SSH_ASKPASS_REQUIRE=force
-ssh -o StrictHostKeyChecking=no \
-    -o PreferredAuthentications=password -o PubkeyAuthentication=no \
-    ark@192.168.2.121 'uname -m'
+ssh <user>@<device-ip> 'uname -m'
 ```
-
-The askpass helper is a one-line script that echoes `$R36S_PASS`. Password
-auth is required: the device's SSH is Dropbear and the workstation's
-ed25519 key is not installed on it.
 
 Device rules — read `tools/r36s_smoke.sh` on the `r36s` branch before
 touching the hardware:
@@ -189,13 +185,11 @@ qemu-aarch64-static -L ~/tools/r36s-sysroot/usr \
 On the real device (copy the binary over, then run it there):
 
 ```sh
-export R36S_PASS=ark
-export SSH_ASKPASS=/tmp/opencode/askpass.sh SSH_ASKPASS_REQUIRE=force
 SSH_OPTS="-o StrictHostKeyChecking=no -o PreferredAuthentications=password -o PubkeyAuthentication=no"
 
 scp $SSH_OPTS /tmp/opencode/celosia-r36s/ps2xTest/ps2x_tests \
-    ark@192.168.2.121:/tmp/ps2x_tests
-ssh $SSH_OPTS ark@192.168.2.121 'cd /tmp && ./ps2x_tests'
+    <user>@<device-ip>:/tmp/ps2x_tests
+ssh $SSH_OPTS <user>@<device-ip> 'cd /tmp && ./ps2x_tests'
 ```
 
 The arm64 `ps2x_tests` binary **does run on the real device** (verified
