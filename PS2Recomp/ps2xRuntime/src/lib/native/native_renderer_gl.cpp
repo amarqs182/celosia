@@ -3899,10 +3899,30 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         }
         Region whole(const Target &t) const { return Region{0, 0, t.width, t.height}; }
         // The region program of `mode` in use (uniform() then finds its uniforms).
+        // Round 94's region programs are the Vita's (one program per mode, so
+        // several small passes share one GXM scene); elsewhere the one quad
+        // program (the default MODE) does every mode, and the round 93 / 94 /
+        // 98 switches are off (native_tuning.h). Without this the desktop GL
+        // build does not compile: regionPrograms only exists on the Vita.
         void useRegion(int mode)
         {
+#if defined(PS2X_NATIVE_VITA)
             quadProgram = regionPrograms[mode];
             useProgram(quadProgram);
+#else
+            (void)mode;
+#endif
+        }
+
+        // Whether round 98's one-pass glow program (mode 26) was built: the
+        // Vita's, for the same reason as the region programs above.
+        bool hasGlow98Program() const
+        {
+#if defined(PS2X_NATIVE_VITA)
+            return quadPrograms[26] != 0;
+#else
+            return false;
+#endif
         }
 
         // The colour of `from` into `to` (bilinear: reducing blurs it).
@@ -7664,7 +7684,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         // (Tuning glGlow98): both in one pass (mode 26) when both are drawn.
         auto glowComposite = [&](const Target &onto)
         {
-            if (native_renderer::tuning().glGlow98 && glow.amountA > 0.0f && glow.amountB > 0.0f && quadPrograms[26])
+            if (native_renderer::tuning().glGlow98 && glow.amountA > 0.0f && glow.amountB > 0.0f && hasGlow98Program())
             {
                 const float a[4] = {glow.tint[0], glow.tint[1], glow.tint[2], glow.amountA}, b[4] = {glow.tint[0], glow.tint[1], glow.tint[2], glow.amountB};
                 bindTexture(1, glowBlurred->texture);

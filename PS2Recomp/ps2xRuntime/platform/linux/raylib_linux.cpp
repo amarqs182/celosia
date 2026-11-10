@@ -688,7 +688,7 @@ void *CreateNativeGLContext(void)
     {
         std::fprintf(stderr, "[linux] could not restore the host GLES context: %s\n", SDL_GetError());
         SDL_GL_MakeCurrent(g_nativeWindow, context);
-        SDL_GL_DeleteTextures(1, &sharedTexture);
+        glDeleteTextures(1, &sharedTexture);
         SDL_GL_DeleteContext(context);
         SDL_DestroyWindow(g_nativeWindow);
         g_nativeWindow = nullptr;

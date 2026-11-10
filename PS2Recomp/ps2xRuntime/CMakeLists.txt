@@ -316,6 +316,10 @@ elseif(PS2X_IS_LINUX_SDL2_GLES)
     )
     target_include_directories(ps2x_linux_raylib PUBLIC
         "${CMAKE_CURRENT_SOURCE_DIR}/platform/linux"
+        # raylib_linux.cpp includes "default_font.inc", the same 128x128
+        # default-font atlas the Vita shim uses. The file lives in the Vita
+        # shim's directory, so its include path is needed here too.
+        "${CMAKE_CURRENT_SOURCE_DIR}/platform/vita/raylib"
     )
     target_link_libraries(ps2x_linux_raylib PUBLIC
         PkgConfig::PS2X_LINUX_SDL2
