@@ -124,7 +124,9 @@ public:
                 std::filesystem::create_directory("output");
             }
             data.outputPath = std::filesystem::absolute("output").string();
-        } catch(...) {}
+        } catch(...) {
+            LogCaughtException("create output directory");
+        }
 
         LoadSettings();
         ScanFonts();
@@ -165,7 +167,9 @@ public:
                     }
                 }
             }
-        } catch(...) {}
+        } catch(...) {
+            LogCaughtException("scan font sources");
+        }
 
         if (availableFonts.empty()) {
             availableFonts.push_back("Default");
@@ -211,7 +215,9 @@ public:
                     }
                 }
             }
-        } catch(...) {}
+        } catch(...) {
+            LogCaughtException("load settings");
+        }
     }
 
     void SaveSettings() {
@@ -227,7 +233,9 @@ public:
             if (!data.customOutputPath.empty()) {
                 file << "customOutputPath=" << data.customOutputPath << "\n";
             }
-        } catch(...) {}
+        } catch(...) {
+            LogCaughtException("save settings");
+        }
     }
 
     void LoadELF(const std::string& path) {
@@ -244,8 +252,9 @@ public:
             } else { 
                 data.rawElfData.clear(); 
             }
-        } catch (...) { 
-            data.rawElfData.clear(); 
+        } catch (...) {
+            LogCaughtException("read ELF file");
+            data.rawElfData.clear();
         }
 
         std::string filename = std::filesystem::path(path).filename().string();
@@ -268,7 +277,9 @@ public:
                 buffer << file.rdbuf();
                 data.ghidraCSVContent = buffer.str();
             }
-        } catch(...) {}
+        } catch(...) {
+            LogCaughtException("read Ghidra CSV");
+        }
 
         data.analyzer->importGhidraMap(csvPath);
         Log("Ghidra symbols imported successfully from: " + csvPath);
@@ -461,6 +472,7 @@ public:
                     }
                 }
             } catch(...) {
+                LogCaughtException("load config.toml");
                 continue;
             }
         }
@@ -565,6 +577,19 @@ debug_info = false
     }
 
 private:
+    // Report a swallowed exception on stderr without altering control flow.
+    // Must be called from inside a catch block: rethrowing recovers the
+    // in-flight exception so its message can be printed.
+    static void LogCaughtException(const char* context) {
+        try {
+            throw;
+        } catch (const std::exception& e) {
+            std::cerr << "[Studio] " << context << " failed: " << e.what() << std::endl;
+        } catch (...) {
+            std::cerr << "[Studio] " << context << " failed: unknown exception" << std::endl;
+        }
+    }
+
     mutable std::mutex statusMutex_;
     std::string statusMessage_ = "Ready";
 };
