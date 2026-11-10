@@ -51,8 +51,10 @@ profiler do console é o que ainda faz sentido como referência de
   thread, o render thread, e a espera do render thread pelo game thread
   (o `vglSwapBuffers` segura o slot de display — round 110/132), o
   pacing de display, e o custo de memória (os logs `[gl:mem]`).
-- Ajudua os outros agentes a **não publicarem número inventado**: a
-  regra é "sem disco, sem Vita3K, sem R36S conectado, sem número".
+- Ajuda os outros agentes a **não publicarem número inventado**: a regra
+  é "sem execução real no ambiente-alvo, sem número". O R36S do mantenedor
+  é alcançável por SSH; profiling e medições precisam ser executados nele
+  quando a tarefa exigir números do hardware.
 
 ## Regras (as mais importantes do projeto)
 
