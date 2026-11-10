@@ -33,6 +33,18 @@ The device's EGL/GBM path must not be initialized manually on
 and hung the device until a power cycle. Let SDL2 own display and context
 creation through its KMSDRM video driver.
 
+## Validation status recorded on 2026-11-09
+
+The AArch64 cross-build compiled the runtime and unit-test target, and the
+`ps2x_tests` binary ran on the R36S. It reproduced the same two known test
+failures and final assertion observed in the host run; these were recorded as
+pre-existing failures, not as an AArch64 regression.
+
+The game itself has not yet been built or run on the R36S. The setup/capture
+pipeline, gameplay rendering, frame timing and image output therefore remain
+unverified. Do not describe the port as playable or the renderer as validated
+until those checks have been performed.
+
 ## What can be reused
 
 - The game code emitted by PS2Recomp is C++. The setup pipeline generates the
