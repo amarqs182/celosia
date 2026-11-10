@@ -380,3 +380,63 @@ batch (normals) and its lights (instance + 0x20..0x9f), surface materials
    packets -> vertex blocks) and draw it with Metal next to the emulated
    picture.
 2. Then the Metal renderer at `modelDisp` level, system by system.
+
+## Verification
+
+Every effect is checked against the emulated GS picture of the same run.
+There is currently no golden-frame test: nothing draws a fixed picture and
+compares it to a stored reference (docs/TESTING.md:225, "No golden render
+test"), so a change is accepted on the pictures below and on the flags of
+`tools/framediff.py`, not on a pass/fail suite.
+
+- Screenshots. `PS2X_SNAPSHOT_DIR=<dir>` selects the output directory
+  (`gs_hw_backend.cpp:2803`, `ps2_runtime.cpp:3585`);
+  `PS2X_SNAPSHOT_SECONDS=<n>` (default 5, `ps2_runtime.cpp:3584`) sets the
+  interval, `PS2X_SNAPSHOT_FRAMES=<n>` saves one picture every n game
+  frames instead (`gs_hw_backend.cpp:2770`, `ps2_runtime.cpp:3608`).
+  `./celosia run` writes to `shots/run` (`celosia:247`). With
+  `SOTC_NATIVE=2` both renderers draw every frame (`README.md:111`), so
+  one run leaves the emulated `frame_<i>.png` and the native
+  `native_<i>.png` side by side for the same frame.
+- Native versus emulated. `tools/native_compare.py shots/run
+  [--out dir] [--worst 24]` (`tools/native_compare.py:12`) ranks those
+  pairs by difference and writes contact sheets of the worst ones with a
+  per-region break down, so an effect can be looked at where it goes
+  wrong. Use it after a `SOTC_NATIVE=2` run with
+  `PS2X_SNAPSHOT_FRAMES=<n>`.
+- Two runs, same route. `tools/measure.sh <label> [seconds]`
+  (`tools/measure.sh:6`) runs the scripted route (title, Load Game,
+  shrine, walk out), prints one summary line and keeps the route pictures
+  in `shots/<label>/` (`tools/measure.sh:14`).
+  `tools/framediff.py shots/<before> shots/<after> [threshold]`
+  (`tools/framediff.py:4`, also cited at `tools/measure.sh:7`) flags the
+  frames with more than 1.5% changed pixels, writes `diff_<name>.png` and
+  exits 1 when any frame is flagged. A renderer change must not flag a
+  frame the before run did not; a new effect that changes the picture is
+  measured against the emulated reference, not against the old run.
+- Cost. `tools/bench.sh [label]` (`tools/bench.sh:4`) runs title, intro
+  and shrine and prints the average game fps per section
+  (`tools/bench.sh:18`), which is how a pass is shown not to cost frames.
+- Isolation. `SOTC_AB_FLAG=<names>,SOTC_AB_PERIOD=n` (`README.md:390`)
+  turns the named renderer switches (bloom, vfog, zfog, glow, dof,
+  shadows, sblur, feedback, ptcl, reflect, refract, ...) off in every
+  other window, so one `SOTC_NATIVE=2` run compares the effect on and off
+  against the same GS pictures.
+
+## Known gaps vs PS2
+
+`docs/KNOWN_LIMITATIONS.md` now exists and owns the open effect defects;
+this map only points at its rows:
+
+- Bloom shape: bright openings saturate to a flat white with a narrow
+  halo, where the PS2 shows a wide soft glow
+  ([KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md):18).
+- Brightness: the native picture is brighter than the emulated one, a
+  factor in the opening and an offset in the shrine
+  ([KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md):22).
+- Shadow on the plain: Wander's soft ground shadow and Agro's shadow up
+  close are missing natively, and the state needs verification since body
+  shadows are listed as on ([KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md):24).
+- zFog layer 1: native zFog (opt-in) keeps layer 1 out of the main pass,
+  which leaves flat patches where those surfaces come close, so zFog
+  stays off ([KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md):23).
