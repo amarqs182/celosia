@@ -1,5 +1,7 @@
 # Celosia
 
+[![CI](https://github.com/amarqs182/celosia/actions/workflows/ci.yml/badge.svg)](https://github.com/amarqs182/celosia/actions/workflows/ci.yml) [![Docs](https://github.com/amarqs182/celosia/actions/workflows/docs.yml/badge.svg)](https://github.com/amarqs182/celosia/actions/workflows/docs.yml)
+
 A native port of **Shadow of the Colossus** (PS2, USA, SCUS-97472) to macOS
 (Apple Silicon) and the **PS Vita**, built by statically recompiling the
 game's MIPS code to C++ with [PS2Recomp](https://github.com/ran-j/PS2Recomp).
@@ -634,3 +636,23 @@ was directed, reviewed and tested by the author.
 ## License
 
 GPL-3.0, the same license as PS2Recomp. See [LICENSE](LICENSE).
+
+## Contributing
+
+Contributions are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) has the
+workflow, the code style and the review rules; these documents cover the
+parts a change usually touches:
+
+- [docs/BUILD.md](docs/BUILD.md): build instructions and the toolchain
+- [docs/TESTING.md](docs/TESTING.md): the test suites and how to run them
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): the code layout and the runtime design
+- [docs/DECOMP_WORKFLOW.md](docs/DECOMP_WORKFLOW.md): the decompilation workflow
+- [docs/TOOLS.md](docs/TOOLS.md): the tools under `tools/`
+- [docs/FAQ.md](docs/FAQ.md): common questions
+- [CONTRIBUTING.md](CONTRIBUTING.md): how to propose a change
+
+### Documentation
+
+- [docs/index.html](docs/index.html): the documentation site
+- [docs/STATUS.md](docs/STATUS.md): where the port stands
+- [docs/worklist.md](docs/worklist.md): the work list
