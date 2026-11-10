@@ -139,6 +139,7 @@ int main()
     SDL_Window *rendererWindow = nullptr;
     SDL_GLContext hostContext = nullptr;
     SDL_GLContext rendererContext = nullptr;
+    GLuint sharedTexture = 0;
     int result = 1;
 
     if (SDL_Init(SDL_INIT_VIDEO) != 0)
@@ -218,7 +219,6 @@ int main()
 
     // A texture created in the renderer context must be visible to the host
     // context, because DrawTexturePro presents renderer-owned GL textures.
-    GLuint sharedTexture = 0;
     glGenTextures(1, &sharedTexture);
     glBindTexture(GL_TEXTURE_2D, sharedTexture);
     if (SDL_GL_MakeCurrent(hostWindow, hostContext) != 0 ||
