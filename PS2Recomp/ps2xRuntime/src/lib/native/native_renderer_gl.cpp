@@ -2740,12 +2740,16 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 "precision highp float;\n"
                 "precision highp int;\n"
                 "precision highp sampler2D;\n";
-            std::string esSource;
-            if (std::strncmp(source, version.c_str(), version.size()) == 0)
+            std::string esSource(source);
+            const size_t versionAt = esSource.find(version);
+            if (versionAt == std::string::npos)
             {
-                esSource = esVersion + (source + version.size());
-                source = esSource.c_str();
+                std::cerr << "[native:gl] GLES shader is missing a supported GLSL version directive" << std::endl;
+                return 0;
             }
+            esSource.erase(versionAt, version.size());
+            esSource.insert(0, esVersion);
+            source = esSource.c_str();
 #endif
 #if defined(PS2X_NATIVE_VITA)
             type = type == GL_VERTEX_SHADER ? GL_CG_VERTEX_SHADER_EXT : GL_CG_FRAGMENT_SHADER_EXT;
