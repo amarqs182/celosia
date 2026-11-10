@@ -13,11 +13,19 @@
 set(CMAKE_SYSTEM_NAME Linux)
 set(CMAKE_SYSTEM_PROCESSOR aarch64)
 
-set(_r36s_sysroot "/home/amarqs/tools/r36s-sysroot")
+set(R36S_SYSROOT "$ENV{HOME}/tools/r36s-sysroot" CACHE PATH
+    "AArch64 sysroot for the R36S (Debian trixie arm64)")
+set(_r36s_sysroot "${R36S_SYSROOT}")
 set(_r36s_triplet "aarch64-linux-gnu")
 set(_r36s_libdir "${_r36s_sysroot}/usr/lib/${_r36s_triplet}")
 
+if(NOT IS_DIRECTORY "${_r36s_sysroot}/usr/bin")
+    message(FATAL_ERROR
+        "R36S sysroot not found at '${_r36s_sysroot}'. Set -DR36S_SYSROOT=/path/to/r36s-sysroot.")
+endif()
+
 set(CMAKE_C_COMPILER "${_r36s_sysroot}/usr/bin/${_r36s_triplet}-gcc")
+set(CMAKE_CXX_COMPILER "${_r36s_sysroot}/usr/bin/${_r36s_triplet}-g++")
 set(CMAKE_ASM_COMPILER "${_r36s_sysroot}/usr/bin/${_r36s_triplet}-as")
 
 # The Arch gcc build looks for the assembler and linker next to *itself* on
