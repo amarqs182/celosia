@@ -256,3 +256,14 @@ For each task:
 6. Report what changed and distinguish passed, failed, blocked and unexecuted checks.
 
 Use KISS, DRY and YAGNI. Prefer tests that reproduce the reported problem. Never claim validation that was not actually run.
+
+
+## OpenCode model variants
+
+All agents in `.opencode/agents/` select the NVIDIA Nemotron model with the
+`#thinking` variant. OpenCode must expose that exact variant through the
+selected provider/model catalog or the user's OpenCode configuration; an
+unknown variant causes model resolution to fail. This repository does not
+ship provider credentials or a user-specific `opencode.jsonc`. Before relying
+on the agents, verify that the configured provider/model and its `thinking`
+variant are available in the active OpenCode installation.
