@@ -6,13 +6,55 @@ Usage: build_elf.py out_dir boot_elf boot_syms XFF@hdr@ram_dump [...]
 hdr is the module header address, or "auto" to locate it in the dump.
 
 Each module is captured from a RAM dump taken when the game jumps to its entry.
+
+Inputs:
+    out_dir (positional): directory the generated files are written to.
+    boot_elf (positional): the boot ELF (SCUS_974.72) merged into the output.
+    boot_syms (positional): the boot symbol list, one "addr name" per line.
+    XFF@hdr@ram_dump (positional, repeatable): a captured XFF module, the
+        address of its header in RAM (or "auto" to locate it in the dump) and
+        the RAM dump it was captured from.
+
+Outputs (written to out_dir):
+    SOTC.elf: the boot ELF and every module merged into one ELF.
+    functions.csv: "Name,Start,End,Size" function map of the merged ELF.
+    boot_functions.csv: function map of the boot ELF alone.
+    symbols.txt: "addr name" symbol list of the merged ELF.
+    merged_entries.txt: function starts merged into the function around them.
+    dynamic_imm.txt: instruction addresses relinked by the game's dynamic linker.
 """
-import bisect, pathlib, re, sys, struct
+import argparse, bisect, pathlib, re, sys, struct
 from elfmini import Elf
 from modimage import LoadedModule, find_header
 import funcmap_elf
 
 SHF_WRITE, SHF_ALLOC, SHF_EXEC = 1, 2, 4
+
+
+def check_inputs(boot_path, boot_syms, mods):
+    """Upfront existence checks for every input file.
+
+    Exits nonzero with a clear message naming the missing file. The optional
+    ``game/pinned_starts.txt`` is skipped: it is the file whose contents,
+    not its presence, matter to merge logic.
+    """
+    errors = []
+    for path in [boot_path, boot_syms]:
+        p = pathlib.Path(path)
+        if not p.is_file():
+            errors.append(f"error: input file not found: {p}")
+    for spec in mods:
+        parts = spec.split("@")
+        if len(parts) != 3:
+            errors.append(f"error: malformed module spec (expected XFF@hdr@ram_dump): {spec}")
+            continue
+        if not pathlib.Path(parts[0]).is_file():
+            errors.append(f"error: input file not found: {parts[0]}")
+        if not pathlib.Path(parts[2]).is_file():
+            errors.append(f"error: input file not found: {parts[2]}")
+    if errors:
+        print("\n".join(errors), file=sys.stderr)
+        sys.exit(1)
 
 
 def write_elf(path, entry, sections):
@@ -57,7 +99,7 @@ def load_pinned(path):
     the ones marked !hex: registered but left merged on purpose (no warning)."""
     out, quiet = set(), set()
     if path.exists():
-        for line in path.read_text().splitlines():
+        for line in path.read_text(encoding="utf-8").splitlines():
             line = line.split("#", 1)[0].strip()
             if line.startswith("!"):
                 quiet.add(int(line[1:], 16))
@@ -73,12 +115,13 @@ def registered_addresses(root):
     pat = re.compile(r"\b(?:SOTC_DECOMP_\w*FUNCTION|registerFunction)\s*\(\s*0x([0-9A-Fa-f]{6,8})u?\b")
     out = {}
     for src in sorted((root / "game/overrides").glob("*.cpp")):
-        for h in pat.findall(src.read_text(errors="ignore")):
+        for h in pat.findall(src.read_text(encoding="utf-8", errors="ignore")):
             out[int(h, 16)] = src.name
     return out
 
 
 def main(out_dir, boot_path, boot_syms, mods):
+    check_inputs(boot_path, boot_syms, mods)
     boot = Elf(boot_path)
     sections = []
     for s in boot.sections:
@@ -100,9 +143,9 @@ def main(out_dir, boot_path, boot_syms, mods):
     # boot ELF function map from heuristics
     boot_csv = f"{out_dir}/boot_functions.csv"
     merged += funcmap_elf.main(boot_path, boot_syms, boot_csv, merge=True, pinned=pinned)
-    rows = [l.strip().split(",") for l in open(boot_csv).readlines()[1:]]
+    rows = [l.strip().split(",") for l in open(boot_csv, encoding="utf-8").readlines()[1:]]
     funcs = [(int(r[1], 16), int(r[2], 16), r[0]) for r in rows]
-    syms = [l.split() for l in open(boot_syms)]
+    syms = [l.split() for l in open(boot_syms, encoding="utf-8")]
     dynamic = set()
 
     for spec in mods:
@@ -162,14 +205,14 @@ def main(out_dir, boot_path, boot_syms, mods):
                         dynamic.add(t.addr + r.offset)
 
     sections.sort(key=lambda s: s[1])
-    with open(f"{out_dir}/dynamic_imm.txt", "w") as f:
+    with open(f"{out_dir}/dynamic_imm.txt", "w", encoding="utf-8") as f:
         f.write("# instruction addresses relinked by the game's dynamic linker\n")
         for a in sorted(dynamic):
             f.write(f"{a:08x}\n")
     print(f"{len(dynamic)} dynamic immediate sites")
     write_elf(f"{out_dir}/SOTC.elf", boot.entry, sections)
     seen = set()
-    with open(f"{out_dir}/functions.csv", "w") as f:
+    with open(f"{out_dir}/functions.csv", "w", encoding="utf-8") as f:
         f.write("Name,Start,End,Size\n")
         for a, e, n in sorted(funcs):
             if a in seen:
@@ -177,7 +220,7 @@ def main(out_dir, boot_path, boot_syms, mods):
             seen.add(a)
             f.write(f"{n},0x{a:08X},0x{e:08X},{e - a}\n")
     # Starts merged into a function: entry points (tools/gen_config.py).
-    with open(f"{out_dir}/merged_entries.txt", "w") as f:
+    with open(f"{out_dir}/merged_entries.txt", "w", encoding="utf-8") as f:
         f.write("# function starts merged into the function around them\n")
         for a in sorted(set(merged)):
             f.write(f"{a:08x}\n")
@@ -186,11 +229,24 @@ def main(out_dir, boot_path, boot_syms, mods):
         if a in set(merged) and a not in seen and a not in quiet:
             print(f"warning: {src} registers 0x{a:08x}, merged into the function around it: "
                   f"add it to game/pinned_starts.txt if gotos must reach the override")
-    with open(f"{out_dir}/symbols.txt", "w") as f:
+    with open(f"{out_dir}/symbols.txt", "w", encoding="utf-8") as f:
         for a, n in sorted(syms):
             f.write(f"{a} {n}\n")
     print(f"wrote {out_dir}/SOTC.elf with {len(seen)} functions")
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("out_dir", help="directory the merged ELF and maps are written to")
+    parser.add_argument("boot_elf", help="boot ELF to merge")
+    parser.add_argument("boot_syms", help="boot symbol list (addresses from boot ELF/symbols)")
+    parser.add_argument("mods", nargs="*", help="XFF@hdr@ram_dump specs")
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    main(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:])
+    args = parse_args()
+    main(args.out_dir, args.boot_elf, args.boot_syms, args.mods)
