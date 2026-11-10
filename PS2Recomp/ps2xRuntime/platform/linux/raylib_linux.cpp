@@ -535,7 +535,24 @@ void InitWindow(int width, int height, const char *title)
     g_width = width;
     g_height = height;
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_AUDIO) != 0)
+    {
         std::fprintf(stderr, "[linux] SDL_Init failed: %s\n", SDL_GetError());
+        return;
+    }
+    // SDL_CONTROLLERDEVICEADDED is not a substitute for enumerating devices
+    // that were already connected when SDL initialized (the built-in R36S
+    // controls are present at process startup).
+    for (int device = 0; device < SDL_NumJoysticks(); ++device)
+    {
+        if (!SDL_IsGameController(device))
+            continue;
+        for (SDL_GameController *&controller : g_controllers)
+            if (!controller)
+            {
+                controller = SDL_GameControllerOpen(device);
+                break;
+            }
+    }
     bootMark("window: SDL up");
     // The GLES3 context is SDL's (SDL_GL_CreateContext uses EGL underneath).
     // The GS renderer's shaders are GLSL ES 3.10 (texelFetch), so the context
