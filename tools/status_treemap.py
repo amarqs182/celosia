@@ -4,14 +4,19 @@
 One map per "map" (renderer, hardware), split in areas, one tile per feature,
 coloured by status (native / partial / emulated). Run it after editing the
 JSON: tools/status_treemap.py [docs/port_status.json] [docs/port_status.svg]
+
+The module is also imported by tools/decomp_status.py, which reuses the
+layout helpers `squarify` and `wrap`; keep their signatures stable.
 """
 import html
 import json
 import os
+import pathlib
 import sys
 from collections import OrderedDict
 
-ROOT = os.path.join(os.path.dirname(__file__), '..')
+# Absolute, CWD independent: the repo root, one level above tools/.
+ROOT = str(pathlib.Path(__file__).resolve().parent.parent)
 COLOURS = {'native': '#2f9e5b', 'partial': '#d9a521', 'emulated': '#c8553d'}
 TITLES = {'renderer': 'Native renderer', 'hardware': 'PS2 hardware'}
 
@@ -74,7 +79,10 @@ def wrap(text, width_px, size):
 def main():
     src = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, 'docs/port_status.json')
     dst = sys.argv[2] if len(sys.argv) > 2 else os.path.join(ROOT, 'docs/port_status.svg')
-    features = json.load(open(src))
+    if not os.path.isfile(src):
+        sys.exit(f'status_treemap: input JSON not found: {src}')
+    with open(src, encoding='utf-8') as fh:
+        features = json.load(fh)
     maps = OrderedDict()
     for f in features:
         maps.setdefault(f['map'], OrderedDict()).setdefault(f['area'], []).append(f)
@@ -117,7 +125,8 @@ def main():
                 s.append('</g>')
         y += map_h + gap
     s.append('</svg>')
-    open(dst, 'w').write('\n'.join(s) + '\n')
+    with open(dst, 'w', encoding='utf-8', newline='\n') as fh:
+        fh.write('\n'.join(s) + '\n')
     print(f'{dst}: {len(features)} features, {native} native')
 
 
