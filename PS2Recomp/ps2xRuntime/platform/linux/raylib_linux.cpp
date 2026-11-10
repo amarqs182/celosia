@@ -84,6 +84,7 @@ namespace
 
     SDL_GameController *g_controllers[2] = {nullptr, nullptr};
     PadState g_pad{};
+    PadState g_prevPad{};
 
     // Keyboard: the raylib key codes of raylib.h through SDL2.
     struct KeyMap
@@ -297,6 +298,7 @@ namespace
             merged.rx = pick(merged.rx, SDL_GameControllerGetAxis(ctrl, SDL_CONTROLLER_AXIS_RIGHTX));
             merged.ry = pick(merged.ry, SDL_GameControllerGetAxis(ctrl, SDL_CONTROLLER_AXIS_RIGHTY));
         }
+        g_prevPad = g_pad;
         g_pad = merged;
     }
 
@@ -1373,7 +1375,33 @@ float GetMouseWheelMove(void) { return 0.0f; }
 void SetMousePosition(int x, int y) { (void)x; (void)y; }
 bool IsMouseButtonDown(int button) { (void)button; return false; }
 bool IsMouseButtonPressed(int button) { (void)button; return false; }
-bool IsGamepadButtonPressed(int gamepad, int button) { (void)gamepad; (void)button; return false; }
+bool IsGamepadButtonPressed(int gamepad, int button)
+{
+    if (gamepad != 0)
+        return false;
+    unsigned int mask = 0;
+    switch (button)
+    {
+    case GAMEPAD_BUTTON_LEFT_FACE_UP: mask = CTRL_UP; break;
+    case GAMEPAD_BUTTON_LEFT_FACE_RIGHT: mask = CTRL_RIGHT; break;
+    case GAMEPAD_BUTTON_LEFT_FACE_DOWN: mask = CTRL_DOWN; break;
+    case GAMEPAD_BUTTON_LEFT_FACE_LEFT: mask = CTRL_LEFT; break;
+    case GAMEPAD_BUTTON_RIGHT_FACE_UP: mask = CTRL_TRIANGLE; break;
+    case GAMEPAD_BUTTON_RIGHT_FACE_RIGHT: mask = CTRL_CIRCLE; break;
+    case GAMEPAD_BUTTON_RIGHT_FACE_DOWN: mask = CTRL_CROSS; break;
+    case GAMEPAD_BUTTON_RIGHT_FACE_LEFT: mask = CTRL_SQUARE; break;
+    case GAMEPAD_BUTTON_LEFT_TRIGGER_1: mask = CTRL_L1; break;
+    case GAMEPAD_BUTTON_RIGHT_TRIGGER_1: mask = CTRL_R1; break;
+    case GAMEPAD_BUTTON_LEFT_TRIGGER_2: mask = CTRL_L2; break;
+    case GAMEPAD_BUTTON_RIGHT_TRIGGER_2: mask = CTRL_R2; break;
+    case GAMEPAD_BUTTON_MIDDLE_LEFT: mask = CTRL_SELECT; break;
+    case GAMEPAD_BUTTON_MIDDLE_RIGHT: mask = CTRL_START; break;
+    case GAMEPAD_BUTTON_LEFT_THUMB: mask = CTRL_L3; break;
+    case GAMEPAD_BUTTON_RIGHT_THUMB: mask = CTRL_R3; break;
+    default: return false;
+    }
+    return (g_pad.buttons & mask) != 0u && (g_prevPad.buttons & mask) == 0u;
+}
 
 // Misc
 void TraceLog(int msgType, const char *text, ...)
