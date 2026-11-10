@@ -14,8 +14,10 @@
 #include <array>
 #include <atomic>
 #include <cstdio>
+#include <cstdarg>
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
 #include <map>
 #include <mutex>
 #include <vector>
@@ -1070,7 +1072,10 @@ bool IsKeyPressed(int key)
     return i >= 0 && g_keyPressed[static_cast<size_t>(i)];
 }
 
-bool IsGamepadAvailable(int gamepad) { return gamepad == 0; }
+bool IsGamepadAvailable(int gamepad)
+{
+    return gamepad == 0 && (g_controllers[0] != nullptr || g_controllers[1] != nullptr);
+}
 
 bool IsGamepadButtonDown(int gamepad, int button)
 {
@@ -1336,13 +1341,68 @@ bool IsMouseButtonPressed(int button) { (void)button; return false; }
 bool IsGamepadButtonPressed(int gamepad, int button) { (void)gamepad; (void)button; return false; }
 
 // Misc
-void TraceLog(int msgType, const char *text, ...) { (void)msgType; (void)text; }
-int GetRandomValue(int min, int max) { (void)max; return min; }
-void SetRandomSeed(unsigned int seed) { (void)seed; }
-Color ColorFromHSV(float hue, float saturation, float value) { (void)hue; (void)saturation; (void)value; return WHITE; }
-Color ColorAlpha(Color color, float alpha) { color.a = static_cast<unsigned char>(alpha * 255.0f); return color; }
-bool CheckCollisionRecs(Rectangle rec1, Rectangle rec2) { (void)rec1; (void)rec2; return false; }
+void TraceLog(int msgType, const char *text, ...)
+{
+    if (!text)
+        return;
+    std::fprintf(stderr, "[raylib:%d] ", msgType);
+    va_list args;
+    va_start(args, text);
+    std::vfprintf(stderr, text, args);
+    va_end(args);
+    std::fputc('\n', stderr);
+}
+
+int GetRandomValue(int min, int max)
+{
+    if (min > max)
+        std::swap(min, max);
+    const int64_t range = static_cast<int64_t>(max) - min + 1;
+    return min + static_cast<int>(static_cast<int64_t>(std::rand()) % range);
+}
+
+void SetRandomSeed(unsigned int seed) { std::srand(seed); }
+
+Color ColorFromHSV(float hue, float saturation, float value)
+{
+    hue = std::fmod(hue, 360.0f);
+    if (hue < 0.0f)
+        hue += 360.0f;
+    saturation = std::clamp(saturation, 0.0f, 1.0f);
+    value = std::clamp(value, 0.0f, 1.0f);
+
+    const float chroma = value * saturation;
+    const float x = chroma * (1.0f - std::fabs(std::fmod(hue / 60.0f, 2.0f) - 1.0f));
+    const float m = value - chroma;
+    float r = 0.0f, g = 0.0f, b = 0.0f;
+    if (hue < 60.0f) { r = chroma; g = x; }
+    else if (hue < 120.0f) { r = x; g = chroma; }
+    else if (hue < 180.0f) { g = chroma; b = x; }
+    else if (hue < 240.0f) { g = x; b = chroma; }
+    else if (hue < 300.0f) { r = x; b = chroma; }
+    else { r = chroma; b = x; }
+
+    return Color{
+        static_cast<unsigned char>((r + m) * 255.0f + 0.5f),
+        static_cast<unsigned char>((g + m) * 255.0f + 0.5f),
+        static_cast<unsigned char>((b + m) * 255.0f + 0.5f),
+        255
+    };
+}
+
+Color ColorAlpha(Color color, float alpha)
+{
+    color.a = static_cast<unsigned char>(color.a * std::clamp(alpha, 0.0f, 1.0f) + 0.5f);
+    return color;
+}
+
+bool CheckCollisionRecs(Rectangle rec1, Rectangle rec2)
+{
+    return rec1.x < rec2.x + rec2.width && rec1.x + rec1.width > rec2.x &&
+           rec1.y < rec2.y + rec2.height && rec1.y + rec1.height > rec2.y;
+}
+
 void TakeScreenshot(const char *fileName) { (void)fileName; }
 const char *GetClipboardText(void) { return nullptr; }
 void SetClipboardText(const char *text) { (void)text; }
-float Fade(Color color, float alpha) { (void)color; (void)alpha; return 1.0f; }
+Color Fade(Color color, float alpha) { return ColorAlpha(color, alpha); }
