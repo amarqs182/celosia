@@ -76,10 +76,12 @@ qemu-aarch64-static -L ~/tools/r36s-sysroot/usr \
   /tmp/opencode/celosia-r36s/ps2xTest/ps2x_tests
 ```
 
-Sem disco do jogo, sem Vita3K, sem Mac, sem R36S conectado: **difftest,
-timings de frame, comparação de imagem e profiling do device não são
-executáveis aqui**. Escreva o comando e deixe a medição para o
-mantenedor. **Nunca invente número.**
+O repositório não contém os artefatos do jogo. O R36S do mantenedor é
+alcançável por SSH; portanto, smoke tests e profiling de hardware são
+possíveis quando os binários e os arquivos locais necessários estiverem
+disponíveis. Difftest e comparação de imagem dependem desses artefatos e
+de uma execução real no dispositivo. Escreva o comando e registre o
+ambiente; **nunca invente número.**
 
 ## O que você faz
 
