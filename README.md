@@ -21,8 +21,8 @@ This fork (`amarqs182/celosia`) carries the native port to the **R36S** handheld
 | Area | R36S (confirmed on device, 2026-11-09) |
 | --- | --- |
 | SoC | Rockchip RK3326, 4× Cortex-A35 |
-| GPU | Mali Midgard family |
-| RAM / swap | 916 MB / 512 MB |
+| GPU | Mali-G31 (Bifrost) |
+| RAM / swap | 895 MiB (916,896 kB) / 512 MiB |
 | Panel | 640×480 |
 | OS | Debian GNU/Linux 13 (trixie), kernel 4.4.189, `rockchip-drm` |
 | Backend | SDL2 + KMSDRM + GLES (no X11, no Wayland) |
