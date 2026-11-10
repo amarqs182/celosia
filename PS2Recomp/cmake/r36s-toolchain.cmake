@@ -10,6 +10,20 @@
 # produced binaries requiring GLIBC_2.43 — newer than the device's 2.41, so
 # the loader refused to start them ("version `GLIBC_2.43' not found").
 # This sysroot pins the baseline to what the device actually provides.
+#
+# The GPU libraries must mirror the device: it has
+#   libGLESv2.so.2 -> libMali.so, libGLESv3.so.3 -> libMali.so,
+#   libEGL.so.1 -> libMali.so, libgbm.so.1 -> libMali.so
+# (ARM's libmali, the Bifrost r13p0 build, reporting OpenGL ES 3.2). The
+# sysroot needs the matching link-time names:
+#   ln -sfn libMali.so libGLESv3.so
+#   ln -sfn libMali.so libGLESv3.so.3
+#   ln -sfn libMali.so libGLESv3.so.3.0.0
+# Without them find_library(NAMES GLESv3 GLESv2 GLES) falls back to the
+# sysroot's libGLESv2.so, which is a 27-symbol GLES 2.0 stub: the link
+# then fails on glGenVertexArrays, glBindFramebuffer, glCopyBufferSubData
+# and glClearDepthf. (The runtime also needs libGLESv3.so to resolve at
+# run time, so the same names must exist on the device itself.)
 set(CMAKE_SYSTEM_NAME Linux)
 set(CMAKE_SYSTEM_PROCESSOR aarch64)
 
