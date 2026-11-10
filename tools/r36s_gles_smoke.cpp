@@ -203,13 +203,36 @@ int main()
         goto cleanup;
     }
 
+    if (SDL_GL_SetAttribute(SDL_GL_SHARE_WITH_CURRENT_CONTEXT, 1) != 0)
+    {
+        std::fprintf(stderr, "[smoke] could not enable context sharing: %s\n", SDL_GetError());
+        goto cleanup;
+    }
     rendererContext = SDL_GL_CreateContext(rendererWindow);
+    SDL_GL_SetAttribute(SDL_GL_SHARE_WITH_CURRENT_CONTEXT, 0);
     if (!rendererContext)
     {
         std::fprintf(stderr, "[smoke] renderer context creation failed: %s\n", SDL_GetError());
         goto cleanup;
     }
 
+    // A texture created in the renderer context must be visible to the host
+    // context, because DrawTexturePro presents renderer-owned GL textures.
+    GLuint sharedTexture = 0;
+    glGenTextures(1, &sharedTexture);
+    glBindTexture(GL_TEXTURE_2D, sharedTexture);
+    if (SDL_GL_MakeCurrent(hostWindow, hostContext) != 0 ||
+        glIsTexture(sharedTexture) != GL_TRUE)
+    {
+        std::fprintf(stderr, "[smoke] renderer and host contexts do not share GL textures\n");
+        goto cleanup;
+    }
+    glDeleteTextures(1, &sharedTexture);
+    if (SDL_GL_MakeCurrent(rendererWindow, rendererContext) != 0)
+    {
+        std::fprintf(stderr, "[smoke] could not restore renderer context: %s\n", SDL_GetError());
+        goto cleanup;
+    }
     {
         GLint major = 0, minor = 0;
         glGetIntegerv(GL_MAJOR_VERSION, &major);
@@ -229,7 +252,7 @@ int main()
         goto cleanup;
     }
 
-    std::puts("[smoke] PASS: GLES 3.1, hidden SDL context, GLSL 3.10, depth/stencil FBO");
+    std::puts("[smoke] PASS: GLES 3.1, shared SDL contexts, GLSL 3.10, depth/stencil FBO");
     result = 0;
 
 cleanup:
