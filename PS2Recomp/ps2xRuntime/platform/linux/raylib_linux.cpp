@@ -657,25 +657,43 @@ void *CreateNativeGLContext(void)
         return nullptr;
     }
 
-    // Verify that this driver actually shares texture objects between the
-    // two contexts before allowing the native renderer to start.
-    GLuint sharedTexture = 0;
-    glGenTextures(1, &sharedTexture);
-    glBindTexture(GL_TEXTURE_2D, sharedTexture);
+    // Reserve a texture name in the host context, then bind it in the
+    // renderer context. Checking the same name in the host proves sharing
+    // without accidentally colliding with an existing host texture name.
     if (SDL_GL_MakeCurrent(g_window, g_context) != 0)
     {
         std::fprintf(stderr, "[linux] could not restore the host GLES context: %s\n", SDL_GetError());
-        SDL_GL_MakeCurrent(g_nativeWindow, context);
-        if (sharedTexture)
-            glDeleteTextures(1, &sharedTexture);
         SDL_GL_DeleteContext(context);
         SDL_DestroyWindow(g_nativeWindow);
         g_nativeWindow = nullptr;
         return nullptr;
     }
-    const bool shared = sharedTexture != 0 && glIsTexture(sharedTexture) == GL_TRUE;
-    if (sharedTexture)
-        glDeleteTextures(1, &sharedTexture);
+    GLuint sharedTexture = 0;
+    glGenTextures(1, &sharedTexture);
+    if (!sharedTexture || SDL_GL_MakeCurrent(g_nativeWindow, context) != 0)
+    {
+        std::fprintf(stderr, "[linux] could not prepare the GLES context-sharing probe: %s\n", SDL_GetError());
+        if (sharedTexture)
+            glDeleteTextures(1, &sharedTexture);
+        SDL_GL_DeleteContext(context);
+        SDL_DestroyWindow(g_nativeWindow);
+        g_nativeWindow = nullptr;
+        SDL_GL_MakeCurrent(g_window, g_context);
+        return nullptr;
+    }
+    glBindTexture(GL_TEXTURE_2D, sharedTexture);
+    if (SDL_GL_MakeCurrent(g_window, g_context) != 0)
+    {
+        std::fprintf(stderr, "[linux] could not restore the host GLES context: %s\n", SDL_GetError());
+        SDL_GL_MakeCurrent(g_nativeWindow, context);
+        SDL_GL_DeleteTextures(1, &sharedTexture);
+        SDL_GL_DeleteContext(context);
+        SDL_DestroyWindow(g_nativeWindow);
+        g_nativeWindow = nullptr;
+        return nullptr;
+    }
+    const bool shared = glIsTexture(sharedTexture) == GL_TRUE;
+    glDeleteTextures(1, &sharedTexture);
     if (!shared)
     {
         std::fprintf(stderr, "[linux] native GLES context does not share texture objects with the host context\n");
