@@ -85,7 +85,7 @@ Nota factual: `PS2X_GS_NODRAW` só suprime raster/VU1 quando `native_renderer::s
 
 ## 8. Estado atual do port (o que já funciona)
 - O ELF do jogo é carregado e o runtime executa o guest; o loader (`IosCdvdManagerSimulation`) resolve `MANAGER.XFF` e `GAMECORE.XFF` via `sceCdSearchFile` (2 chamadas OK).
-- Sistema de threads/semáforos do EE está funcional o suficiente para não travar: 16 semáforos mapeados.
+- Sistema de threads/semáforos do EE: foram observados 16 semáforos mapeados naquele run. Isso não comprova que todos os caminhos de `wait`/`signal` estejam corretos nem descarta deadlock em outro trecho.
 - O renderer recebe 128 uploads de imagem e o anel de frames é de 8 (`native_renderer_gl.cpp`).
 
 ## 9. Bloqueio atual (o que falta)
