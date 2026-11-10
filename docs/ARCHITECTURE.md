@@ -34,7 +34,7 @@ flowchart TD
     end
 
     subgraph Game native overrides
-        G --> G1[game/overrides/decomp_*.cpp: 107 files, 319 SOTC_DECOMP_FUNCTION]
+        G --> G1[game/overrides/decomp_*.cpp: 115 files, 332 SOTC_DECOMP_FUNCTION]
         G1 --> G2[sotc_decomp.cpp registry + install()]
     end
 ```
@@ -49,7 +49,7 @@ flowchart TD
 | IOP (R3000A emulator) | `PS2Recomp/ps2xIOP/` | `iop_cpu.cpp`, `iop_kernel.cpp`, modules (libsd, dbcman, mcserv), native audio |
 | Test suite | `PS2Recomp/ps2xTest/` | MiniTest harness, compiler/runtime tests |
 | GUI studio | `PS2Recomp/ps2xStudio/` | imgui-based inspection and control |
-| Game native overrides | `game/overrides/` | 107 `decomp_*.cpp` files registered via `SOTC_DECOMP_FUNCTION` in `sotc_decomp.h` |
+| Game native overrides | `game/overrides/` | 115 `decomp_*.cpp` files registered via `SOTC_DECOMP_FUNCTION` in `sotc_decomp.h` |
 | Config & symbols | `game/` | `scus.toml`, `pinned_starts.txt`, `extra_stubs.txt` |
 
 ## Memory Model

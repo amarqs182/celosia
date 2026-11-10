@@ -1,7 +1,7 @@
 # tools/ — catalog
 
 Every tracked file under `tools/`, one entry each, grouped by purpose. The list
-below was taken from `git ls-files tools` (53 files: 37 `.py`, 7 `.sh`,
+below was taken from `git ls-files tools` (54 files: 38 `.py`, 7 `.sh`,
 1 `.swift`, 8 `tools/ghidra/*.java`) and contains no invented entries — if a file
 is not here, it is not in the repo.
 
@@ -128,6 +128,10 @@ Entry tags:
   (`SOTC_AB_ROTATE=1`): mean, p90, spike share and a paired delta per state.
   CLI (argv): `err.txt [--min-draws|--k|--skip|--max-ms|--causes ...]`. Internal
   consumer of `spike100.attribute`.
+- `tools/abframes.py` — per-frame or draw-matched 60-frame summary A/B table
+  from a rotating A/B `err.txt` (`SOTC_AB_ROTATE=1`), leaving out host-stall
+  frames (`>= --stall` ms). CLI (argv):
+  `err.txt [--summary] [--bin DRAWS] [--from F] [--to F] [--stall MS] [--min N]`.
 - `tools/spike100.py` — classifies 3D frame spikes in a console err.txt by cause
   (render thread, sched, joins, hooks, frame end, own CPU). **helper library**
   (`parse`, `attribute`, `classify`) + CLI (argv):

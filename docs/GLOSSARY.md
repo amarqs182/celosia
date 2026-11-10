@@ -52,7 +52,6 @@ instead of guessing. Terms that name one thing together share a row.
 | Agro | Wander's horse, a first class character whose body, bridle and cloth simulation have their own natives. | `game/overrides/decomp_bridle.cpp` |
 | colossus | Each boss creature Wander must climb; the colossus LOD, geometry and collision work is named after them. | `game/overrides/decomp_charlod78.cpp` |
 | NICO | The code name the game gives its own engine, seen in the `nico_` symbol prefix and in the NICO.DAT asset file. | `tools/prof129.py` |
-| R36S | The handheld Linux device the port targets as its aarch64 build, tracked in its own plan document. | `docs/r36s_port_plan.md` |
 | PS2X_ prefix | The prefix of the build options and environment switches that configure the toolchain and the runtime itself. | `PS2Recomp/CMakeLists.txt` |
 | SOTC_ prefix | The prefix of the environment switches that configure the game specific port and its overrides at run time. | `game/overrides/sotc_native.cpp` |
 | A/B flag | A switch that alternates a feature on and off inside one run, so two settings can be measured in the same session. | `game/overrides/sotc_decomp.cpp` |

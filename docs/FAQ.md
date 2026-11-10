@@ -21,11 +21,10 @@ Two: macOS on Apple Silicon (Metal) and the PS Vita (OpenGL ES / vitaGL) — the
 two targets the project declares. On the Mac the game runs from boot to
 gameplay at 60 fps and 1536×1344 on an M4 Pro; on the Vita it builds and runs at
 18–25 fps in Vita3K's intro, with fidelity and speed still in progress and real
-hardware not measured yet. A Linux aarch64 (R36S) port is recorded in
-[STATUS.md](STATUS.md) as work in progress, not a finished target.
+hardware not measured yet.
 
 *Source: README.md (intro, "Status"), .recomp.json (`targets`), STATUS.md
-("At a glance", "R36S" section).*
+("At a glance").*
 
 ## Why is this not an emulator?
 
@@ -180,7 +179,7 @@ header instead of an ISO9660 one, sitting next to the small `NICO.ELF` boot ELF
 the name `SCUS_974.72` so that the game-specific overrides apply.
 
 *Source: README.md ("How it works"), STATUS.md ("How the recompilation was
-done", "R36S" section).*
+done").*
 
 ## Where do logs and captures go?
 

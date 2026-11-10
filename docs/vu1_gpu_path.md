@@ -74,24 +74,22 @@ Answers to the open questions:
 
 Status, as the repository documents it:
 
-- The VU1 thread never advances after loading: `mscal=0`, `vu1Instr=0`,
-  `xgkick=0` in all samples (docs/KNOWN_LIMITATIONS.md:27, restated with its
-  sources at docs/KNOWN_LIMITATIONS.md:66). The line references that second
-  entry carries for the measured table (docs/STATUS.md:321-322) do not resolve:
-  docs/STATUS.md is 291 lines long.
-- The native port plan states the exit condition for VU1 as "VU1 instructions
-  are ~0 on the route and no VU1 thread exists"
-  (docs/native_port_plan.md:62-63).
+- The native port plan states the exit condition for Phase 2 (`VU1 -> GPU`) as
+  "VU1 instructions are ~0 on the route and no VU1 thread exists"
+  (`docs/native_port_plan.md:56-61`).
+- With the native renderer drawing (`SOTC_NATIVE=1`, the default on macOS and
+  the Vita), model and terrain geometry goes straight from `modelDisp` hooks
+  to host GPU buffers (`docs/native_port_plan.md:67-76`,
+  `docs/worklist.md:31`), and the VIF1 chain is walked in place without
+  spawning VU1 worker jobs (`Vif1Walker`, `ps2_vif1_compact.h`).
 
-Related notes in this directory: docs/vu1_routines.md (the routines the
-microcode runs) and docs/vu1_fast_recompiler.md (the fast recompiler design).
+Related notes in this directory: `docs/vu1_routines.md` (the routines the
+microcode runs) and `docs/vu1_fast_recompiler.md` (the fast recompiler design).
 
-What would unblock this, as open questions:
+Open questions for the remaining non-native / fallback paths:
 
-- What in the loaded program's path leaves `mscal`, `vu1Instr` and `xgkick` at
-  zero in every sample (docs/KNOWN_LIMITATIONS.md:27)?
-- Does the packet go out at the kick, and does the program stall only on a
-  second XGKICK (docs/vu1_fast_recompiler.md:32-34)?
-- Which of the counters in the measured table are still reproduced by the
-  current tree, given that docs/STATUS.md no longer holds the table that
-  docs/KNOWN_LIMITATIONS.md:66 cites?
+- Which remaining microcode routines (`0x0710`, `059698f3`, `e471dbf3`,
+  `b504a980`) still execute when the emulated GS view (`SOTC_NATIVE=0` / `=2`)
+  or `PS2X_VIF1_FULL=1` is active (`docs/native_port_plan.md:56-61`)?
+- For any microcode routine that issues a second `XGKICK`, does the fast
+  recompiler need double-buffered output handling (`docs/vu1_fast_recompiler.md:32-34`)?

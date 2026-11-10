@@ -75,7 +75,7 @@ first build, because CMake downloads raylib, imgui and sse2neon
 ### (a) Full game on macOS (Apple Silicon)
 
 ```sh
-git clone git@github.com:HenryKun55/celosia.git
+git clone https://github.com/amarqs182/celosia.git
 cd celosia
 ./celosia setup --iso "/path/to/Shadow of the Colossus (USA).iso"
 ./celosia run
@@ -88,28 +88,25 @@ while it captures each module. `run` plays the game (log: `logs/play.log`).
 
 The `--iso` argument also accepts a `.zip` that contains one `.iso`.
 
-### (b) Toolchain and tests, without the game (Linux or Windows)
+### (b) Toolchain and tests, without the game (Linux)
 
 ```sh
-cmake -S PS2Recomp -B build -G Ninja -DPS2X_BUILD_TEST=ON -DPS2X_BUILD_STUDIO=OFF -DPS2X_BUILD_ANALYZER=OFF
+cmake -S PS2Recomp -B build -G Ninja -DPS2X_BUILD_TEST=ON -DPS2X_BUILD_STUDIO=OFF -DPS2X_BUILD_ANALYZER=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS=-msse4.1 -DCMAKE_CXX_FLAGS=-msse4.1
 cmake --build build
 ```
 
 This builds the PS2Recomp toolchain (`ps2xRecomp`, `ps2xRuntime`,
 `ps2xIOP`, `ps2xAnalyzer`) and the test suite. No disc image is involved.
 
-> **The `-DPS2X_BUILD_ANALYZER=OFF` above conflicts with `-DPS2X_BUILD_TEST=ON`.**
+> **Keep `PS2X_BUILD_ANALYZER=ON` when `PS2X_BUILD_TEST=ON`.**
 > The test library links `ps2_analyzer_lib`
 > (`PS2Recomp/ps2xTest/CMakeLists.txt:50-54,80-85`), and that target only
 > exists when `ps2xAnalyzer` is added to the build
 > (`PS2Recomp/CMakeLists.txt:94-96`). With the analyzer off, the configure
 > step fails with a "target was not found" error for `ps2_analyzer_lib`.
-> Drop that one flag to get a configuring build:
->
-> ```sh
-> cmake -S PS2Recomp -B build -G Ninja -DPS2X_BUILD_TEST=ON -DPS2X_BUILD_STUDIO=OFF
-> cmake --build build
-> ```
+> On x86_64 Linux, `-msse4.1` is required for the runtime's SSE4.1 intrinsics.
+> Note: the runtime is not yet portable to MSVC (`__attribute__`,
+> `__atomic_store_n` and `__builtin_expect` lack a compatibility layer).
 
 The build outputs follow the same layout as the `celosia` script expects:
 the runner at `build/ps2xRuntime/ps2EntryRunner` and the recompiler at
