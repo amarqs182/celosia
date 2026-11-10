@@ -240,3 +240,17 @@ the command and leave the measurement to the maintainer.
 Upstream commits are single long paragraphs describing the change, the
 measurement and the proof. When rebasing onto upstream, keep that density:
 one commit = one idea, fully explained.
+
+
+## Development workflow
+
+For each task:
+
+1. Inspect the current branch, working tree, relevant instructions and affected code before editing.
+2. State assumptions and acceptance criteria; resolve ambiguities that could change the implementation.
+3. Make the smallest focused change. Preserve unrelated user modifications and avoid speculative refactoring.
+4. Validate with the narrowest relevant tests, then run the appropriate build or regression checks.
+5. Review `git diff --check`, the complete diff and repository status before committing.
+6. Report what changed and distinguish passed, failed, blocked and unexecuted checks.
+
+Use KISS, DRY and YAGNI. Prefer tests that reproduce the reported problem. Never claim validation that was not actually run.
