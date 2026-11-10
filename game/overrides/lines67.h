@@ -1,4 +1,4 @@
-// Round 67: a Mac-side cache-miss proxy for the per-object walks
+// Round 67: a macOS/Linux cache-miss proxy for the per-object walks
 // (SOTC_LINES67=1; nothing in the Vita build). The walks' guest reads and
 // writes on the game thread (tagged by walk) are counted as 64-byte lines:
 // per frame, the distinct lines each walk touched, and of those the
@@ -25,7 +25,7 @@ namespace lines67
         kColl,  // the collision tree walk and its leaves
         kCount
     };
-#if defined(__vita__)
+#if defined(__vita__) || (!defined(__APPLE__) && !defined(__linux__))
     constexpr bool g_on = false;
     inline void touch(uint32_t) {}
     inline void pref(uint32_t) {}
