@@ -11,7 +11,7 @@
 ## 2. Objetivo técnico
 - Rodar o jogo sem emular CPU x86: recompilação estática do código MIPS do jogo (PS2Recomp/Celosia) gera C++ nativo, executado como ELF **aarch64**.
 - Backend de vídeo: **SDL2 + KMSDRM + GLES** (sem X11, sem Wayland).
-- Restrições do projeto: nada de EGL/Mesa/GBM como dependência do port, nada de emulação de CPU, nada de interpretador de MIPS no caminho crítico.
+- Restrições do projeto: não inicializar EGL/GBM manualmente nem depender de Mesa/Panfrost; SDL2 deve controlar o caminho KMSDRM/EGL usando o driver GLES ativo do aparelho. Nada de emulação de CPU ou interpretador MIPS no caminho crítico.
 
 ## 3. Hardware confirmado (coletado no aparelho em 2026-11-09)
 | Campo | Valor |
@@ -22,15 +22,15 @@
 | Compatible | `rockchip,rk3326-odroidgo3-linux` / `rockchip,rk3326` |
 | CPU | 4× Cortex-A35 (`CPU part 0xd04`), features `fp asimd evtstrm aes pmull sha1 sha2 crc32` |
 | RAM | `MemTotal 916896 kB` (~896 MiB), `SwapTotal 524284 kB` |
-| GPU | família Mali Midgard (`arm,malit602`, `arm,mali-midgard`) |
+| GPU | Mali-G31 (Bifrost), compatível com `arm,malit602` / `arm,malit60x` |
 | DRM | `card0`, `renderD128`, driver `rockchip-drm` |
 | Framebuffer | `640,480` @ `32` bpp |
 | Backlight | presente |
 | Armazenamento | `/` = `/dev/mmcblk0p2` btrfs 11G (1.8G livres), `/roms` = `/dev/mmcblk0p3` exfat 19G (15G livres) |
 
-Bibliotecas presentes: `libSDL2-2.0.so.0.3200.x`, `libGLESv2.so.2`, `libEGL.so.1` (mesa), dev packages (`libSDL2.a`, `libSDL2main.a`).
+Bibliotecas presentes: SDL2, `libGLESv2.so.2` e `libEGL.so.1`. As bibliotecas EGL/GLES ativas resolvem para ARM `libMali.so` (libmali Bifrost r13p0); arquivos Mesa/Panfrost instalados não representam o driver EGL/GLES ativo.
 Toolchain no device: `gcc 12.4.0`, `ldd/glibc 2.41`, `python 3.13.5`, `cmake`, `git`, `curl`, `unzip`, `tar`, `gzip`.
-**Ausentes no device**: `ninja`, `bsdtar`. (Consequência prática: qualquer script que passe a depender de `bsdtar` precisa de fallback para `unzip`/`tar`.)
+**Ausentes no device**: `ninja`, `bsdtar`. O script `./celosia` e a extração do ISO/ZIP são ferramentas do host de desenvolvimento; não devem ser executados no R36S.
 Display: painel 640×480 (fb0).
 
 ## 4. Layout do jogo no device (confirmado)
