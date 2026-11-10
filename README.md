@@ -12,6 +12,30 @@ it talks to (DMA, IOP, SPU2) is reimplemented as host code.
 
 > **Contribution destination for this fork:** all work for this R36S adaptation must be proposed to [`amarqs182/celosia`](https://github.com/amarqs182/celosia), targeting its `main` branch. Do not push to or open pull requests against [`HenryKun55/celosia`](https://github.com/HenryKun55/celosia). GitHub still recognizes this repository as a fork and may preselect the original project as a PR destination. Verify the **base repository** before submitting. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## This fork: Shadow of the Colossus on R36S
+
+This fork (`amarqs182/celosia`) carries the native port to the **R36S** handheld (aarch64 Linux). Contributions go to the **`main`** branch — the shared base with the upstream project — while **`r36s`** is the port's working line (adapted runtime, game overrides, build/smoke scripts and technical status docs), which stays behind `main` and catches up by merging. Please open pull requests against `main`, never against `r36s`.
+
+| Area | R36S (confirmed on device, 2026-11-09) |
+| --- | --- |
+| SoC | Rockchip RK3326, 4× Cortex-A35 |
+| GPU | Mali-G31 (Bifrost) |
+| RAM / swap | 895 MiB (916,896 kB) / 512 MiB |
+| Panel | 640×480 |
+| OS | Debian GNU/Linux 13 (trixie), kernel 4.4.189, `rockchip-drm` |
+| Backend | SDL2 + KMSDRM + GLES (no X11, no Wayland) |
+
+What works today:
+
+- The game ELF loads and the runtime executes the guest; the loader resolves `MANAGER.XFF` and `GAMECORE.XFF`.
+- The EE thread/semaphore system runs (16 semaphores mapped); the renderer receives image uploads.
+
+Current blocker:
+
+- After the loader's `jalr`, the guest produces no new events (no `vfs:open`, no `printf`, `sceCdRead=0`, `shownFps≈0`): nothing reaches the screen yet.
+
+Further reading: [docs/R36S_PORT.md](docs/R36S_PORT.md) (canonical port document, PT-BR), [docs/STATUS.md](https://github.com/amarqs182/celosia/blob/r36s/docs/STATUS.md) and [docs/r36s_port.md](https://github.com/amarqs182/celosia/blob/r36s/docs/r36s_port.md) (on the `r36s` branch).
+
 **Progress page: [henrykun55.github.io/celosia](https://henrykun55.github.io/celosia/)** (recompilation, decompilation by area, next targets, rounds). **Where it stands: [docs/STATUS.md](docs/STATUS.md)**.
 
 > **No game data is included.** You need your own copy of the game.
