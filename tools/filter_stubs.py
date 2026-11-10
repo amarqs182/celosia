@@ -15,7 +15,7 @@ parser.add_argument("config_toml", help="TOML config whose stubs block is filter
 args = parser.parse_args()
 
 runtime = pathlib.Path(args.runtime_dir)
-if not runtime.is_absolute():
+if not runtime.is_absolute() and not runtime.exists():
     runtime = repo_root / runtime
 
 try:
@@ -35,8 +35,14 @@ for f in matched:
     todo |= set(re.findall(r'TODO_NAMED\("([A-Za-z0-9_]+)"', f.read_text(encoding="utf-8", errors="ignore")))
 
 cfg = pathlib.Path(args.config_toml)
+if not cfg.is_file():
+    print(f"error: config TOML not found: {cfg}", file=sys.stderr)
+    sys.exit(1)
 text = cfg.read_text(encoding="utf-8")
 m = re.search(r'^stubs = \[(.*?)^\]', text, re.S | re.M)
+if not m:
+    print(f"error: no 'stubs = [...]' block found in {cfg}", file=sys.stderr)
+    sys.exit(1)
 entries = re.findall(r'"([^"]+)"', m.group(1))
 keep, drop = [], []
 for e in entries:

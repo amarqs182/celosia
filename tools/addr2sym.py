@@ -47,16 +47,21 @@ def load_functions(csv_path: str):
     for i, r in enumerate(rows):
         if len(r) != 3:
             sys.exit(f"error: {csv_path}: line {i + 2}: expected 3 columns, got {len(r)}")
+        try:
+            int(r[1], 16)
+            int(r[2], 16)
+        except ValueError:
+            sys.exit(f"error: {csv_path}: line {i + 2}: expected hex start/end addresses, got {r[1]!r}, {r[2]!r}")
     return rows
 
 
-def parse_address(addr: str, csv_path: str) -> int:
+def parse_address(addr: str) -> int:
     try:
         return int(addr, 16)
     except ValueError:
         sys.exit(
-            f"error: malformed address: {addr} (in {csv_path}; "
-            "expected hex, e.g. 0x1234 or 1234)"
+            f"error: malformed address: {addr} "
+            "(expected hex, e.g. 0x1234 or 1234)"
         )
 
 
@@ -66,7 +71,7 @@ def main() -> None:
     starts = [int(r[1], 16) for r in rows]
 
     for addr_str in args.addresses:
-        v = parse_address(addr_str, args.csv_path)
+        v = parse_address(addr_str)
         i = bisect.bisect_right(starts, v) - 1
         if i >= 0 and v < int(rows[i][2], 16):
             print(f"{v:#x} = {rows[i][0]}+{v - starts[i]:#x}")

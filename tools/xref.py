@@ -13,7 +13,7 @@ import struct
 import bisect
 from pathlib import Path
 
-sys.path.insert(0, __file__.rsplit("/", 1)[0])
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from elfmini import Elf
 
 
@@ -37,9 +37,12 @@ def main():
     )
     args = parser.parse_args()
 
-    # Existence check for ELF input
+    # Existence check for ELF input and functions CSV
     if not args.elf_file.is_file():
         print(f"Error: ELF file not found: {args.elf_file}", file=sys.stderr)
+        sys.exit(1)
+    if not args.functions_csv.is_file():
+        print(f"Error: functions CSV not found: {args.functions_csv}", file=sys.stderr)
         sys.exit(1)
 
     elf = Elf(str(args.elf_file))

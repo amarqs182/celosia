@@ -61,8 +61,14 @@ for f in runtime.glob("src/lib/**/*.cpp"):
 usable = handlers - todo
 
 out_dir = pathlib.Path(args.out_dir)
-boot_cfg = pathlib.Path(args.boot_cfg).read_text(encoding="utf-8")
-boot_stubs = re.findall(r'"([^"]+@0x[0-9A-Fa-f]+)"', re.search(r"^stubs = \[(.*?)^\]", boot_cfg, re.S | re.M).group(1))
+boot_cfg_path = pathlib.Path(args.boot_cfg)
+if not boot_cfg_path.is_file():
+    sys.exit(f"gen_config: boot config not found: {boot_cfg_path}")
+boot_cfg = boot_cfg_path.read_text(encoding="utf-8")
+boot_match = re.search(r"^stubs = \[(.*?)^\]", boot_cfg, re.S | re.M)
+if not boot_match:
+    sys.exit(f"gen_config: no 'stubs = [...]' block found in {boot_cfg_path}")
+boot_stubs = re.findall(r'"([^"]+@0x[0-9A-Fa-f]+)"', boot_match.group(1))
 deny = set(l.strip() for l in open(root / "tools/stub_deny.txt", encoding="utf-8")
             if l.strip() and not l.startswith("#")) \
     if (root / "tools/stub_deny.txt").exists() else set()
@@ -84,7 +90,10 @@ if extra.exists():
 sys.path.insert(0, str(root / "tools"))
 from elfmini import Elf
 import funcmap_elf
-elf = Elf(str(out_dir / "SOTC.elf"))
+elf_path = out_dir / "SOTC.elf"
+if not elf_path.is_file():
+    sys.exit(f"gen_config: combined ELF not found: {elf_path}")
+elf = Elf(str(elf_path))
 words = {a: elf.read32(a) for lo, hi in elf.exec_ranges() for a in range(lo, hi, 4)}
 starts = {a for _, a in func_map}
 entries = set(funcmap_elf.hidden_entries(words, starts))
