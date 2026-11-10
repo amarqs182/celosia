@@ -28,6 +28,9 @@
 #include "Kernel/Stubs/GS.h"
 #include "Kernel/Stubs/MPEG.h"
 #include "ps2_host_backend.h"
+#if defined(PS2X_LINUX_SDL2_SHIM)
+#include "raylib.h"
+#endif
 #include "ps2_iop_host.h"
 #include "ps2x/iop/iop_subsystem.h"
 #include "ps2x/iop/audio_stats.h"
@@ -1085,6 +1088,16 @@ bool PS2Runtime::initialize(const char *title)
                                               { glfwMakeContextCurrent(nativeContext); });
             else
                 std::cerr << "[native] could not create the OpenGL context" << std::endl;
+        }
+#endif
+#if defined(PS2X_LINUX_SDL2_SHIM)
+        const char *nativeGl = std::getenv("SOTC_NATIVE_GL");
+        if (!nativeGl || std::atoi(nativeGl) != 0 || std::string(nativeGl) == "check")
+        {
+            if (void *nativeContext = CreateNativeGLContext())
+                native_renderer::setGlContext([nativeContext] { MakeGLContextCurrent(nativeContext); });
+            else
+                std::cerr << "[native] GLES 3.1 context unavailable; native renderer disabled" << std::endl;
         }
 #endif
 #if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)

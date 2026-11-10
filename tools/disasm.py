@@ -1,6 +1,6 @@
 """Disassemble a function (or address range) of the combined game ELF.
 Usage: disasm.py <name|0xstart> [0xend]"""
-import os, sys, bisect
+import os, sys
 import capstone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from elfmini import Elf

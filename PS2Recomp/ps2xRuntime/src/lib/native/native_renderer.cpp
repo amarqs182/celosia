@@ -1,6 +1,6 @@
 // The native renderer's front: picks a backend (native_backend.h) the first
 // time it is used. macOS: Metal, or OpenGL with SOTC_NATIVE_GL=1 (to check
-// the GL path against Metal); the Vita: OpenGL (vitaGL); elsewhere none.
+// the GL path against Metal); the Vita: OpenGL (vitaGL); Linux: OpenGL ES 3.1.
 #include "native_backend.h"
 #include "runtime/ps2_diag.h"
 #include "runtime/native_tuning.h"
@@ -36,7 +36,7 @@
 extern "C" unsigned int _pthread_stack_default_user; // ps2_vita_runtime.cpp
 #endif
 
-#if defined(__APPLE__) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
+#if defined(__APPLE__) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)) || defined(PS2X_GLES3)
 #define PS2X_NATIVE_GL 1
 #endif
 
@@ -1254,6 +1254,9 @@ namespace
     {
 #if defined(__vita__)
         return true;
+#elif defined(PS2X_GLES3)
+        const char *gl = std::getenv("SOTC_NATIVE_GL");
+        return !gl || std::atoi(gl) != 0 || std::string(gl) == "check";
 #else
         const char *gl = std::getenv("SOTC_NATIVE_GL");
         return gl && (std::atoi(gl) != 0 || std::string(gl) == "check");
@@ -1297,7 +1300,14 @@ namespace native_renderer::detail
 
 namespace native_renderer
 {
-    const char *backendName() { return wantGl() ? "OpenGL" : "Metal"; }
+    const char *backendName()
+    {
+#if defined(PS2X_GLES3)
+        return wantGl() ? "OpenGL ES" : "None";
+#else
+        return wantGl() ? "OpenGL" : "Metal";
+#endif
+    }
     bool inEmulator() { return detail::g_inEmulator.load(std::memory_order_relaxed); }
     bool tuningApplies(const TuningItem &item) { return (item.backends & (wantGl() ? 2u : 1u)) != 0u; }
 

@@ -64,6 +64,24 @@ if(ANDROID)
     set(PS2X_IS_ANDROID ON)
 endif()
 
+set(PS2X_IS_LINUX OFF)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(PS2X_IS_LINUX ON)
+endif()
+
+# The SDL2/GLES shim is the R36S Linux backend, not a requirement for every
+# Linux desktop build. Default it on for AArch64 and leave x86_64 on raylib.
+set(PS2X_LINUX_SDL2_GLES_DEFAULT OFF)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+    set(PS2X_LINUX_SDL2_GLES_DEFAULT ON)
+endif()
+option(PS2X_LINUX_SDL2_GLES "Use the SDL2/GLES Linux backend (R36S)" ${PS2X_LINUX_SDL2_GLES_DEFAULT})
+set(PS2X_IS_LINUX_SDL2_GLES OFF)
+if(PS2X_IS_LINUX AND PS2X_LINUX_SDL2_GLES)
+    set(PS2X_IS_LINUX_SDL2_GLES ON)
+endif()
+
 option(PS2X_VITA_CREATE_PACKAGE "Create Vita eboot/vpk targets" ON)
 set(PS2X_VITA_APP_NAME "PS2 Retro X" CACHE STRING "Display name for the Vita bubble")
 set(PS2X_VITA_TITLEID "RANJ00001" CACHE STRING "9-character Vita title id")
@@ -92,15 +110,17 @@ else()
         set(PLATFORM "Android" CACHE STRING "" FORCE)
     endif()
 
-    FetchContent_Declare(
-        raylib
-        GIT_REPOSITORY "https://github.com/raysan5/raylib.git"
-        GIT_TAG "5.5" # we will migrate to 4.2.0 later, trust me it will be better
-        GIT_PROGRESS TRUE
-    )
-    FetchContent_MakeAvailable(raylib)
+    if(NOT PS2X_IS_LINUX_SDL2_GLES)
+        FetchContent_Declare(
+            raylib
+            GIT_REPOSITORY "https://github.com/raysan5/raylib.git"
+            GIT_TAG "5.5" # we will migrate to 4.2.0 later, trust me it will be better
+            GIT_PROGRESS TRUE
+        )
+        FetchContent_MakeAvailable(raylib)
+    endif()
 
-    if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_ANDROID)
+    if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_ANDROID AND NOT PS2X_IS_LINUX_SDL2_GLES)
         FetchContent_Declare(
             imgui
             GIT_REPOSITORY https://github.com/ocornut/imgui.git
@@ -284,6 +304,33 @@ elseif(PS2X_IS_VITA)
         c
         pthread
     )
+elseif(PS2X_IS_LINUX_SDL2_GLES)
+    # R36S/Linux AArch64: the runtime's raylib subset on SDL2
+    # and OpenGL ES. SDL selects its video driver (KMSDRM on the R36S).
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(PS2X_LINUX_SDL2 REQUIRED IMPORTED_TARGET GLOBAL sdl2)
+    find_library(PS2X_LINUX_GLES_LIBRARY NAMES GLESv3 GLESv2 GLES REQUIRED)
+
+    add_library(ps2x_linux_raylib STATIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/platform/linux/raylib_linux.cpp"
+    )
+    target_include_directories(ps2x_linux_raylib PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/platform/linux"
+        # raylib_linux.cpp includes "default_font.inc", the same 128x128
+        # default-font atlas the Vita shim uses. The file lives in the Vita
+        # shim's directory, so its include path is needed here too.
+        "${CMAKE_CURRENT_SOURCE_DIR}/platform/vita/raylib"
+    )
+    target_link_libraries(ps2x_linux_raylib PUBLIC
+        PkgConfig::PS2X_LINUX_SDL2
+        ${PS2X_LINUX_GLES_LIBRARY}
+        m
+    )
+    target_compile_definitions(ps2_host_backend INTERFACE
+        PLATFORM_LINUX
+        PS2X_LINUX_SDL2_SHIM=1
+    )
+    target_link_libraries(ps2_host_backend INTERFACE ps2x_linux_raylib)
 else()
     target_link_libraries(ps2_host_backend INTERFACE raylib)
 
@@ -451,9 +498,12 @@ add_library(ps2_runtime STATIC
     src/lib/games_database.cpp
 )
 
-# Native renderer: the front picks Metal (macOS) or OpenGL (macOS with
-# SOTC_NATIVE_GL=1, the Vita through vitaGL).
+# Native renderer: Metal on macOS, OpenGL on macOS when selected, vitaGL on
+# the Vita, and GLES 3.1 on Linux/AArch64.
 target_sources(ps2_runtime PRIVATE src/lib/native/native_renderer.cpp src/lib/native/native_renderer_gl.cpp src/lib/native/native_recorder.cpp)
+if(PS2X_IS_LINUX_SDL2_GLES)
+    target_compile_definitions(ps2_runtime PRIVATE PS2X_GLES3=1)
+endif()
 # The scene recorder's blocks are zlib-compressed (the Vita SDK has libz).
 target_link_libraries(ps2_runtime PUBLIC z)
 
@@ -605,7 +655,7 @@ target_link_libraries(ps2EntryRunner
 )
 target_include_directories(ps2EntryRunner PRIVATE ${PS2X_RUNNER_DIRS})
 
-if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_VITA AND NOT PS2X_IS_ANDROID)
+if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_VITA AND NOT PS2X_IS_ANDROID AND NOT PS2X_IS_LINUX_SDL2_GLES)
     target_sources(ps2EntryRunner PRIVATE
         src/lib/ps2_debug_panel.cpp
     )

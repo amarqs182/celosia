@@ -1,7 +1,7 @@
 // Native renderer on OpenGL (see runtime/native_renderer.h and the Metal
-// backend, which this follows pass for pass): GL 3.3 core with GLSL on
-// macOS (SOTC_NATIVE_GL=1, to check it against Metal), vitaGL with CG on the
-// Vita. Render targets are GL textures, so the picture is y-up: screen
+// backend, which this follows pass for pass): GL 3.3 core on macOS, GLES 3.1
+// with GLSL ES on Linux, and vitaGL with CG on the Vita. Render targets are
+// GL textures, so the picture is y-up: screen
 // positions come from the clip position (no gl_FragCoord), and the output is
 // flipped once when it is read back.
 //
@@ -18,12 +18,16 @@
 #include "runtime/ps2_stats.h"
 #include "runtime/ps2_thread_load.h"
 
-#if defined(__APPLE__) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
+#if defined(__APPLE__) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)) || defined(PS2X_GLES3)
 
 #if defined(__APPLE__)
 #define GL_SILENCE_DEPRECATION
 #include <OpenGL/gl3.h>
 #include <malloc/malloc.h>
+#elif defined(PS2X_GLES3)
+#include <GLES3/gl3.h>
+#include <malloc.h>
+#include <mutex>
 #else
 #include <mutex>
 #include <malloc.h>
@@ -387,6 +391,8 @@ namespace
     {
 #if defined(PS2X_NATIVE_VITA)
         return mallinfo().uordblks;
+#elif defined(PS2X_GLES3)
+        return mallinfo2().uordblks;
 #else
         malloc_statistics_t stats{};
         malloc_zone_statistics(nullptr, &stats);
@@ -1530,6 +1536,34 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         uint32_t width = 0, height = 0;
     };
 
+    static void attachDepthStencil(GLuint depthTexture)
+    {
+#if defined(PS2X_GLES3)
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depthTexture, 0);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_TEXTURE_2D, depthTexture, 0);
+#else
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, depthTexture, 0);
+#endif
+    }
+
+#if defined(PS2X_GLES3)
+#ifndef GL_DEPTH_CLAMP_EXT
+#define GL_DEPTH_CLAMP_EXT 0x864F
+#endif
+
+    static bool hasGlExtension(const char *name)
+    {
+        const char *extensions = reinterpret_cast<const char *>(glGetString(GL_EXTENSIONS));
+        if (!extensions || !name || !*name)
+            return false;
+        const size_t length = std::strlen(name);
+        for (const char *at = extensions; (at = std::strstr(at, name)) != nullptr; at += length)
+            if ((at == extensions || at[-1] == ' ') && (at[length] == ' ' || at[length] == 0))
+                return true;
+        return false;
+    }
+#endif
+
     struct Renderer
     {
         GLuint mainProgram = 0, quadProgram = 0;
@@ -1541,6 +1575,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         bool regionReady = false; // every one of them built // by mode (8 and 11: the bloom mask's, see kQuadFragment; 12 unused; 15-18 the GS bloom chain, round 65b)
 #endif
         GLuint quadBuffer = 0, blurBuffer = 0, vao = 0;
+#if defined(PS2X_GLES3)
+        bool depthClamp = false;
+#endif
         // Uniform locations by (program, name): the names are string literals,
         // so their address is the key (no string built per call: that was 41%
         // of the Vita's time). A few dozen: a list looked through, the last
@@ -1685,7 +1722,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #else
             // The rest of the frame is drawn on the picture's depth.
             glBindFramebuffer(GL_FRAMEBUFFER, blurOut.fbo);
-            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, color.depth, 0);
+            attachDepthStencil(color.depth);
 #endif
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
             boundFbo = ~0u;
@@ -2696,6 +2733,24 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 
         static GLuint compile(GLenum type, const char *source)
         {
+#if defined(PS2X_GLES3)
+            static const std::string version = "#version 330 core";
+            static const std::string esVersion =
+                "#version 310 es\n"
+                "precision highp float;\n"
+                "precision highp int;\n"
+                "precision highp sampler2D;\n";
+            std::string esSource(source);
+            const size_t versionAt = esSource.find(version);
+            if (versionAt == std::string::npos)
+            {
+                std::cerr << "[native:gl] GLES shader is missing a supported GLSL version directive" << std::endl;
+                return 0;
+            }
+            esSource.erase(versionAt, version.size());
+            esSource.insert(0, esVersion);
+            source = esSource.c_str();
+#endif
 #if defined(PS2X_NATIVE_VITA)
             type = type == GL_VERTEX_SHADER ? GL_CG_VERTEX_SHADER_EXT : GL_CG_FRAGMENT_SHADER_EXT;
 #endif
@@ -2840,6 +2895,23 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 
         bool init()
         {
+#if defined(PS2X_GLES3)
+            GLint major = 0, minor = 0;
+            glGetIntegerv(GL_MAJOR_VERSION, &major);
+            glGetIntegerv(GL_MINOR_VERSION, &minor);
+            if (major < 3 || (major == 3 && minor < 1))
+            {
+                std::fprintf(stderr, "[native:gl] OpenGL ES 3.1 required, got %d.%d\n", major, minor);
+                return false;
+            }
+            depthClamp = hasGlExtension("GL_EXT_depth_clamp");
+            const auto *version = glGetString(GL_VERSION);
+            const auto *glsl = glGetString(GL_SHADING_LANGUAGE_VERSION);
+            std::fprintf(stderr, "[native:gl] %s; GLSL %s; near-plane clamp: %s\n",
+                         version ? reinterpret_cast<const char *>(version) : "unknown",
+                         glsl ? reinterpret_cast<const char *>(glsl) : "unknown",
+                         depthClamp ? "GL_EXT_depth_clamp" : "off (extension unavailable)");
+#endif
             if (const char *e = std::getenv("SOTC_GL_PX98")) // round 98 (the pixel estimate's frames)
                 px98.every = std::max(std::atoi(e), 0);
             const GLuint mainVertex = compile(GL_VERTEX_SHADER, kMainVertex);
@@ -3325,11 +3397,17 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 // Depth = 1 - 0.1 / w, read back by the bloom mask and the depth of field.
                 glGenTextures(1, &t.depth);
                 glBindTexture(GL_TEXTURE_2D, t.depth);
+#if defined(PS2X_GLES3)
+                // GLES 3.1 uses 24-bit depth plus 8-bit stencil.
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH24_STENCIL8, static_cast<GLsizei>(w), static_cast<GLsizei>(h), 0,
+                             GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, nullptr);
+#else
                 glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH32F_STENCIL8, static_cast<GLsizei>(w), static_cast<GLsizei>(h), 0, GL_DEPTH_STENCIL,
                              GL_FLOAT_32_UNSIGNED_INT_24_8_REV, nullptr);
+#endif
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, t.depth, 0);
+                attachDepthStencil(t.depth);
             }
             if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
                 std::cerr << "[native:gl] incomplete framebuffer " << w << "x" << h << std::endl;
@@ -3540,10 +3618,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #if !defined(PS2X_NATIVE_VITA)
             // The shadow mask pass tests the main picture's stencil.
             glBindFramebuffer(GL_FRAMEBUFFER, shadowMask.fbo);
-            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, color.depth, 0);
+            attachDepthStencil(color.depth);
             // Layer 8 drawn apart on the picture's depth.
             glBindFramebuffer(GL_FRAMEBUFFER, glowLayer.fbo);
-            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, color.depth, 0);
+            attachDepthStencil(color.depth);
 #endif
             if (blurOut.texture)
                 makeBlurOut(w, h); // (the Vita's were let go above: made again at first use)
@@ -3821,10 +3899,30 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         }
         Region whole(const Target &t) const { return Region{0, 0, t.width, t.height}; }
         // The region program of `mode` in use (uniform() then finds its uniforms).
+        // Round 94's region programs are the Vita's (one program per mode, so
+        // several small passes share one GXM scene); elsewhere the one quad
+        // program (the default MODE) does every mode, and the round 93 / 94 /
+        // 98 switches are off (native_tuning.h). Without this the desktop GL
+        // build does not compile: regionPrograms only exists on the Vita.
         void useRegion(int mode)
         {
+#if defined(PS2X_NATIVE_VITA)
             quadProgram = regionPrograms[mode];
             useProgram(quadProgram);
+#else
+            (void)mode;
+#endif
+        }
+
+        // Whether round 98's one-pass glow program (mode 26) was built: the
+        // Vita's, for the same reason as the region programs above.
+        bool hasGlow98Program() const
+        {
+#if defined(PS2X_NATIVE_VITA)
+            return quadPrograms[26] != 0;
+#else
+            return false;
+#endif
         }
 
         // The colour of `from` into `to` (bilinear: reducing blurs it).
@@ -6323,7 +6421,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     glClearColor(fog.colour[0], fog.colour[1], fog.colour[2], 1.0f);
                 else
                     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-#if defined(PS2X_NATIVE_VITA)
+#if defined(PS2X_NATIVE_VITA) || defined(PS2X_GLES3)
                 glClearDepthf(1.0f);
 #else
                 glClearDepth(1.0);
@@ -6485,7 +6583,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     if (reset)
                     {
                         glDepthMask(GL_TRUE);
-#if defined(PS2X_NATIVE_VITA)
+#if defined(PS2X_NATIVE_VITA) || defined(PS2X_GLES3)
                         glClearDepthf(1.0f);
 #else
                         glClearDepth(1.0);
@@ -6805,7 +6903,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     glStencilFuncSeparate(GL_FRONT_AND_BACK, GL_ALWAYS, 0, 0xFF);
                     glStencilOpSeparate(GL_FRONT, GL_KEEP, GL_KEEP, GL_INCR_WRAP);
                     glStencilOpSeparate(GL_BACK, GL_KEEP, GL_KEEP, GL_DECR_WRAP);
-#if !defined(PS2X_NATIVE_VITA)
+#if defined(PS2X_GLES3)
+                    if (depthClamp)
+                        glEnable(GL_DEPTH_CLAMP_EXT);
+#elif !defined(PS2X_NATIVE_VITA)
                     glEnable(GL_DEPTH_CLAMP); // the GS does not cut at the near plane
 #endif
                     drawMesh(mesh, firstVertex);
@@ -6821,7 +6922,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     shadowStats.vertices += mesh.count;
                     if (shadowStats.lastFrame != arenaFrame)
                         shadowStats.lastFrame = arenaFrame, ++shadowStats.framesWithVolumes;
-#if !defined(PS2X_NATIVE_VITA)
+#if defined(PS2X_GLES3)
+                    if (depthClamp)
+                        glDisable(GL_DEPTH_CLAMP_EXT);
+#elif !defined(PS2X_NATIVE_VITA)
                     glDisable(GL_DEPTH_CLAMP);
 #endif
                     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
@@ -7580,7 +7684,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         // (Tuning glGlow98): both in one pass (mode 26) when both are drawn.
         auto glowComposite = [&](const Target &onto)
         {
-            if (native_renderer::tuning().glGlow98 && glow.amountA > 0.0f && glow.amountB > 0.0f && quadPrograms[26])
+            if (native_renderer::tuning().glGlow98 && glow.amountA > 0.0f && glow.amountB > 0.0f && hasGlow98Program())
             {
                 const float a[4] = {glow.tint[0], glow.tint[1], glow.tint[2], glow.amountA}, b[4] = {glow.tint[0], glow.tint[1], glow.tint[2], glow.amountB};
                 bindTexture(1, glowBlurred->texture);
