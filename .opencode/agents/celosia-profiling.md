@@ -95,9 +95,10 @@ aqui o alvo é **arm64**, e a verificação é o **cross-build arm64**.
   driver **ARM libmali** (`libmali-bifrost-g31-rxp0-gbm.so`, Bifrost r13p0)
   — **não** é Mesa/Panfrost, embora o Mesa 25.0.7 esteja instalado;
   **OpenGL ES 3.2**; Debian trixie, glibc 2.41; display 640×480.
-- O device real está acessível por SSH (`ark@192.168.2.121`, senha `ark`),
-  então medições de hardware são possíveis. Leia as regras de device em
-  `AGENTS.md` antes de usá-lo.
+- O device real está acessível por SSH, então medições de hardware são
+  possíveis. Use a configuração SSH local do maintainer (não grave
+  credenciais no repositório) e leia as regras de device em `AGENTS.md`
+  antes de usá-lo.
 
 ## Como trabalhar
 
