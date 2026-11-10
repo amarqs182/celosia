@@ -1,0 +1,38 @@
+name: Contribution policy
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, edited, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  destination:
+    name: Validate contribution destination
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require this fork and its main branch
+        env:
+          BASE_REPOSITORY: ${{ github.event.pull_request.base.repo.full_name }}
+          BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+          HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -eu
+
+          if [ "$BASE_REPOSITORY" != "amarqs182/celosia" ]; then
+            echo "::error::PR destination must be amarqs182/celosia."
+            exit 1
+          fi
+
+          if [ "$BASE_BRANCH" != "main" ]; then
+            echo "::error::PRs must target the main branch."
+            exit 1
+          fi
+
+          if [ "$HEAD_BRANCH" = "main" ]; then
+            echo "::error::Use a topic branch; do not submit main as the PR head."
+            exit 1
+          fi
+
+          echo "Contribution destination verified: amarqs182/celosia:main"

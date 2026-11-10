@@ -1,0 +1,26 @@
+#!/bin/sh
+# Refuse pushes to the original upstream and direct pushes to main.
+set -eu
+
+remote_name=${1:-unknown}
+remote_url=${2:-}
+
+case "$remote_url" in
+    *HenryKun55/celosia*|*HenryKun55:celosia*)
+        printf '%s\n' "ERROR: pushes to HenryKun55/celosia are forbidden." >&2
+        printf '%s\n' "Push your topic branch to your own fork, then open a PR against amarqs182/celosia:main." >&2
+        exit 1
+        ;;
+esac
+
+while IFS=' ' read -r local_ref local_sha remote_ref remote_sha; do
+    [ -n "$remote_ref" ] || continue
+
+    if [ "$local_ref" = "refs/heads/main" ] || [ "$remote_ref" = "refs/heads/main" ]; then
+        printf '%s\n' "ERROR: direct pushes to main are forbidden." >&2
+        printf '%s\n' "Create a topic branch and submit a PR to amarqs182/celosia:main." >&2
+        exit 1
+    fi
+done
+
+exit 0

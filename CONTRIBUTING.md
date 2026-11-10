@@ -44,6 +44,19 @@ git remote remove upstream
 
 Do not add Henry as a writable remote.
 
+## Install the local push guard (required)
+
+Enable the repository hook in each clone:
+
+```sh
+git config --local core.hooksPath .githooks
+git config --get core.hooksPath
+```
+
+The `.githooks/pre-push` hook blocks pushes to `HenryKun55/celosia` and direct pushes to `main`. It applies to normal Git pushes after installation. Do not bypass it with `--no-verify`.
+
+The hook is a client-side safeguard, not a GitHub permission boundary. The pull-request destination must still be checked explicitly. The `Contribution policy` GitHub Action checks every PR that is opened against this fork and requires base `main`.
+
 ## Branch and push workflow
 
 Do not commit directly to `main`. Create a topic branch for each change:
