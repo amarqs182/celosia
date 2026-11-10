@@ -147,7 +147,7 @@ touching the hardware:
 ### Toolchain (this machine)
 
 `PS2Recomp/cmake/r36s-toolchain.cmake` cross-compiles for the R36S using the
-sysroot at `~/tools/r36s-sysroot` (glibc 2.41 + kernel headers 6.1 from
+sysroot at `~/tools/r36s-sysroot` by default (override with `-DR36S_SYSROOT=/path/to/r36s-sysroot`); it contains glibc 2.41 + kernel headers 6.1 from
 Debian trixie arm64; gcc/binutils 16.2.0/2.47 from Arch
 `aarch64-linux-gnu-*`; the libstdc++ headers and runtime come from the
 matching Arch gcc package).
