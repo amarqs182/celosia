@@ -106,10 +106,13 @@ Consequences for your work:
   `310 es`) is part of this fork's job.
 - The windowing path is **SDL2** (`-DPLATFORM=SDL`), not GLFW/X11. The R36S
   has no X server; the sysroot has no `libX11`.
-- The compiler flags for arm64 are `-march=armv8-a+fp+simd+crypto+crc`
-  (already set by `PS2Recomp/CMakeLists.txt` for arm64 hosts). Because the
-  A35 has **no FMA**, do not add `-mfpu=neon-fp-armv8` (a 32-bit-only
-  option) and do not assume FMA is available at runtime.
+- The compiler flags for arm64 are `-march=armv8-a+fp+simd`
+  (`PS2Recomp/CMakeLists.txt`). The R36S's A35 **also** supports `+crypto`
+  and `+crc` (`aes pmull sha1 sha2 crc32`), which PR #5 turns into opt-in
+  flags (`PS2X_ARM64_ENABLE_CRYPTO` / `PS2X_ARM64_ENABLE_CRC`) so a build
+  for another arm64 target cannot assume them. Because the A35 has **no
+  FMA**, do not add `-mfpu=neon-fp-armv8` (a 32-bit-only option) and do not
+  assume FMA is available at runtime.
 - The R36S runs **Debian trixie userland, glibc 2.41**. Never link against
   anything requiring a newer glibc.
 - Shared memory is **895 MiB**, not 1 GB. Budget renderer pools against the
