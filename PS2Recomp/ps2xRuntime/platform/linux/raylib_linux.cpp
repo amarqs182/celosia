@@ -619,7 +619,17 @@ void *CreateNativeGLContext(void)
         return nullptr;
     }
 
+    // The native renderer's output textures are consumed by the host/UI
+    // context, so the worker context must share GL objects with it.
+    if (SDL_GL_SetAttribute(SDL_GL_SHARE_WITH_CURRENT_CONTEXT, 1) != 0)
+    {
+        std::fprintf(stderr, "[linux] could not enable GLES context sharing: %s\n", SDL_GetError());
+        SDL_DestroyWindow(g_nativeWindow);
+        g_nativeWindow = nullptr;
+        return nullptr;
+    }
     SDL_GLContext context = SDL_GL_CreateContext(g_nativeWindow);
+    SDL_GL_SetAttribute(SDL_GL_SHARE_WITH_CURRENT_CONTEXT, 0);
     if (!context)
     {
         std::fprintf(stderr, "[linux] native GLES context creation failed: %s\n", SDL_GetError());
@@ -627,12 +637,34 @@ void *CreateNativeGLContext(void)
         g_nativeWindow = nullptr;
         return nullptr;
     }
+
+    // Verify that this driver actually shares texture objects between the
+    // two contexts before allowing the native renderer to start.
+    GLuint sharedTexture = 0;
+    glGenTextures(1, &sharedTexture);
+    glBindTexture(GL_TEXTURE_2D, sharedTexture);
     if (SDL_GL_MakeCurrent(g_window, g_context) != 0)
     {
         std::fprintf(stderr, "[linux] could not restore the host GLES context: %s\n", SDL_GetError());
+        SDL_GL_MakeCurrent(g_nativeWindow, context);
+        if (sharedTexture)
+            glDeleteTextures(1, &sharedTexture);
         SDL_GL_DeleteContext(context);
         SDL_DestroyWindow(g_nativeWindow);
         g_nativeWindow = nullptr;
+        return nullptr;
+    }
+    const bool shared = sharedTexture != 0 && glIsTexture(sharedTexture) == GL_TRUE;
+    if (sharedTexture)
+        glDeleteTextures(1, &sharedTexture);
+    if (!shared)
+    {
+        std::fprintf(stderr, "[linux] native GLES context does not share texture objects with the host context\n");
+        SDL_GL_MakeCurrent(g_nativeWindow, context);
+        SDL_GL_DeleteContext(context);
+        SDL_DestroyWindow(g_nativeWindow);
+        g_nativeWindow = nullptr;
+        SDL_GL_MakeCurrent(g_window, g_context);
         return nullptr;
     }
     return context;
