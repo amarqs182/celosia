@@ -51,9 +51,10 @@ Diretório `/roms/ports/SotC_Celosia/`:
 - Os md5 do device são idênticos aos do host (`build/watch/`) — não há mismatch de versão de assets.
 
 ## 5. Como o port é construído
-- Host de build: Windows + WSL (Ubuntu); sysroot aarch64 em `D:\celosia_sysroot`; build em `D:\celosia_upstream\build\linux-aarch64`.
-- Gerador: `D:\tools\dev\ninja\ninja.exe -C D:/celosia_upstream/build/linux-aarch64 -j4 ps2EntryRunner` (LTO desligado no port).
-- Saída: ELF64 aarch64 PIE, ligado contra SDL2/GLES do sysroot.
+- Host de build: Linux x86_64 ou Windows com WSL2.
+- Cross-compilador: `aarch64-linux-gnu`, com sysroot compatível com a glibc do R36S e com SDL2/GLES.
+- Build: CMake + Ninja, usando o toolchain `PS2Recomp/cmake/r36s-toolchain.cmake` (detalhes no `AGENTS.md` do PR #6).
+- Saída: ELF64 AArch64 PIE, ligado contra SDL2/GLES do sysroot.
 - O binário **exige argv[1]** (o ELF do jogo): `./ps2sotc_aarch64_pie_sdl SCUS_974.72`.
 
 ## 6. Como testar no device
