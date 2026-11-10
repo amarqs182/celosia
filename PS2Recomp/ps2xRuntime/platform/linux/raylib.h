@@ -353,7 +353,7 @@ bool CheckCollisionRecs(Rectangle rec1, Rectangle rec2);
 void TakeScreenshot(const char *fileName);
 const char *GetClipboardText(void);
 void SetClipboardText(const char *text);
-float Fade(Color color, float alpha);
+Color Fade(Color color, float alpha);
 
 // Audio (streams with a callback; one-shot sounds for ps2_audio.cpp)// Audio (streams with a callback; one-shot sounds for ps2_audio.cpp)
 void InitAudioDevice(void);
