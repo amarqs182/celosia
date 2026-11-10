@@ -8,11 +8,30 @@ binary on the device, but its run log still stops before gameplay. Those
 results do not mean the current `main` branch contains the Linux port or that
 the game is playable on the R36S.
 
-Target hardware: RK3326, four Cortex-A35 cores, Mali-G31 MP2 and 1 GB shared
-system memory. The previous R36S work log identifies Debian 13/AArch64 and
-records execution of an AArch64 ELF64 binary on the device. Treat AArch64 as
-the evidenced target ABI for this port; repeat the checks below when preparing
-a clean build environment and record the exact libc and sysroot versions.
+## Measured target facts
+
+The following values were recorded on the R36S over SSH on 2026-11-09:
+
+| Item | Measured value |
+| --- | --- |
+| Board / SoC | `rockchip,rk3326-odroidgo3-linux` (RK3326) |
+| CPU | 4× Cortex-A35 (ARM implementer `0x41`, part `0xd04`), AArch64 |
+| CPU features | `fp asimd evtstrm aes pmull sha1 sha2 crc32`; no FMA, FP16 or SVE |
+| RAM | 895 MiB total; approximately 726 MiB available |
+| GPU | Mali-G31, one core / two execution engines, GPU ID `0x7093` |
+| GPU driver | ARM libmali Bifrost r13p0, using the kbase driver via `/dev/mali0` |
+| Graphics API | OpenGL ES 3.2 |
+| Display | 640×480; DRM `card0` / `renderD128` via `rockchip-drm` |
+| OS / libc | Debian 13 (trixie), glibc 2.41; kernel 4.4.189 |
+
+The target is Linux AArch64, not 32-bit ARM. The active graphics stack is
+ARM libmali, not Panfrost. Budget memory against the measured 895 MiB rather
+than the nominal 1 GB.
+
+The device's EGL/GBM path must not be initialized manually on
+`/dev/dri/renderD128`: a previous attempt caused a kernel NULL dereference
+and hung the device until a power cycle. Let SDL2 own display and context
+creation through its KMSDRM video driver.
 
 ## What can be reused
 
