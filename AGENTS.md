@@ -63,23 +63,90 @@ registers, and the EE cycle accounting.
 
 ## Target platform: R36S (arm64 / aarch64)
 
-**This fork targets the R36S handheld (RK3326, aarch64, Mali GPU, Mesa
-bifrost, SDL2 + EGL/GLES2).** It is *not* a macOS, PS Vita, x86 or Android
-port. The upstream (`HenryKun55/celosia`) targets macOS (Apple Silicon) and
-the PS Vita; this fork ports that work to the R36S.
+**This fork targets the R36S handheld (Rockchip RK3326, aarch64, Mali-G31
+GPU, ARM libmali, SDL2 + EGL/GLES 3.2).** It is *not* a macOS, PS Vita, x86
+or Android port. The upstream (`HenryKun55/celosia`) targets macOS (Apple
+Silicon) and the PS Vita; this fork ports that work to the R36S.
+
+### Hardware facts measured on the device (2026-11-09)
+
+Every fact below was read off the real R36S over SSH, not taken from a
+datasheet or from another project:
+
+| Item | Measured value |
+| --- | --- |
+| SoC / board | `rockchip,rk3326-odroidgo3-linux` (RK3326) |
+| CPU | 4× **Cortex-A35** (`CPU implementer 0x41`, `CPU part 0xd04`), aarch64, ARMv8-A |
+| CPU features | `fp asimd evtstrm aes pmull sha1 sha2 crc32` — **no FMA**, no fp16, no SVE |
+| RAM | 895 MiB total (~726 MiB available) |
+| GPU | **Mali-G31**, 1 core / 2 EE, `r0p0`, GPU ID `0x7093` (Bifrost) |
+| GPU driver | **ARM libmali** (`libmali-bifrost-g31-rxp0-gbm.so`, Bifrost r13p0) — *not* Mesa |
+| GL API | **OpenGL ES 3.2** (`OpenGL ES 3.2 v1.r13p0-01rel0`), EGL 1.5-style with `EGL_KHR_platform_gbm` |
+| Display | 640×480 framebuffer, DRM `card0`/`renderD128` via `rockchip-drm` |
+| OS | Debian 13 (trixie), **glibc 2.41-12+deb13u4**, kernel `4.4.189` |
+
+Two claims that were previously wrong in this repo's docs, now corrected
+here:
+
+- The userland is **aarch64**, not 32-bit ARM. `uname -m` returns `aarch64`.
+- The GL stack is **ARM's proprietary libmali over the Bifrost kbase kernel
+  driver**, *not* Mesa/Panfrost. Mesa 25.0.7 is installed, and
+  `panfrost_dri.so` exists, but every `libEGL.so.1`, `libGLESv2.so.2`,
+  `libGLESv3.so.3`, `libgbm.so.1` and `libwayland-egl.so` symlink resolves to
+  `libMali.so`. The EGL vendor JSON points at Mesa, but the soname symlinks
+  win at link time. Panfrost is not usable here: the GPU is driven by the
+  ARM kbase driver through `/dev/mali0`, and `renderD128` is the Rockchip
+  display controller, not a GPU render node.
 
 Consequences for your work:
 
-- The GPU path is **GLES/EGL on Mesa bifrost**, not desktop GL 3.3 and not
+- The GPU path is **GLES 3.2 via libmali's EGL**, not desktop GL 3.3 and not
   Metal. `native_renderer_gl.cpp` currently ships `#version 330 core` shaders
-  — those do **not** run on the R36S. Porting them to `#version 300 es` is
-  part of this fork's job.
+  — those do **not** run on the R36S. Porting them to `#version 300 es` (or
+  `310 es`) is part of this fork's job.
 - The windowing path is **SDL2** (`-DPLATFORM=SDL`), not GLFW/X11. The R36S
   has no X server; the sysroot has no `libX11`.
 - The compiler flags for arm64 are `-march=armv8-a+fp+simd+crypto+crc`
-  (already set by `PS2Recomp/CMakeLists.txt` for arm64 hosts).
+  (already set by `PS2Recomp/CMakeLists.txt` for arm64 hosts). Because the
+  A35 has **no FMA**, do not add `-mfpu=neon-fp-armv8` (a 32-bit-only
+  option) and do not assume FMA is available at runtime.
 - The R36S runs **Debian trixie userland, glibc 2.41**. Never link against
   anything requiring a newer glibc.
+- Shared memory is **895 MiB**, not 1 GB. Budget renderer pools against the
+  measured figure.
+
+### The device is reachable over SSH
+
+The R36S is a real machine on the LAN and can be used for verification:
+
+```sh
+export R36S_PASS=ark
+export SSH_ASKPASS=/tmp/opencode/askpass.sh SSH_ASKPASS_REQUIRE=force
+ssh -o StrictHostKeyChecking=no \
+    -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+    ark@192.168.2.121 'uname -m'
+```
+
+The askpass helper is a one-line script that echoes `$R36S_PASS`. Password
+auth is required: the device's SSH is Dropbear and the workstation's
+ed25519 key is not installed on it.
+
+Device rules — read `tools/r36s_smoke.sh` on the `r36s` branch before
+touching the hardware:
+
+- Write only under `/roms/ports/SotC_Celosia/` and `/tmp` (`/tmp` is tmpfs,
+  448 MiB).
+- **Never** scan `/proc/[0-9]*/fd/*` — it freezes the R36S.
+- **Never** run `ffmpeg -f kmsgrab` or `fbdev` — it freezes the display.
+- Restore EmulationStation after every run.
+- **Never** create an EGL display through `EGL_PLATFORM_GBM_KHR` on
+  `/dev/dri/renderD128` and then initialise it: doing so NULL-derefs in the
+  kernel (`Oops: 96000005`, `Unable to handle kernel NULL pointer
+  dereference at virtual address 00000010`) and hangs the device. The
+  process ends up in uninterruptible `D` state and the machine stops
+  answering SSH; it only recovers on a physical power cycle. Use the
+  SDL2 KMSDRM path (what EmulationStation itself uses) instead of
+  hand-rolling an EGL/GBM display.
 
 ### Toolchain (this machine)
 
@@ -93,10 +160,13 @@ The path passed to `-DCMAKE_TOOLCHAIN_FILE` is relative to the CMake source
 directory (`PS2Recomp/`), so `cmake/r36s-toolchain.cmake` is correct when
 configuring with `-S PS2Recomp`.
 
-### Verification available on this machine (Linux arm64 cross-build)
+### Verification available on this machine (Linux arm64 cross-build + real R36S)
 
-No game disc, no macOS, no Vita, no Vita3K, and **no R36S hardware
-attached**. What works:
+No game disc and no macOS or Vita3K, but **the R36S itself is reachable over
+SSH**, so device-side measurements are possible — with the rules listed
+above.
+
+Cross-build (host):
 
 ```sh
 # Configure the arm64 cross-build (R36S)
@@ -115,6 +185,25 @@ ninja -C /tmp/opencode/celosia-r36s ps2x_tests
 qemu-aarch64-static -L ~/tools/r36s-sysroot/usr \
   /tmp/opencode/celosia-r36s/ps2xTest/ps2x_tests
 ```
+
+On the real device (copy the binary over, then run it there):
+
+```sh
+export R36S_PASS=ark
+export SSH_ASKPASS=/tmp/opencode/askpass.sh SSH_ASKPASS_REQUIRE=force
+SSH_OPTS="-o StrictHostKeyChecking=no -o PreferredAuthentications=password -o PubkeyAuthentication=no"
+
+scp $SSH_OPTS /tmp/opencode/celosia-r36s/ps2xTest/ps2x_tests \
+    ark@192.168.2.121:/tmp/ps2x_tests
+ssh $SSH_OPTS ark@192.168.2.121 'cd /tmp && ./ps2x_tests'
+```
+
+The arm64 `ps2x_tests` binary **does run on the real device** (verified
+2026-11-09). Its results match the qemu run: the same two known failures
+("callback invocation should use the reserved async stack pool" and
+"DMAE=1 should allow GIF DMA transfer") and the same final assert in
+`stl_vector.h`. Those are pre-existing failures on `main`, not arm64
+regressions — record them as such.
 
 Notes:
 
@@ -139,10 +228,9 @@ Notes:
 Also usable: `python3 tools/*.py` (pure-Python analysis tools),
 `tools/ghidra.sh` (needs a Ghidra install), the GitHub API through `gh`.
 
-What does **not** work here: running the game, `SOTC_DIFFTEST` runs, real
-frame timings, picture comparisons, and anything requiring the actual R36S
-GPU. Never fabricate these — write the command and leave the measurement to
-the maintainer.
+What still does **not** work here: running the game itself (no disc),
+`SOTC_DIFFTEST` runs, and picture comparisons. Never fabricate these — write
+the command and leave the measurement to the maintainer.
 
 ## Docs to keep in sync
 

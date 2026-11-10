@@ -58,7 +58,7 @@ coerente entre os 20 especialistas e cuida da relação com o upstream.
 
 ## Contexto do fork
 
-**O alvo é o R36S (RK3326, aarch64, Mali, Mesa bifrost, SDL2 + EGL/GLES)**
+**O alvo é o R36S (RK3326, aarch64, Mali-G31 + ARM libmali, SDL2 + EGL/GLES 3.2)**
 — não macOS, não Vita, não x86. O upstream tem como alvo macOS (Apple
 Silicon) e PS Vita.
 

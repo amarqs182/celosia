@@ -67,7 +67,7 @@ O renderer nativo desenha o jogo a partir dos dados do próprio jogo
 ## Contexto: o alvo deste fork é o R36S (arm64)
 
 Este fork (`amarqs182/celosia`) porta o Celosia para o **R36S** (RK3326,
-aarch64, Mali GPU, Mesa bifrost, SDL2 + EGL/GLES). O upstream
+aarch64, Mali-G31 + ARM libmali, SDL2 + EGL/GLES 3.2). O upstream
 (`HenryKun55/celosia`) tem como alvo macOS (Apple Silicon) e PS Vita;
 aqui o alvo é **arm64**, e a verificação é o **cross-build arm64**.
 
@@ -84,7 +84,16 @@ aqui o alvo é **arm64**, e a verificação é o **cross-build arm64**.
 - O device roda **Debian trixie, glibc 2.41**.
 - As medições do upstream citadas aqui (Vita3K, Mac, console) são
   **históricas do upstream**: não as repita como se fossem do R36S. O
-  R36S é um Cortex-A53 (~1.4 GHz) com Mali — o perfil é outro.
+  R36S é um Cortex-A35 (`CPU part 0xd04`) com Mali-G31 — o perfil é outro.
+- **Fatos medidos no device real** (2026-11-09, por SSH): aarch64;
+  4× Cortex-A35 (`0xd04`), `fp asimd evtstrm aes pmull sha1 sha2 crc32`,
+  **sem FMA**; 895 MiB de RAM; GPU **Mali-G31** (1 core / 2 EE, `r0p0`);
+  driver **ARM libmali** (`libmali-bifrost-g31-rxp0-gbm.so`, Bifrost r13p0)
+  — **não** é Mesa/Panfrost, embora o Mesa 25.0.7 esteja instalado;
+  **OpenGL ES 3.2**; Debian trixie, glibc 2.41; display 640×480.
+- O device real está acessível por SSH (`ark@192.168.2.121`, senha `ark`),
+  então medições de hardware são possíveis. Leia as regras de device em
+  `AGENTS.md` antes de usá-lo.
 
 ## Como trabalhar
 
