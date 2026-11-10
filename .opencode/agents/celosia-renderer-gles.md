@@ -1,5 +1,5 @@
 ---
-description: Especialista no port do renderer para GLES/EGL no R36S — a migração dos shaders #version 330 core para #version 300 es, FBO, VAO, uniforms e o backend SDL2/EGL.
+description: Especialista no port do renderer para GLES/EGL no R36S — migração dos shaders desktop GLSL para GLES 3.1, FBO, VAO, uniforms e backend SDL2/EGL.
 mode: subagent
 model: nvidia/nvidia/nemotron-3-super-120b-a12b#thinking
 steps: 120
