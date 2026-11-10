@@ -18487,3 +18487,257 @@ Pictures (window shots, riding over the bridge, the plains, the title): normal. 
 **Console.** build/agent-scratch/celosia-r134.vpk (dev), r134/env-console.txt: prof129 + `SOTC_AB_FLAG=pf134,clip134,texr128`
 (texr128 turned on by the env so its windows are the console's verdict on round 128's exact-but-Vita3K-slower switch). Read:
 `tools/prof129.py err.txt --elf celosia-r134.elf` (the zone line; manager_sub_010F3FB0 should drop), `[mdslane]` joins at clip.
+
+## Round 136: the characters on the console: the pose's bones kept (pose136, console A/B only), GetMotionIntFrame's keys as host code (key136), GetEulerYXZFromQuaternion in plain floats (euler136) (2026-11-09)
+
+Scripts, runs: `build/agent-scratch/r136/` (build.sh pN, run.sh / v3k.sh and runb.sh / v3kb.sh: own trees
+../vita3k-celosia-r136 / -r136b, 222 MHz, 3 cores, audio-volume 0; callers.py: a prof129 function's samples by caller ra;
+STATE.md). Source: the r134 console profile, heavy-field riding (characters 6.95 ms of the game thread's 37.1).
+
+**Where the characters' console time is, by caller** (`r136/callers.py`, % of the game thread's running samples):
+GetMotionMatrix 1.39 (ExecCharaGeometry's pose 0.60, CalcNodeQuaternionWithIK's two 0.50, 010E0558 0.18, the head IK 0.11);
+execCharaGeometry 0.86; the cloths ~2.3 (011370E8's step 0.77 under getClothDynamics 011399E0 for the fringe / mantle / horse
+cloth / bridle, the strands callback 0.14, velocity 0.37, round 122's GetClothDynamics 0.38, DispCloth 0.46, tension 0.21);
+curveEval 0.79 (0.55 of it GetMotionIntFrame's per-channel guest calls); floatFrame 0.70 (keys122, rootBlend / geometryStep);
+GetEulerYXZFromQuaternion 0.54 (setNodeHPB 0.49); gaze 0.55 (round 41's, gaze122 off); charaLinks 0.55; the particle module's
+emitters on the game thread (gate<14> = 0113B928, gate<13> = 0113B610, gate<4> = doit_particle_manager: ~2.2 together,
+recompiled VU0 code, not joins). The list is flat: no single character function is above 1.4%.
+
+**What changed (A/B names = the switch names).**
+- `pose136` (`SOTC_POSE136`, **default off**, decomp_pose82.cpp): GetMotionMatrix (round 82's pose) keeps each bone's
+  results per buffer set (matrices / quaternions / locals / skeleton address; host arrays, a thread's own, 24 sets) with the
+  inputs they were made from (the local as read and normalised, the offset, the parent's index; the root's position, rotation
+  and scale); a bone whose parent is unchanged and whose inputs are the same bits takes the kept matrix and quaternion
+  instead of the arithmetic, and a local read back as last written skips its normalisation. Everything is still written.
+  Exact: SOTC_POSE136_CHECK=1 (round 82's pose into host buffers first, compared bit for bit) found **0 differing bones** in
+  every call (attract 480 s: 6 000 checks a 600-frame window; the console card's shrine 360 s: 12 600 a window). Kept: 17%
+  (the title / demos), 24% (the shrine, 21 calls / 466 bones a frame), 43% (the ride, 10 calls / 255 bones). Not faster in
+  Vita3K (host sampler, attract 300-540 s: round 82's pose 1.19% of the game thread, round 136's 1.22%: the kept arrays' stores
+  and compares cost what the skipped bones save); off by default, turned on by r136/env-console.txt so the console's A/B
+  (memory latency, which Vita3K does not have) decides. `SOTC_POSE136_LOG=<n>`: `[pose136]` (calls, bones, kept).
+- `key136` (`SOTC_KEY136`, default on, decomp_motionframe.cpp / decomp_char122.cpp): GetMotionIntFrame's channels decoded by
+  round 122's decodeKey into a host buffer (as keys122 does a float frame with no fraction) and copied out, instead of a
+  curveEval guest call a channel; v0 / v1 as the loop leaves them (curveEval's last: 1 for a format with no data). Any format
+  decodeKey does not know, over 256 channels or a range outside RAM: the old loop. Tolerance (SOTC_KEY136_CHECK=1, every 16th
+  call against the old loop): worst 1.8e-4 in a component (0.02 deg), typical 1e-6 (the 9-bit keys' w = sqrt(1 - |xyz|^2)
+  rounding), as keys122. Vita3K sampler: evalKeyFast 0.39 -> 0.20%, decodeKey 0.15 -> 0.27% (curveEval + intFrame -0.1%).
+- `euler136` (`SOTC_EULER136`, default on, decomp_quat.cpp): GetEulerYXZFromQuaternion (0x1ba880; setNodeHPB's, ~17 calls a
+  frame) as plain floats: the original's VU0 statements in their order on the same values (the z / y axes of q, the xz
+  normalisation by 1 / sqrt with VU0's FLT_MAX for zero, the turns by the boot ELF's quarter-wave table in 1/65536 steps, the
+  conjugate's rows) without the clamps and the VU0 register file; atan2 / asin as the host's (quat122's choice). Written: out
+  and f0 (the scratch VU0 registers, Q and v0 not: leaf helper, as quat122). Tolerance (SOTC_EULER136_CHECK=1, every call, the
+  old code after it on the same input, its result kept; 316 000 calls attract, 176 000 at the shrine): worst x 3.5e-4, y 1e-5,
+  z 2.7e-4 rad (0.02 deg: a 1/65536-turn step at the truncation boundary), typical 1e-7; none over 1e-3. prof129 in Vita3K:
+  eulerYXZ 1.08 -> 0.25% of the game thread's running samples.
+
+**Not done (measured / read).** The cloth step (011370E8) is already round 49's clamp-light NEON with the VU0 R stream
+three LCG draws a point (cloth122's fused version of it measured no faster in round 122); the emitters' gates are recompiled
+VU0 code (0113B928: 536 instructions with its own matrix products) that reads the characters' motion, so it cannot move to the
+worker earlier without a dependency rework; GetMotionMatrix's topology pre-pass (0.15%) stays (no half-written skeleton).
+
+**Checks.** Pictures (window shots): the shrine with the console card (Wander beside Agro, feet on the ground, reins), the
+attract ride (Agro's gallop, legs); [pos] y normal (the shrine -0.23, the ride 3.24). spalign: 701 NEON :128/:256, 0 sp-based.
+
+**Console.** build/agent-scratch/celosia-r136.vpk (dev, prof129), r136/env-console.txt (`SOTC_POSE136=1`,
+`SOTC_AB_FLAG=pose136,key136,euler136`, rotation, period 600, prof129). Read: `tools/prof129.py err.txt --elf
+r136/celosia-r136.elf --group characters` (motionMatrix, curveEval / intFrame, eulerYXZ), the A/B by state (abframes.py).
+pose136 on by default only if its windows are faster on the console.
+
+## Round 135: fin125 made exact (why its cache missed hits: a stale attribute address, objects replaced in their slots), pf135, a draw-matched A/B for the console's summaries (2026-11-09)
+
+Scripts, runs: `build/agent-scratch/r135/` (build.sh pN, run.sh `<a|b> <none|min|console> <load|walk|ride|attract> <vpk> <name>
+<secs> [env]`, own trees ../vita3k-celosia-r135 / -r135b, in_walk2.txt / in_ride.txt (the console card's save), speed.py
+(Wander's / Agro's speed from `[pos]`), STATE.md).
+
+**Why fin125's cache missed hits (round 131's 57 "original hits, host no hit").** Round 135's check mode prints, for a
+differing clip, the slot, what the host run did with the entry (`[fin135t]`), the id filter asked both ways (`[fin135f]`)
+and the entry clipped both ways (`[fin135c]`). Two causes, both found on the console card's save (Agro beside Wander at the
+shrine, frames ~1475-1740) and in the attract demo's ride:
+1. **A stale attribute address (the misses).** The host clip hit (`r 1`, the kept triangle the same as the game's, ClipCollisionDB
+   hits with the same u / v / point), then the id filter said no: `character_ikcolattrfilter` (0x01374F08, the IK feet's
+   probes) on one of Agro's surfaces (object type 10, independent part 0). The filter reads GetCollisionDBAttributeAdr, which
+   fin125 answered from the address kept when the surface was made (00c879e0); the game's own lookup gives 00c878a0 (20
+   records on). The surface's plane, boundary and vertices were unchanged, so no check saw it. The original asks the filter
+   "yes" and the feet probe lands on Agro; fin125 skipped it (a probe that misses for a frame, the kind of event that changes
+   the riding state). Fix: no attribute address is kept; GetCollisionDBAttributeAdr always asks the game's tables.
+2. **Objects replaced in their slots (checks that passed on old bytes).** Round 125's check (once a frame and after a flush)
+   compared the plane / boundary flags and values at the addresses kept at the making. When an object's slot is taken over
+   (the area loads; the id words and the layout class the same, its collision work or record not), the old bytes stay, so the
+   old surface passed. `[fin135] r125 missed` counts these: 88 at the card save's load, 132 walking out of the shrine, 334 in the
+   attract demo by frame 16 500; all "chain" (the work / record behind the id changed). Fix: `validate()` walks the chain
+   again from the id words (layout class, collision work, record, every flag / slot address, the vertex cache list) and
+   compares everything ClipCollisionDB reads: the plane / boundary / three vertex flags and the plane, boundary and vertex qwords
+   (round 125 kept no vertex check: a flush of the vertex caches alone, or a skinned blend, would have passed too).
+Also: FlushModifiedManager's native moves the worker epoch again at its end (a check between a worker flush's start and its
+last cleared flag is not kept). `[fin135] cur bad` (a surface used as current, no flush seen, that is not what ClipCollisionDB
+would read now) was 0 in every run: no change without a flush.
+
+**Checks (Vita3K 222 MHz, SOTC_FIN125=1 SOTC_FIN125_CHECK=1: each clip the original way first, its answer used, the host's
+compared; final build).**
+| run | build | scene | clips compared | hit / no hit | other surface | point max |
+|---|---|---|---|---|---|---|
+| runsb/chkA1 | p1 (validate(), the attribute address still kept) | attract demo to frame ~20 000 | - | 9 | 0 | - |
+| runs/dgW2, runsb/dgW3, dgW4 | p2-p4 (+ the diagnostics) | the card's save, the load at the shrine | - | 4 each (frames 1475-1740, all Agro's surfaces, `filtered 1`) | 0 | - |
+| runsb/chkA5 | p5 (no attribute address kept) | attract demo 1560 s (49 450 frames, both ride loops) | 241 061 | **0** | **0** | 0.00 mm |
+| runs/ride5 | p5 | the card's save 900 s (17 570 frames: the load with Agro beside Wander, out of the shrine, the plain) | 358 311 | **0** | **0** | 0.00 mm |
+| runsb/chkA7 | p7 (= the pushed main, with round 136) | attract demo 1100 s (34 090 frames, both ride loops) | 155 006 | **0** | **0** | 0.00 mm |
+
+In all, 754 378 clips compared on the final logic (2 600 s of attract demo with four rides, 900 s of the card's save), 0
+differences. `[fin135]` over those runs: 14.3 M kept-surface uses validated in full, cur bad 0; r125 missed 891 / 196 (attract)
+and 109 (card), all "chain".
+
+fin125 is on by default again (SOTC_FIN125=0 turns it off; A/B name `fin125`). seg123 stays off (no answers kept across frames).
+
+**Gameplay.** (1) fin125 on (p6, the default, no check; runs/smkA6on, attract
+960 s, `[pos]` with Agro's position, speed.py --horse): Agro at 12-15 units/s (the gallop) in 478 of 634 samples, both rides
+galloping without a break until the demo's cut, as in the check run (whose answers are the original's); window shots at 540 /
+600 s: Agro galloping over the plain with Wander on him, his shadow under the hooves. (2) The console card's save (runs/ride5,
+check run): Wander on the shrine floor at y 11.31, down the ramp, on the plain at y -2.2 .. -4.7; his feet on the ground in the
+shots. Riding from the card could not be scripted: Agro stands beside Wander after the load, but TRIANGLE (8-90 frames, with
+stick nudges), CIRCLE, R1, SQUARE and UP did not mount him (runs/mount1, mount2); he walks off on his own ~frame 2450 and comes
+back ~3500. The ride checks are the attract demo's; the console run is the gallop's judge.
+
+**pf135 (`SOTC_PF135`, default on; A/B `pf135`): prefetch only.** The console profile's top two: `finderLeaf<true>` (3.35%; prof129
+names a native by its table entry, so this is the leaf's whole host time: the boundary scan, the plane tests, the duplicate
+search, EntryCollisionFinder) and `directCallBack` (3.23%, obj125's object / part loop). (a) finderScan (the leaf's boundary
+scan over a run of surfaces) asks for the boundary record and the flag byte of the surface 4 ahead (the ids are known
+ahead; the records are spread over the class's table, a miss each on the A9). (b) obj125's part loop asks for the next part's
+0x90-byte record (4 lines) and its matrix while this part is tested. No read or write changes; Vita3K has no memory latency,
+so only the console's A/B can show it.
+
+**Measured (Vita3K 222, p7, runs/abA7: attract 1200 s, the console env + per-frame lines, A/B `fin125,pf135` rotating by
+600).** The finder clips' host time by fin125's state ([fin125t]): 33.45 us a call on (175 385 calls) against 36.07 off
+(96 451): -7% with round 135's full checks. Frames, draw-matched on the summaries (bins of 100 draws): fin125 off -0.97 +- 1.14
+ms, pf135 off -0.78 +- 1.38 (82 / 70 summaries matched): no difference Vita3K can see (it has no memory latency, the A9's
+cost of fin125's lookup chain and of the misses pf135 asks for early). The console's A/B decides both; fin125's reason to be
+on is the console's collision share (finderClip<true> + <false> 2.0% of the game thread in r134's profile, ClipCollisionDB's
+chain per entry).
+
+**Draw-matched A/B (tooling).** `build/agent-scratch/tools/abframes.py err.txt --summary [--bin N] [--bins]` (a copy in
+`tools/abframes.py`): the console env logs only the 60-frame `[frame] N:` summaries; a summary counts for a state when its 60
+frames lie in one A/B window, the summaries go in bins by draws a frame (default 50; a bin = a scene load), each state is
+compared with "all on" inside a bin and the bins' differences are averaged with weight min(n_off, n_on) (bins with fewer than
+`--min` summaries on a side left out), with +- 2 standard errors from the bins. Chosen by itself when the log has no `[frame]
+each` lines. On r134's console log (bins of 100): `clip134` off -3.40 +- 2.10 ms frame / -2.54 +- 1.80 game (27 of 36 summaries
+matched) where the plain means said -3.1 / -1.8 with different scenes; `pf134` off -3.8 +- 3.7 (18 matched): not significant.
+
+**Console.** build/agent-scratch/celosia-r135.vpk (dev, prof129), r135/env-console.txt (`SOTC_AB_FLAG=fin125,pf135`, rotate,
+600). Ride the field at a gallop; read `tools/prof129.py err.txt --elf r135/celosia-r135.elf` (collision's ms/frame, finderClip,
+finderLeaf<true>, directCallBack) and `build/agent-scratch/tools/abframes.py err.txt --summary --bin 100` (fin125 / pf135 off
+against on in matched scenes). The gallop must hold with fin125 on.
+
+## Round 138: what fin125 does on the console (round 135's "-8.5 ms" was the title screen), validate138: fin125's check without its chain of dependent loads (2026-11-10)
+
+Scripts, runs: `build/agent-scratch/r138/` (build.sh pN, run.sh / v3k.sh / stop.sh on the own tree ../vita3k-celosia-r138,
+speed.py, env-console.txt, STATE.md).
+
+**Round 135's console log, read again (build/agent-scratch/r135/console/err.txt, celosia-r135.elf).**
+- The draw-matched A/B's `fin125 off -8.50 +- 4.93 ms game` is an artifact. The first fin125-off window (frames 600-1200) is the
+  title screen and the save's load (game 16-20 ms a frame at 144-1108 draws: the title menu draws ~1100 a frame), and the bins
+  of 100 draws matched it with "all on" summaries of the field that happen to draw as many (frames 9018-9198: game 36-44 ms at
+  ~1130 draws). With the summaries before frame 1500 left out (`abframes.py --summary --from 1500`): fin125 off minus on
+  **-3.4 +- 5.1 ms** (bins of 100, 5 bins), -1.7 +- 4.2 (200), -2.8 +- 3.7 (400); pf135 +2.8 +- 4.4 / -1.5 +- 3.7 / -1.1 +- 3.7.
+  None of these is a difference: the field windows differ by scene far more than by switch (the two field fin125-off windows
+  against the "all on" window just before them: -6.2 ms and +5.4 ms).
+- The profile cannot be split by A/B window: prof129's windows are 60 s (~1250-1775 frames) and the A/B's 600 frames, so each
+  holds two or three states. Its windows hold 0-49% fin125-off frames, and the collision group follows the scene, not that share
+  (w1 0% off 4.86 ms a frame, w2 49% 3.73, w3 0% 4.73, w4 36% 7.42, w5 6% 7.05; finderClip<true> + <false> 1.28 / 0.57 / 1.16 /
+  2.40 / 1.91% of the busy samples).
+- Whole runs, r134 (fin125 off throughout) against r135 (on 5/6 of the time), windows 1-5 (300 s, two sessions of a similar ride): collision
+  7.38 -> 5.67 ms a frame; finderClip<true> 1.19 -> 0.89%, finderClip<false> 0.88 -> 0.60%, clipKeep 0.49 -> 0.29%,
+  finderLeaf<true> 3.80 -> 1.26% (pf135's prefetch, not fin125). The functions fin125 replaces got cheaper with it on.
+- Verdict: no sign that fin125 costs the console anything; the A/B could not resolve its size (a 0.2-0.5 ms change under scene
+  noise of +-4 ms). validate() is inlined in finderClip<..> (prof129 names the native by its entry), so its whole cost is inside
+  those 1.5%; it is real memory latency though (a dependent chain of five to seven loads to cold lines per kept surface and
+  frame, plus the flags and values), so round 138 makes it cheaper and gives the console a direct per-call reading.
+
+**validate138 (`SOTC_FIN138`, default on; A/B `fin138`; coll125.h).** validate() walks the chain from the id words: the
+object's +8 (layoutClass), the class's +0x174 / +0x184 (work, record), then for a mesh surface the record's +0x20, its +8, the
+slot list and the index, for an independent one the work's part table; then the work's / part's flag and slot bases, the vertex
+cache list, and only then the five flags and the plane / boundary / three vertex qwords. Each load's address comes from the one
+before: on the A9 one memory wait per link. Round 138 keeps each link's value at the making (Meta: type, partTab, t2, t2v8, rv,
+index) and validate138 reads every link at its kept address and compares it with its kept value: all ~17 addresses are known
+before the first load, so they are asked for together (PLD) and the comparisons wait on memory about once. When every link reads
+as kept, derive() from the id words follows the same addresses and gives the same Addr, so the flag / value compares (validate()'s
+own) decide the same; a link that differs remakes the surface (validate() might have reached the same addresses another way: a
+remake, never a wrong answer). The clip loop also asks for the next entry's lines when that entry is kept and not current
+(prefetch138). Nothing else changes (the epochs, the frame stamp, make(), clip()).
+
+**Checks (Vita3K 222, SOTC_FIN125_CHECK=1: each clip the original way first, its answer used; check mode also runs validate138
+and validate() on every use of a kept surface and prints `[fin138] UNSAFE` when validate138 says good where validate() does not).**
+| run | build | scene | clips compared | hit / no hit | other surface or point > 1 cm | validate138 unsafe |
+|---|---|---|---|---|---|---|
+| runs/chkA1 | p1 | attract demo 1150 s (35 940 frames, Agro's gallop) | (not counted: the [fin125] lines need the log path) | 0 | 0 | 0 |
+| runs/chkA2 | p1 | attract demo 1200 s (43 230 frames; Agro 12-15 u/s in 835 of 979 `[pos]` samples, 0 gallop drops) | 680 312 | 0 | 0 | 0 |
+2 350 s of attract demo with its ride loops, 0 differences, 0 unsafe; `[fin135] cur bad` 0. (p1's SOTC_FIN138_LOG wrapper
+skipped coll125::log(), so the runs printed no [fin125] / [fin138] count lines, only the per-difference lines, of which there
+were none; p2 = the shipped build calls it. The counts come from [fin138t]: 680 312 clips, 1.84 M re-validations in chkA2.)
+A third run with the counting build (p2) and a no-check gameplay run could not start: Vita3K crashes at boot while the Mac's
+screen is locked (every tree, the other agent's too: `Unhandled access to 0x0` after settings.cfg).
+Window shots (chkA1 every 120 s, chkA2 every 150 s): the title, Agro galloping over the plain with his shadow under the hooves,
+the bridge, the cliffs; the picture as before (main's attract demo shows the same riderless gallop, r137/runs/abAA1).
+
+**[fin138t] (`SOTC_FIN138_LOG=1`).** The finder clips' host time by state (fin125 off / fin125 with validate() / with validate138)
+and the re-validations a frame, every 600 frames. The frame A/B cannot see a 0.2-0.5 ms change; this is the console's direct
+reading (about two process-time reads a finder clip, the same in every state).
+
+**Console.** build/agent-scratch/celosia-r138.vpk (= p2, dev, prof129), r138/celosia-r138.elf (spalign: 701 NEON aligned accesses,
+0 sp-based), r138/env-console.txt = r135's with `SOTC_AB_FLAG=fin125,fin138,pf135` (rotate, 600; fin138 off = round 135's
+validate()) and SOTC_FIN138_LOG=1. Read: `grep fin138t err.txt` (us a clip by state), `tools/abframes.py err.txt --summary
+--bin 100 --from <first field frame>` (always leave the title / load out: its summaries match field bins by draws).
+
+## Round 137: the PGO profile and the hot-code order retrained on current main (2026-11-10)
+
+Files: `build/agent-scratch/r137/` (STATE.md; build.sh <dir> <pN> [cmake args]; train.sh / trainall.sh: training runs;
+profall.sh: profiles for the order; pair.sh / abchain.sh / cmp.py: paired A/B, draw-matched; own Vita3K trees
+../vita3k-celosia-r137 / -r137b, 222 MHz, muted). Round 121's procedure, unchanged tools (tools/pgo_fix.py,
+tools/vita_hot_order.py).
+
+**Why.** Round 121's profile predates rounds 122-136: keys122 / quat122 / cloth122, ptcl123 / blend123, coll125 / fin125,
+imm128, prof129, pace132, clip134, pf134 / pf135, euler136 / key136 / pose136 were built without a profile (partial
+training), and the hot order left them at the end of .text (round 133: char122::cloth::dynamics, finderLeaf<false> at
+0x830xxxxx).
+
+**Training** (instrumented build, `PS2X_VITA_PGO=gen`, the default switches plus `SOTC_POSE136=1`, dumps every 1 500
+frames): attract demo 1 500 s + 1 200 s (both ride loops, Agro galloping; frames 30 569 / 27 858), the console card's save
+walked out of the shrine onto the plain 720 s + 1 200 s, altar 540 s, route 6 540 s. tools/pgo_fix.py over the six runs:
+179 files, 15 560 functions. The recompiled game's batches (`unity_*`) and ps2_vita_runtime.cpp (only used with
+`PS2X_VITA_PGO_GAME=ON`, off by default) are carried over from round 121's profile unchanged: the generator has not
+changed. game/pgo/vita-pgo.tar.xz: 464 files, 1.67 MB.
+
+**Hot order** from four Vita3K profiles (PROF=1) of the new-profile build (attract 600 s, walk 600 s, altar 480 s,
+route 6 480 s): 4 782 functions. The game thread's hot set, old -> new order (same names; layout.py):
+
+| profile | 50%: 4 KB / 64 KB pages | 90%: 4 KB / 64 KB pages, span |
+|---|---|---|
+| route 6 | 242 / 37 -> 229 / 20 | 1 106 / 104 (33.4 MB) -> 1 044 / 79 (13.1 MB) |
+| attract (rides) | 200 / 37 -> 189 / 20 | 1 024 / 104 -> 986 / 87 |
+| walk (card) | 244 / 41 -> 232 / 23 | 1 055 / 107 -> 982 / 76 |
+| altar | 218 / 36 -> 205 / 21 | 1 020 / 101 -> 952 / 78 |
+
+**Measured** (Vita3K 222, p0 = main with round 121's profile and order, p1 = the same with the new profile, round 121's
+order; two runs at once in the two trees, then swapped; console per-frame env; game thread = frame - wait - sched over
+the frames both runs reached, matched by draws in bins of 100):
+
+| scene, round | game p0 -> p1 (raw) | matched by draws | mean load |
+|---|---|---|---|
+| attract 600 s, 1 | 15.98 -> 14.77 | **-0.96** | 5.7 |
+| attract, 2 (swapped) | 15.11 -> 15.38 | **-0.02** | 5.7 |
+| walk (card) 600 s, 1 | 46.25 -> 41.07 | **-3.56** | 15.5 |
+| walk, 2 | 39.85 -> 39.14 | **-0.77** | 6.9 |
+| altar 480 s, 1 | 37.71 -> 36.21 | **-1.04** | 6.6 |
+| altar, 2 | 42.20 -> 41.76 | **-1.00** | 14.2 (peak 36) |
+
+The new profile is no worse anywhere: about -0.5 ms in the attract demo, about -1 ms at the altar, -0.8..-3.6 ms on the
+walk. The walk script's waits are in vblanks, so the two builds' walks drift apart (different positions by frame 1 500);
+only the draw matching compares them, and round 1 ran at load 15.5. Text: 38.38 -> 38.09 MB. The new order (p2 = p1
+relinked) could not be timed: the host's screen locked and Vita3K stopped booting. Vita3K translates by guest address
+and has no caches, so it would not show the order anyway; the console decides. Pictures (p1, the A/B runs, shots every
+90 s): the shrine and altar with Mono, Wander walking out onto the plain with his shadow, and Agro galloping across the
+field in the attract demo, legs off the ground and shadow under him. Nothing missing or garbled. PGO and layout change
+no computation (no -ffast-math, -fno-profile-values). spalign: 0 sp-based NEON accesses (dev and release).
+
+**Console.** build/agent-scratch/celosia-r137.vpk (dev, prof129: main with round 138 + this profile + this order; round 138's changed fin125 functions are built without a profile) with
+r137/env-console.txt (round 135's A/B list), r137/celosia-r137.elf for prof129.py. build/agent-scratch/celosia-r137-
+release.vpk: the same as a release build (`PS2X_VITA_RELEASE=ON`). Compare the game thread against r135 / r136 at the same
+places (abframes.py --summary). Retrain after the next large batch of natives.

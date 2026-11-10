@@ -1,6 +1,20 @@
+<!--
+Mandatory destination:
+Base repository: amarqs182/celosia
+Base branch: main
+
+Do not submit this work to HenryKun55/celosia. GitHub may preselect the
+original repository because this project is still attached to its fork
+network. Verify the base repository before creating the PR.
+-->
+
 # Pull Request
 
-<!-- AGENTS.md lifecycle: INSPECT -> PLAN -> BRANCH -> IMPLEMENT -> TEST -> REVIEW -> COMMIT -> PUSH -> PR -> MERGE -> RELEASE -->
+## Destination confirmation
+
+- [ ] Base repository is `amarqs182/celosia`.
+- [ ] Base branch is `main`.
+- [ ] This PR is not targeting `HenryKun55/celosia`.
 
 ## Summary
 
@@ -13,18 +27,18 @@
 -
 
 ## Branch
-<!-- Name per the conventions: feat/* fix/* docs/* refactor/* perf/* (hotfix/* for urgent production fixes). -->
+<!-- Topic branch, never a direct commit to main. The pull request targets amarqs182/celosia:main. -->
 
-- Branch: `<feat|fix|docs|refactor|perf>/<name>`
-- Base: `origin/main`
+- Branch: `<feat|fix|refactor|perf|docs|hotfix>/<name>`
+- Base: `amarqs182/celosia:main`
 
-## Validation
+## Validation checklist
 
 - [ ] `PS2Recomp` builds (CMake configure + build, no new warnings)
-- [ ] `ps2x_tests` passes — summary line pasted below
+- [ ] `ps2x_tests` passes - summary line pasted below
 - [ ] `ctest` `gs_cache` suites pass (the `gs_cache.*` tests)
 - [ ] `git diff --check` is clean (no whitespace errors, LF endings preserved)
-- [ ] `git status` reviewed — nothing outside the task scope
+- [ ] `git status` reviewed - nothing outside the task scope
 - [ ] No secrets, credentials, tokens, keys or game data in the diff
 
 `ps2x_tests` summary pasted here: `Passed: <n>` / `Failed: <n>`.
@@ -39,7 +53,11 @@
 
 -
 
-## Linked issues / worklist items
+## Linked issues or worklist items
 
 - Closes #
 - Worklist:
+
+<!-- Any validation that was not executed must be explained here. -->
+
+- [ ] Any unrun validation is explained below.

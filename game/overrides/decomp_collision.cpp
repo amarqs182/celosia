@@ -2736,6 +2736,10 @@ namespace decomp_collision
         fc.note(out == rejected);
         return out;
     }
+    // Round 135 (pf135): the surfaces kPf135Ahead ahead asked for (their boundary record's line and their flag byte):
+    // the ids are known in advance, the records are spread over the class's table (a cache miss each on the A9).
+    // Reads nothing the loop uses, changes nothing.
+    constexpr uint32_t kPf135Ahead = 4u;
     __attribute__((noinline)) uint32_t finderScan(const uint8_t *ids, uint32_t count, const uint8_t *flags, const uint8_t *table, float radius, float32x4_t c,
                                                   float &lastF0, bool check)
     {
@@ -2743,10 +2747,26 @@ namespace decomp_collision
         const uint32x4_t cSmall = vcaltq_f32(c, limit);
         float f0Last = lastF0;
         uint32_t n = 0;
+        const bool pf = sotc_decomp::pf135On();
+        if (pf)
+            for (uint32_t k = 0; k < kPf135Ahead && k < count; ++k)
+            {
+                uint16_t s;
+                std::memcpy(&s, ids + k * 2u, 2);
+                __builtin_prefetch(table + static_cast<uint32_t>(s) * 16u);
+                __builtin_prefetch(flags + s);
+            }
         for (; n < count; ++n)
         {
             uint16_t surface;
             std::memcpy(&surface, ids + n * 2u, 2);
+            if (pf && n + kPf135Ahead < count)
+            {
+                uint16_t s;
+                std::memcpy(&s, ids + (n + kPf135Ahead) * 2u, 2);
+                __builtin_prefetch(table + static_cast<uint32_t>(s) * 16u);
+                __builtin_prefetch(flags + s);
+            }
             if (__builtin_expect(flags[surface] == 0u, 0))
                 break;
             const float32x4_t bq = vld1q_f32(reinterpret_cast<const float *>(table + static_cast<uint32_t>(surface) * 16u));
@@ -3037,18 +3057,14 @@ namespace decomp_collision
         returnTo(ctx);
     }
 
-    namespace coll125
-    {
-        bool attrOf(const PS2Runtime *runtime, uint32_t w0, uint32_t w1, uint32_t &out); // coll125.h
-    }
     // ---- GetCollisionDBAttributeAdr (0x1125b30) -------------------------------
     // a0 the surface's id: the address of its attribute record.
     bool attributeAddress(const G g, uint32_t id, uint32_t &out)
     {
         const uint32_t w0 = g.u32(id), w1 = g.u32(id + 4u);
-        // Round 125 (SOTC_FIN125): a surface of a finder list's contact set has it kept (checked this frame).
-        if (coll125::attrOf(g.runtime, w0, w1, out))
-            return true;
+        // (Round 125's fin125 answered a kept surface's address from its cache; round 135 took that out: the attribute
+        // record a surface reaches can change while its plane, boundary and vertices stay (Agro's table, the IK feet's
+        // filter answered from a stale address: coll125.h).)
         uint32_t cls;
         if (!layoutClass(g, w0, cls))
             return false;
@@ -4380,8 +4396,18 @@ namespace decomp_collision
                         const uint32_t tree = g.u32(db + 0x1Cu);
                         __m128 endCur = endObj; // the original's sp + 0xA0
                         bool objPartHit = false;
+                        const bool pf135 = sotc_decomp::pf135On();
                         for (int32_t part = 0; part < nParts; ++part, s7 += 0x90u, m0 += 0x40u, m1 += 0x40u, m2 += 0x40u)
                         {
+                            // Round 135 (pf135): the next part's record (+4 / +0x10 / +0x1c / +0x20 / +0x50..+0x60) and its
+                            // m1 matrix asked for while this one is tested (reads nothing, changes nothing).
+                            if (pf135 && part + 1 < nParts && G::plain(s7 + 0x90u, 0x90u) && G::plain(m1 + 0x40u, 0x40u))
+                            {
+                                for (uint32_t off = 0x90u; off < 0x120u; off += 0x20u)
+                                    __builtin_prefetch(g.rdram + s7 + off);
+                                __builtin_prefetch(g.rdram + m1 + 0x40u);
+                                __builtin_prefetch(g.rdram + m1 + 0x40u + 0x20u);
+                            }
                             if (g.u32(s7 + 4u) == 0u)
                                 continue;
                             ++g_obj125.parts;
@@ -5805,6 +5831,7 @@ namespace decomp_collision
                 WRITE8(flag, 0u);
         }
         g.put32(m, 0u);
+        coll125::flushedEnd(runtime); // round 135
         SET_GPR_U64(ctx, 2, v0);
         returnTo(ctx);
     }
@@ -5984,9 +6011,57 @@ namespace decomp_collision
     }
     template <bool Filtered>
     void finderClipBody(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    // Round 138: SOTC_FIN138_LOG=1: the finder clips' host time by state (0 fin125 off, 1 fin125 with round 135's
+    // validate(), 2 fin125 with validate138) and the validations a frame, every 600 frames ([fin138t]): the
+    // console's per-call reading of the A/B (its frame times are too noisy for a 0.1-0.5 ms change).
+    namespace fin138t
+    {
+        inline uint64_t us[3] = {}, n[3] = {}, checks[3] = {}, frames[3] = {}, lastFrame = 0, logFrame = 0;
+        inline bool want()
+        {
+            static const bool w = ps2_diag::env("SOTC_FIN138_LOG") && std::atoi(ps2_diag::env("SOTC_FIN138_LOG")) != 0;
+            return w;
+        }
+        inline void log()
+        {
+            const uint64_t frame = sotc_decomp::g_gameFrame;
+            if (frame < logFrame + 600u)
+                return;
+            if (logFrame != 0u)
+                for (int i = 0; i < 3; ++i)
+                    if (n[i])
+                        std::fprintf(stderr, "[fin138t] frame %llu %s: %llu clips in %llu frames, %.2f us each, %.3f ms a frame, validations %.1f a frame\n", (unsigned long long)frame,
+                                     i == 0 ? "fin125 off" : i == 1 ? "validate135" : "validate138", (unsigned long long)n[i], (unsigned long long)frames[i],
+                                     (double)us[i] / n[i], frames[i] ? (double)us[i] / 1000.0 / frames[i] : 0.0, frames[i] ? (double)checks[i] / frames[i] : 0.0);
+            for (int i = 0; i < 3; ++i)
+                us[i] = n[i] = checks[i] = frames[i] = 0;
+            logFrame = frame;
+        }
+    }
+    template <bool Filtered>
+    void finderClipBody(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     template <bool Filtered>
     void finderClip(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        if (__builtin_expect(fin138t::want(), 0) && !sotc_decomp::onWorkerLane(runtime))
+        {
+            const int st = !coll125::on(runtime) ? 0 : coll125::on138() ? 2 : 1;
+            const uint64_t c0 = coll125::g_st.checks;
+            const uint64_t t0 = coll115::nowUs();
+            finderClipBody<Filtered>(rdram, ctx, runtime);
+            const uint64_t dt = coll115::nowUs() - t0;
+            fin138t::us[st] += dt;
+            ++fin138t::n[st];
+            fin138t::checks[st] += coll125::g_st.checks >= c0 ? coll125::g_st.checks - c0 : 0u;
+            if (sotc_decomp::g_gameFrame != fin138t::lastFrame)
+            {
+                fin138t::lastFrame = sotc_decomp::g_gameFrame;
+                ++fin138t::frames[st];
+            }
+            fin138t::log();
+            coll125::log(); // (the [fin125] / [fin135] / [fin138] lines when SOTC_COLL115_LOG / the check mode asks)
+            return;
+        }
         // Round 119: SOTC_COLL115_LOG=1: the call's host time by view119's state ([coll119t]).
         if (__builtin_expect(coll115::params().log, 0) && !sotc_decomp::onWorkerLane(runtime))
         {
@@ -6058,8 +6133,15 @@ namespace decomp_collision
                     ++cs.differ;
                     ++cs.differHit;
                     if (cs.differHit <= 20u)
+                    {
                         std::fprintf(stderr, "[fin125m] frame %llu hit/no hit: original %08x host %08x n %d list %08x\n", (unsigned long long)sotc_decomp::g_gameFrame, bestO, best, n,
                                      g.u32(a3 + 0xCu));
+                        coll125::explain(g, bestO != 0u ? bestO : best, bestO != 0u ? "original's hit" : "host's hit"); // round 135
+                        coll125::explainTrace(bestO != 0u ? bestO : best);
+                        if (Filtered)
+                            coll125::explainFilter(g, filter, bestO != 0u ? bestO : best, user, filterSite + 8u, sp);
+                        coll125::explainClip(g, bestO != 0u ? bestO : best, a1, a2, sp);
+                    }
                 }
                 else if (best != 0u)
                 {
@@ -6076,7 +6158,10 @@ namespace decomp_collision
                     {
                         ++cs.differ;
                         if (cs.differ <= 40u)
+                        {
                             std::fprintf(stderr, "[fin125m] frame %llu other: original %08x host %08x d %.4f\n", (unsigned long long)sotc_decomp::g_gameFrame, bestO, best, d);
+                            coll125::explain(g, bestO, "original's hit"); // round 135
+                        }
                     }
                 }
                 std::memcpy(rdram + a0, after, 0x50);

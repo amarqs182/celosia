@@ -12,6 +12,8 @@ natively. The game is drawn by a native renderer (Metal on the Mac, OpenGL
 ES on the Vita) that reads its model data directly. The rest of the hardware
 it talks to (DMA, IOP, SPU2) is reimplemented as host code.
 
+> **Contribution destination for this fork:** all work for this R36S adaptation must be proposed to [`amarqs182/celosia`](https://github.com/amarqs182/celosia), targeting its `main` branch. Do not push to or open pull requests against [`HenryKun55/celosia`](https://github.com/HenryKun55/celosia). GitHub still recognizes this repository as a fork and may preselect the original project as a PR destination. Verify the **base repository** before submitting. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
 **Progress page: [henrykun55.github.io/celosia](https://henrykun55.github.io/celosia/)** (recompilation, decompilation by area, next targets, rounds). **Where it stands: [docs/STATUS.md](docs/STATUS.md)**.
 
 > **No game data is included.** You need your own copy of the game.
@@ -44,7 +46,7 @@ it talks to (DMA, IOP, SPU2) is reimplemented as host code.
 ## Quick start
 
 ```sh
-git clone git@github.com:HenryKun55/celosia.git
+git clone https://github.com/amarqs182/celosia.git
 cd celosia
 ./celosia setup --iso "/path/to/Shadow of the Colossus (USA).iso"
 ./celosia run
@@ -611,8 +613,9 @@ tools/                  pipeline (XFF/ELF handling, function maps) and debug too
 PS2Recomp/              recompiler + runtime (git subtree of ran-j/PS2Recomp, with our changes)
 ```
 
-Changes to PS2Recomp are kept generic: SPU2, VU1 AOT, asynchronous GS, VU0
-fixes. They are meant to go back upstream.
+Changes to PS2Recomp that are required by this R36S adaptation are
+maintained in this repository. They are not sent to the original upstream.
+All contributions must follow [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Credits
 
