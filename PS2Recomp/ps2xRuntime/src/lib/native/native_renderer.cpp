@@ -1048,6 +1048,9 @@ namespace
     {
 #if defined(__vita__)
         return true;
+#elif defined(__linux__)
+        const char *gl = std::getenv("SOTC_NATIVE_GL");
+        return !gl || std::atoi(gl) != 0;
 #else
         const char *gl = std::getenv("SOTC_NATIVE_GL");
         return gl && (std::atoi(gl) != 0 || std::string(gl) == "check");

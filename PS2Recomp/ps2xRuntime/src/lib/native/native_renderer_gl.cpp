@@ -37,6 +37,8 @@
 #endif
 #include <malloc.h>
 #define PS2X_NATIVE_GLES 1
+void ps2xLinuxGlLock();
+void ps2xLinuxGlUnlock();
 // ES has no GL_DEPTH_CLAMP (desktop only): the shadow volumes' near-plane
 // clamp is GL_EXT_depth_clamp's, whose enum the headers may not define.
 #ifndef GL_DEPTH_CLAMP_EXT
@@ -2530,6 +2532,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             glDisable(GL_BLEND);
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
             boundFbo = boundProgram = ~0u;
+        cache = {};
+#if !defined(PS2X_NATIVE_VITA)
+        if (vao)
+            glBindVertexArray(vao);
+#endif
             glDeleteBuffers(1, &vbo);
             if (keepStartTargets())
                 startTargets.push_back(t); // kept: see keepStartTargets
@@ -2764,6 +2771,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 release(colorAltPlain, false); // (colorAlt's texture)
                 release(colorAlt);
                 boundFbo = boundProgram = ~0u;
+        cache = {};
+#if !defined(PS2X_NATIVE_VITA)
+        if (vao)
+            glBindVertexArray(vao);
+#endif
                 vglCollectGarbageNow();
             }
 #endif
@@ -2870,6 +2882,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 glFinish();
                 glBindFramebuffer(GL_FRAMEBUFFER, 0);
                 boundFbo = boundProgram = ~0u;
+        cache = {};
+#if !defined(PS2X_NATIVE_VITA)
+        if (vao)
+            glBindVertexArray(vao);
+#endif
                 std::fprintf(stderr, "[native:gl] %u targets made at %ux%u (their first scene) in %.1f ms\n", made, w, h, (native_renderer::nowUs() - start) / 1000.0);
             }
             // Round 55 (SOTC_GL_LAYER_LOG): each target's colour memory.
@@ -3795,6 +3812,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 
     void Renderer::applyUploadList(std::vector<Upload> &list)
     {
+#if !defined(PS2X_NATIVE_VITA)
+        if (vao)
+            glBindVertexArray(vao);
+#endif
         for (const Upload &u : list)
         {
             switch (u.kind)
@@ -4596,6 +4617,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         const bool fewScenes = false;
 #endif
         boundFbo = boundProgram = ~0u;
+        cache = {};
+#if !defined(PS2X_NATIVE_VITA)
+        if (vao)
+            glBindVertexArray(vao);
+#endif
         // (a frame that drew its screen blur on the second picture: the
         // targets back in their places for the next one, whichever way it ends)
         struct PictureBack
@@ -6759,6 +6785,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 previousTexture = shownTexture;
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
             boundFbo = boundProgram = ~0u;
+        cache = {};
+#if !defined(PS2X_NATIVE_VITA)
+        if (vao)
+            glBindVertexArray(vao);
+#endif
             phaseEnd();
             pendingTexture = shownTexture;
             pendingWidth = w;
@@ -7127,11 +7158,14 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         }
 
     private:
-        // vitaGL is one GL for every thread: the host and this take turns.
+        // vitaGL / Linux SDL2 GLES share one GL for every thread: the host and this take turns.
         struct Lock
         {
 #if defined(PS2X_NATIVE_VITA)
             std::lock_guard<std::recursive_mutex> guard{ps2xVitaGlMutex()};
+#elif defined(PS2X_NATIVE_GLES)
+            Lock() { ps2xLinuxGlLock(); }
+            ~Lock() { ps2xLinuxGlUnlock(); }
 #endif
         };
         static bool noArena()
@@ -7584,9 +7618,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             ThreadNaming::SetCurrentThreadName("RenderThread");
             // Core 2 on the Vita (native_renderer::threads).
             native_renderer::threads::place(native_renderer::threads::kRender);
-            if (makeCurrent)
-                makeCurrent();
-            const bool ok = !initThere || r->init();
+            bool ok = false;
+            {
+                Lock gl;
+                if (makeCurrent)
+                    makeCurrent();
+                ok = !initThere || r->init();
+            }
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 m_started = true;

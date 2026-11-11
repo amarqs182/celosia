@@ -37,6 +37,41 @@ namespace
     double g_lastFrameTime = 0.0;
     double g_frameTime = 0.0;
 
+    std::recursive_mutex g_glMutex;
+    int g_glLockDepth = 0;
+    std::mutex g_inputMutex;
+    std::atomic<int> g_swapInterval{1};
+    int g_appliedSwapInterval = 1;
+}
+
+void ps2xLinuxGlLock()
+{
+    g_glMutex.lock();
+    if (++g_glLockDepth == 1 && g_window && g_context)
+    {
+        if (SDL_GL_MakeCurrent(g_window, g_context) != 0)
+            std::fprintf(stderr, "[linux] SDL_GL_MakeCurrent(ctx) failed: %s\n", SDL_GetError());
+    }
+}
+
+void ps2xLinuxGlUnlock()
+{
+    if (--g_glLockDepth == 0 && g_window && g_context)
+    {
+        if (SDL_GL_MakeCurrent(g_window, nullptr) != 0)
+            std::fprintf(stderr, "[linux] SDL_GL_MakeCurrent(null) failed: %s\n", SDL_GetError());
+    }
+    g_glMutex.unlock();
+}
+
+namespace
+{
+    struct GlLock
+    {
+        GlLock() { ps2xLinuxGlLock(); }
+        ~GlLock() { ps2xLinuxGlUnlock(); }
+    };
+
     struct TextureSlot
     {
         GLuint texture = 0;
@@ -214,6 +249,7 @@ namespace
 
     void pollInput()
     {
+        std::lock_guard<std::mutex> lock(g_inputMutex);
         // Events: quit, controller hot-plug.
         SDL_Event event;
         while (SDL_PollEvent(&event))
@@ -585,23 +621,27 @@ void InitWindow(int width, int height, const char *title)
     // quad program's vertex shader; there is no fixed-function state here.
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    SDL_GL_MakeCurrent(g_window, nullptr);
     bootMark("window: GLES up");
     g_startCounter = SDL_GetPerformanceCounter();
 }
 
 void CloseWindow(void)
 {
-    for (auto &[id, slot] : g_textures)
-        if (slot.texture)
-            glDeleteTextures(1, &slot.texture);
-    g_textures.clear();
-    if (g_whiteTexture)
-        glDeleteTextures(1, &g_whiteTexture);
-    g_whiteTexture = 0;
-    if (g_quadProgram)
-        glDeleteProgram(g_quadProgram);
-    g_quadProgram = 0;
-    g_glReady = false;
+    {
+        GlLock lock;
+        for (auto &[id, slot] : g_textures)
+            if (slot.texture)
+                glDeleteTextures(1, &slot.texture);
+        g_textures.clear();
+        if (g_whiteTexture)
+            glDeleteTextures(1, &g_whiteTexture);
+        g_whiteTexture = 0;
+        if (g_quadProgram)
+            glDeleteProgram(g_quadProgram);
+        g_quadProgram = 0;
+        g_glReady = false;
+    }
     if (g_audioDevice != 0)
     {
         SDL_CloseAudioDevice(g_audioDevice);
@@ -627,7 +667,7 @@ bool IsWindowReady(void) { return g_glReady; }
 void SetConfigFlags(unsigned int) {}
 // Presentation follows the display's vsync: 30 or less shows each picture
 // for at least two vblanks (interval 2), else every vblank.
-void SetTargetFPS(int fps) { SDL_GL_SetSwapInterval(fps > 0 && fps <= 30 ? 2 : 1); }
+void SetTargetFPS(int fps) { g_swapInterval.store(fps > 0 && fps <= 30 ? 2 : 1, std::memory_order_relaxed); }
 int GetFPS(void) { return g_fps; }
 
 double GetTime(void)
@@ -648,22 +688,23 @@ void PollInputEvents(void) { pollInput(); }
 void BeginDrawing(void)
 {
     pollInput();
+    ps2xLinuxGlLock(); // released by EndDrawing
     const double now = GetTime();
     if (g_lastFrameTime > 0.0)
         g_frameTime = now - g_lastFrameTime;
     g_lastFrameTime = now;
     if (!initQuadProgram())
         return;
-    // TODO(r36s): when native_renderer_gl.cpp grows its GLES path here,
-    // the GS renderer's own GL state takes over under an interlock like
-    // the Vita's ps2xVitaGlMutex (host and GS share one GL state).
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindVertexArray(0);
+    glActiveTexture(GL_TEXTURE0);
     glUseProgram(g_quadProgram);
     glDepthRangef(0.0f, 1.0f);
     glDepthMask(GL_TRUE);
     glViewport(0, 0, g_width, g_height);
     glDisable(GL_SCISSOR_TEST);
     glDisable(GL_DEPTH_TEST);
+    glDisable(GL_STENCIL_TEST);
     glDisable(GL_CULL_FACE);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -673,13 +714,22 @@ void BeginDrawing(void)
 void EndDrawing(void)
 {
     if (g_glReady && g_window)
+    {
+        const int wantSwap = g_swapInterval.load(std::memory_order_relaxed);
+        if (wantSwap != g_appliedSwapInterval)
+        {
+            SDL_GL_SetSwapInterval(wantSwap);
+            g_appliedSwapInterval = wantSwap;
+        }
         SDL_GL_SwapWindow(g_window);
+    }
     static bool firstShown = false;
     if (!firstShown)
     {
         firstShown = true;
         bootMark("first picture on screen");
     }
+    ps2xLinuxGlUnlock();
     std::fflush(stdout);
     std::fflush(stderr);
     ++g_framesThisSecond;
@@ -713,7 +763,9 @@ void DrawTexturePro(Texture2D texture, Rectangle source, Rectangle dest, Vector2
         float xy[8], uv[8];
         rectQuad(xy, dest.x, dest.y, dest.width, dest.height);
         rectQuad(uv, source.x / texture.width, source.y / texture.height, source.width / texture.width, source.height / texture.height);
+        glDisable(GL_BLEND);
         drawQuads(texture.id & 0x7FFFFFFFu, xy, uv, 1, tint);
+        glEnable(GL_BLEND);
         return;
     }
     const auto it = g_textures.find(texture.id);
@@ -750,6 +802,9 @@ namespace
             return true;
         if (!g_glReady)
             return false;
+        GlLock lock;
+        if (g_fontTexture)
+            return true;
         std::vector<uint32_t> pixels(128 * 128);
         for (int i = 0, counter = 0; i < 128 * 128; i += 32, ++counter)
             for (int j = 31; j >= 0; --j)
@@ -898,6 +953,7 @@ Texture2D LoadTextureFromImage(Image image)
     Texture2D texture{};
     if (!g_glReady)
         return texture;
+    GlLock lock;
     TextureSlot slot;
     glGenTextures(1, &slot.texture);
     glBindTexture(GL_TEXTURE_2D, slot.texture);
@@ -931,6 +987,7 @@ void UpdateTexture(Texture2D texture, const void *pixels)
     const auto it = g_textures.find(texture.id);
     if (it == g_textures.end() || !it->second.texture || !pixels)
         return;
+    GlLock lock;
     glBindTexture(GL_TEXTURE_2D, it->second.texture);
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, texture.width, texture.height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
     // Kept for LoadImageFromTexture (the Vita's UpdateTexture drops it,
@@ -943,6 +1000,7 @@ void UnloadTexture(Texture2D texture)
     const auto it = g_textures.find(texture.id);
     if (it == g_textures.end())
         return;
+    GlLock lock;
     if (it->second.texture)
         glDeleteTextures(1, &it->second.texture);
     g_textures.erase(it);
@@ -952,6 +1010,7 @@ void SetTextureFilter(Texture2D texture, int filter)
 {
     if (!g_glReady)
         return;
+    GlLock lock;
     // GLES3 here has no trilinear or anisotropic filtering: both degrade to GL_LINEAR.
     const GLint glFilter = (filter == TEXTURE_FILTER_POINT) ? GL_NEAREST : GL_LINEAR;
     GLuint glTexture = 0;

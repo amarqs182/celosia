@@ -560,7 +560,7 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     if (GSDirectFrame::load(s_scratch, direct))
     {
         waitDirectFrame(direct.fence);
-#if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
+#if (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)) || defined(PS2X_LINUX_SDL2_SHIM)
         // The shim draws a GL texture name as is when bit 31 is set.
         const unsigned int id = direct.texture | 0x80000000u;
 #else
@@ -1095,6 +1095,8 @@ bool PS2Runtime::initialize(const char *title)
         // vitaGL is one GL for every thread (the shim's lock takes turns):
         // nothing to make current, the GPU GS renderer can start.
         GSHwBackend::setContextProvider([] {});
+        native_renderer::setGlContext([] {});
+#elif defined(PS2X_LINUX_SDL2_SHIM)
         native_renderer::setGlContext([] {});
 #endif
         ps2_stats::bootMark("window and renderers up");
@@ -3096,7 +3098,7 @@ void PS2Runtime::run()
             }
 #endif
     };
-#if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
+#if (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)) || defined(PS2X_LINUX_SDL2_SHIM)
     // The GS thread puts its frames on screen as soon as they are ready (one
     // GL for every thread: drawing here would hold it through every vsync).
     static std::atomic<double> lastGsPresent{-1.0};
@@ -3318,17 +3320,17 @@ void PS2Runtime::run()
         });
         uint32_t presentWidth = FB_WIDTH;
         uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
-#if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
-        // The Vita shows the native picture from the render thread (its
-        // present hook): the GS's display read out of local memory and
-        // uploaded here every refresh went nowhere (round 19: ~12% of the
+#if (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)) || defined(PS2X_LINUX_SDL2_SHIM)
+        // The Vita / Linux SDL2 shim shows the native picture from the render
+        // thread (its present hook): the GS's display read out of local memory
+        // and uploaded here every refresh went nowhere (round 19: ~12% of the
         // CPU during the boot, the GS thread and this one).
         if (!native_renderer::shown())
             UploadFrame(frameTex, this, presentWidth, presentHeight);
 #else
         UploadFrame(frameTex, this, presentWidth, presentHeight);
 #endif
-#if !(defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
+#if !((defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)) || defined(PS2X_LINUX_SDL2_SHIM))
         // The native renderer's picture at its own size (it may draw larger
         // than the PS2's 512 x 448), filtered: not through the GS's display.
         static Texture2D nativeTex{};
@@ -3771,7 +3773,7 @@ void PS2Runtime::run()
             }
         }
 
-#if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
+#if (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)) || defined(PS2X_LINUX_SDL2_SHIM)
         // Draw here only before the GS thread's first frame, or when it has
         // stopped presenting: a slow game frame must not bring the host back
         // (it holds the one GL through every vsync and starves the GS).
@@ -3796,7 +3798,7 @@ void PS2Runtime::run()
         }
     }
 
-#if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
+#if (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)) || defined(PS2X_LINUX_SDL2_SHIM)
     GSHwBackend::setPresentHook(nullptr); // drawHostFrame goes out of scope
     native_renderer::setPresentHook(nullptr);
 #endif
