@@ -149,6 +149,7 @@ namespace native_renderer
             d.feedback = !on("SOTC_NATIVE_NOFEEDBACK");
             d.reflections = !on("SOTC_NATIVE_NOREFLECT");
             d.refraction = !on("SOTC_NATIVE_NOREFRACT");
+            d.additive = !on("SOTC_NATIVE_NOADDITIVE");
             d.mipmaps = !on("SOTC_NATIVE_NOMIPS");
             d.textureScroll = !on("SOTC_NATIVE_NOROW");
             d.rawMirror = on("SOTC_RAW_MIRROR");
