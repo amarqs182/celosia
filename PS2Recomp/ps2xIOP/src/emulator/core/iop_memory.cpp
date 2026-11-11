@@ -1,6 +1,7 @@
 #include "iop_memory.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 
 namespace ps2x::iop::detail
@@ -12,6 +13,28 @@ namespace ps2x::iop::detail
         constexpr uint32_t kDmaStart = 1u << 24u;
         constexpr int kDmaSpu0Irq = 0x24;
         constexpr int kDmaSpu1Irq = 0x28;
+
+        // Backing store for the SIF register file (0x1D000000..0x1D0000FF).
+        // The IOP side of the SIF interface has no other emulation, so
+        // reads/writes to this window land here instead of the generic
+        // hardware map (which returns 0 for unknown addresses).
+        constexpr uint32_t kSifRegSize = 0x100u;
+        uint8_t s_sifRegs[kSifRegSize] = {};
+        unsigned s_sifLogCount = 0u;
+
+        bool isSifReg(uint32_t phys)
+        {
+            return phys >= 0x1D000000u && phys < 0x1D000000u + kSifRegSize;
+        }
+
+        void logSifAccess(bool write, uint32_t address, uint32_t value)
+        {
+            if (s_sifLogCount >= 100u)
+                return;
+            ++s_sifLogCount;
+            std::fprintf(stderr, "[iop:sifreg] %c addr=0x%08x v=0x%08x\n",
+                         write ? 'w' : 'r', address, value);
+        }
 
         uint32_t alignUp(uint32_t value, uint32_t alignment)
         {
@@ -30,6 +53,8 @@ namespace ps2x::iop::detail
         std::fill(m_ram.begin(), m_ram.end(), uint8_t{0});
         std::fill(m_owned.begin(), m_owned.end(), uint8_t{0});
         std::fill(m_scratch.begin(), m_scratch.end(), uint8_t{0});
+        std::memset(s_sifRegs, 0, sizeof(s_sifRegs));
+        s_sifLogCount = 0u;
         m_hardware.clear();
         m_allocations.clear();
         m_heapCursor = HeapBase;
@@ -52,6 +77,12 @@ namespace ps2x::iop::detail
             return m_ram[phys];
         if (phys >= ScratchBase && phys < ScratchBase + ScratchSize)
             return m_scratch[phys - ScratchBase];
+        if (isSifReg(phys))
+        {
+            const uint8_t value = s_sifRegs[phys - SifBase];
+            logSifAccess(false, phys, value);
+            return value;
+        }
         if (Spu2::isRegister(phys))
             return static_cast<uint8_t>(m_spu2.read16(phys & ~1u) >> ((phys & 1u) * 8u));
         const uint32_t value = readHardware32(phys & ~3u);
@@ -110,6 +141,12 @@ namespace ps2x::iop::detail
         if (phys >= ScratchBase && phys < ScratchBase + ScratchSize)
         {
             m_scratch[phys - ScratchBase] = value;
+            return;
+        }
+        if (isSifReg(phys))
+        {
+            s_sifRegs[phys - SifBase] = value;
+            logSifAccess(true, phys, value);
             return;
         }
         if (Spu2::isRegister(phys))
@@ -240,6 +277,19 @@ namespace ps2x::iop::detail
 
     uint32_t IopMemory::readHardware32(uint32_t address) const
     {
+        if (isSifReg(address))
+        {
+            const uint32_t offset = address - SifBase;
+            if (offset + 3u < kSifRegSize)
+            {
+                const uint32_t value = static_cast<uint32_t>(s_sifRegs[offset]) |
+                                       (static_cast<uint32_t>(s_sifRegs[offset + 1u]) << 8u) |
+                                       (static_cast<uint32_t>(s_sifRegs[offset + 2u]) << 16u) |
+                                       (static_cast<uint32_t>(s_sifRegs[offset + 3u]) << 24u);
+                logSifAccess(false, address, value);
+                return value;
+            }
+        }
         const auto value = m_hardware.find(address);
         if (value != m_hardware.end())
             return value->second;
@@ -258,6 +308,19 @@ namespace ps2x::iop::detail
 
     void IopMemory::writeHardware32(uint32_t address, uint32_t value)
     {
+        if (isSifReg(address))
+        {
+            const uint32_t offset = address - SifBase;
+            if (offset + 3u < kSifRegSize)
+            {
+                s_sifRegs[offset + 0u] = static_cast<uint8_t>(value);
+                s_sifRegs[offset + 1u] = static_cast<uint8_t>(value >> 8u);
+                s_sifRegs[offset + 2u] = static_cast<uint8_t>(value >> 16u);
+                s_sifRegs[offset + 3u] = static_cast<uint8_t>(value >> 24u);
+                logSifAccess(true, address, value);
+                return;
+            }
+        }
         switch (address)
         {
         case 0x1F801070u:

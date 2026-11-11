@@ -1,6 +1,8 @@
 // The native renderer's front: picks a backend (native_backend.h) the first
 // time it is used. macOS: Metal, or OpenGL with SOTC_NATIVE_GL=1 (to check
-// the GL path against Metal); the Vita: OpenGL (vitaGL); elsewhere none.
+// the GL path against Metal); the Vita: OpenGL (vitaGL); Linux: OpenGL too
+// (GLES3, once native_renderer_gl.cpp grows the ES path there, r36s);
+// elsewhere none.
 #include "native_backend.h"
 #include "runtime/ps2_diag.h"
 #include "runtime/native_tuning.h"
@@ -36,7 +38,7 @@
 extern "C" unsigned int _pthread_stack_default_user; // ps2_vita_runtime.cpp
 #endif
 
-#if defined(__APPLE__) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
+#if defined(__APPLE__) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)) || defined(__linux__)
 #define PS2X_NATIVE_GL 1
 #endif
 
@@ -59,7 +61,7 @@ namespace native_renderer
         // 3x, the Vita's 1x, the PS2's 512 x 448; the Vita's High also has
         // round 36's particle sacrifice on, as its default had).
         applyPreset(d, kPresetHigh);
-#if defined(__vita__)
+#if defined(__vita__) || defined(__linux__)
         // Copies of the picture made mid-frame came out white in Vita3K when
         // the picture was taken up again after them: drawn again instead, so
         // the heat haze and the water read the PS2's 256 x 256 copy as on the Mac.
@@ -172,6 +174,7 @@ namespace native_renderer
             d.shadowAllSides = on("SOTC_SHADOW_ALLSIDES") && std::atoi(std::getenv("SOTC_SHADOW_ALLSIDES")) != 0;
             if (on("SOTC_BG_DEPTH"))
                 d.backgroundDepth = std::atoi(std::getenv("SOTC_BG_DEPTH")) != 0;
+            d.additive = !on("SOTC_NATIVE_NOADDITIVE");
             d.mipmaps = !on("SOTC_NATIVE_NOMIPS");
             d.textureScroll = !on("SOTC_NATIVE_NOROW");
             d.rawMirror = on("SOTC_RAW_MIRROR");
@@ -1254,6 +1257,9 @@ namespace
     {
 #if defined(__vita__)
         return true;
+#elif defined(__linux__)
+        const char *gl = std::getenv("SOTC_NATIVE_GL");
+        return !gl || std::atoi(gl) != 0;
 #else
         const char *gl = std::getenv("SOTC_NATIVE_GL");
         return gl && (std::atoi(gl) != 0 || std::string(gl) == "check");

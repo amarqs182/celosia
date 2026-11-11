@@ -54,6 +54,11 @@
 // See ps2FpuDivideNearest (ps2_runtime_macros.h).
 bool g_ps2FpuSetcsrNearest = false;
 
+// iosRecvMsg / iosSendMsg loop iteration counters (defined in EeScheduler.cpp,
+// read here for the [stats] diagnostic line). Counters only.
+extern std::atomic<uint64_t> g_eeRecvIters;
+extern std::atomic<uint64_t> g_eeSendIters;
+
 #if defined(__vita__)
 #include <psp2/kernel/processmgr.h>
 #endif
@@ -556,7 +561,7 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     if (GSDirectFrame::load(s_scratch, direct))
     {
         waitDirectFrame(direct.fence);
-#if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
+#if (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)) || defined(PS2X_LINUX_SDL2_SHIM)
         // The shim draws a GL texture name as is when bit 31 is set.
         const unsigned int id = direct.texture | 0x80000000u;
 #else
@@ -1092,6 +1097,8 @@ bool PS2Runtime::initialize(const char *title)
         // nothing to make current, the GPU GS renderer can start.
         GSHwBackend::setContextProvider([] {});
         native_renderer::setGlContext([] {});
+#elif defined(PS2X_LINUX_SDL2_SHIM)
+        native_renderer::setGlContext([] {});
 #endif
         ps2_stats::bootMark("window and renderers up");
         hostmenu::load();
@@ -1494,6 +1501,39 @@ namespace
         slot = offset >> 2;
         return slot < g_ps2RecompiledFunctionTableSlotCount;
     }
+
+    // Nearest recompiled-function start at or before `address` (the owner
+    // function), scanning back up to maxBackBytes. 0 when there is none.
+    uint32_t containingFunctionStart(uint32_t address, uint32_t maxBackBytes = 0x1000u)
+    {
+        uint32_t slot = 0u;
+        if (!generatedFunctionTableSlot(address, slot))
+        {
+            return 0u;
+        }
+
+        const uint32_t maxBackSlots = maxBackBytes >> 2;
+        for (uint32_t back = 0; back <= maxBackSlots && back <= slot; ++back)
+        {
+            const uint32_t candidate = slot - back;
+            if (g_ps2RecompiledFunctionTable[candidate] != nullptr)
+            {
+                return g_ps2RecompiledFunctionTableBase + (candidate << 2);
+            }
+        }
+        return 0u;
+    }
+
+    // PS2X_DISPATCH_CONTAINING=0 disables the containing-function fallback in
+    // dispatchGuestBranch (legacy reportMissingFunction path). Default on.
+    bool dispatchContainingEnabled()
+    {
+        static const bool enabled = [] {
+            const char *value = std::getenv("PS2X_DISPATCH_CONTAINING");
+            return !(value && std::strcmp(value, "0") == 0);
+        }();
+        return enabled;
+    }
 }
 
 namespace
@@ -1840,6 +1880,33 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
     }
 }
 
+namespace
+{
+    // One line per distinct guest target redispatched to its containing
+    // function (mirrors the missing-target log in reportMissingFunction).
+    void logContainingFunctionDispatch(uint32_t targetPc, uint32_t sourcePc, uint32_t start,
+                                       PS2Runtime::GuestBranchKind kind, const char *debugName)
+    {
+        static std::set<uint32_t> loggedTargets;
+        static std::mutex logMutex;
+
+        std::lock_guard<std::mutex> lock(logMutex);
+        if (!loggedTargets.emplace(targetPc).second)
+        {
+            return;
+        }
+
+        std::ostringstream oss;
+        oss << "[guest-branch:containing-function] source=0x" << std::hex << sourcePc
+            << " target=0x" << targetPc
+            << " -> start=0x" << start
+            << " kind=" << describeGuestBranchKind(kind)
+            << " name=" << (debugName ? debugName : "<unknown>")
+            << std::dec;
+        std::cerr << oss.str() << std::endl;
+    }
+}
+
 bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
                                      R5900Context *ctx,
                                      uint32_t targetPc,
@@ -1880,6 +1947,27 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
 
     if (!hasFunction(targetPc))
     {
+        // The target is inside a recompiled function but not at its entry
+        // (e.g. a JALR into the middle of one). Its generated code switches
+        // on ctx->pc with a default that restarts at the entry, so dispatch
+        // the owner function with the original guest PC.
+        if (dispatchContainingEnabled())
+        {
+            const uint32_t start = containingFunctionStart(targetPc);
+            if (start != 0u)
+            {
+                logContainingFunctionDispatch(targetPc, sourcePc, start, kind, debugName);
+                ctx->pc = targetPc;
+                if (RecompiledFunction ownerFn = guestFunctionAt(start))
+                {
+                    const uint32_t entryPc = ctx->pc;
+                    const uint32_t jumpSerial = m_guestJumpSerial;
+                    ownerFn(rdram, ctx, this);
+                    return finishGuestCall(ctx, entryPc, fallthroughPc, jumpSerial);
+                }
+            }
+        }
+
         reportMissingFunction(rdram, ctx, targetPc, sourcePc, kind, debugName);
 
         const MissingFunctionPolicy policy = missingFunctionPolicy();
@@ -3034,7 +3122,7 @@ void PS2Runtime::run()
             }
 #endif
     };
-#if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
+#if (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)) || defined(PS2X_LINUX_SDL2_SHIM)
     // The GS thread puts its frames on screen as soon as they are ready (one
     // GL for every thread: drawing here would hold it through every vsync).
     static std::atomic<double> lastGsPresent{-1.0};
@@ -3264,17 +3352,17 @@ void PS2Runtime::run()
         });
         uint32_t presentWidth = FB_WIDTH;
         uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
-#if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
-        // The Vita shows the native picture from the render thread (its
-        // present hook): the GS's display read out of local memory and
-        // uploaded here every refresh went nowhere (round 19: ~12% of the
+#if (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)) || defined(PS2X_LINUX_SDL2_SHIM)
+        // The Vita / Linux SDL2 shim shows the native picture from the render
+        // thread (its present hook): the GS's display read out of local memory
+        // and uploaded here every refresh went nowhere (round 19: ~12% of the
         // CPU during the boot, the GS thread and this one).
         if (!native_renderer::shown())
             UploadFrame(frameTex, this, presentWidth, presentHeight);
 #else
         UploadFrame(frameTex, this, presentWidth, presentHeight);
 #endif
-#if !(defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
+#if !((defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)) || defined(PS2X_LINUX_SDL2_SHIM))
         // The native renderer's picture at its own size (it may draw larger
         // than the PS2's 512 x 448), filtered: not through the GS's display.
         static Texture2D nativeTex{};
@@ -3394,6 +3482,7 @@ void PS2Runtime::run()
             std::cerr << "[stats] t=" << static_cast<int>(GetTime())
                       << " gameFps=" << (statChains - lastStatChains) / 5.0
                       << " shownFps=" << ps2_stats::presentedFrames.exchange(0) / 5.0
+                      << " hostFps=" << static_cast<double>(hostFrames) / 5.0
                       << " frames=" << statChains
                       << " gfx=" << native_renderer::presetName(native_renderer::gfxPresetNow()) // round 124: the Graphics preset
                       << []
@@ -3467,8 +3556,11 @@ void PS2Runtime::run()
                       << " prims(pt,ln,lstrip,tri,tstrip,tfan,sprite)=";
             for (int i = 0; i < 7; ++i)
                 std::cerr << ps2_stats::gsPrims[i].exchange(0) << (i < 6 ? "," : "");
+            std::cerr << " profRecv=" << g_eeRecvIters.load(std::memory_order_relaxed)
+                      << " profSend=" << g_eeSendIters.load(std::memory_order_relaxed);
             lastStatChains = statChains;
             lastHostFrames = hostFrames;
+            hostFrames = 0; // reset the 5 s window that hostFps= above reports
             dumpDispatchProfile();
             std::cerr << " vif:";
             for (int op = 0; op < 128; ++op)
@@ -3714,7 +3806,7 @@ void PS2Runtime::run()
             }
         }
 
-#if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
+#if (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)) || defined(PS2X_LINUX_SDL2_SHIM)
         // Draw here only before the GS thread's first frame, or when it has
         // stopped presenting: a slow game frame must not bring the host back
         // (it holds the one GL through every vsync and starves the GS).
@@ -3739,7 +3831,7 @@ void PS2Runtime::run()
         }
     }
 
-#if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
+#if (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)) || defined(PS2X_LINUX_SDL2_SHIM)
     GSHwBackend::setPresentHook(nullptr); // drawHostFrame goes out of scope
     native_renderer::setPresentHook(nullptr);
 #endif

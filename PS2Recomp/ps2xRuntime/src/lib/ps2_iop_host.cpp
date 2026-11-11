@@ -8,6 +8,8 @@
 #include "Kernel/Syscalls/Common.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <iostream>
@@ -17,6 +19,18 @@
 #if !defined(_WIN32)
 #include <sys/types.h>
 #endif
+
+namespace
+{
+    // Diagnostic-only: bounded tracing of IOP -> EE SIF command packets.
+    std::atomic<unsigned> s_sifCmdLogCount{0};
+    constexpr unsigned kSifCmdLogLimit = 200u;
+
+    bool sifCmdLogEnabled()
+    {
+        return s_sifCmdLogCount.fetch_add(1u, std::memory_order_relaxed) < kSifCmdLogLimit;
+    }
+}
 
 PS2IopHostAdapter::CallScope::CallScope(PS2IopHostAdapter &owner, R5900Context *context, uint8_t *rdram)
     : m_lock(owner.m_callMutex),
@@ -510,11 +524,27 @@ bool PS2IopHostAdapter::sendSifCommand(uint32_t commandId,
     uint8_t *const rdram = m_activeRdram
                                ? m_activeRdram
                                : m_runtime.memory().getRDRAM();
-    return ps2_stubs::dispatchSifCommand(rdram,
+    if (sifCmdLogEnabled())
+    {
+        const auto *bytes = static_cast<const uint8_t *>(packet);
+        uint32_t destination = 0u;
+        if (bytes && packetSize >= 8u)
+        {
+            std::memcpy(&destination, bytes + 4u, sizeof(destination));
+        }
+        std::fprintf(stderr, "[iop:sifcmd] send size=0x%x dst=0x%08x cmd=0x%x\n",
+                     static_cast<unsigned>(packetSize), destination, commandId);
+    }
+    const bool result = ps2_stubs::dispatchSifCommand(rdram,
                                          &m_runtime,
                                          commandId,
                                          packet,
                                          packetSize);
+    if (sifCmdLogEnabled())
+    {
+        std::fprintf(stderr, "[iop:sifcmd] send-result ok=%d\n", result ? 1 : 0);
+    }
+    return result;
 }
 
 void PS2IopHostAdapter::log(ps2x::iop::LogLevel level, std::string_view message)

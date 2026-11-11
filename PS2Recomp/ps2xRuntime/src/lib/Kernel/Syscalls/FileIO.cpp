@@ -9,6 +9,62 @@ namespace ps2_syscalls
         return {paths.hostRoot, paths.cdRoot, paths.mcRoot};
     }
 
+    namespace
+    {
+        // Diagnostic-only VFS logging helpers (no behavior change).
+        // Rate-limited to kVfsDiagLogMaxLines lines per run for the
+        // [vfs:getstat]/[vfs:open] streams combined; paths containing one of
+        // the always-logged needles (case-insensitive) always bypass the limit.
+        constexpr int kVfsDiagLogMaxLines = 200;
+        std::atomic<int> g_vfsDiagLogCount{0};
+
+        bool vfsDiagPathContains(const std::string &path, const char *needle)
+        {
+            const size_t needleLen = std::strlen(needle);
+            if (path.size() < needleLen)
+                return false;
+            for (size_t i = 0; i + needleLen <= path.size(); ++i)
+            {
+                bool match = true;
+                for (size_t j = 0; j < needleLen; ++j)
+                {
+                    const char a = path[i + j];
+                    const char b = needle[j];
+                    const char ua = (a >= 'a' && a <= 'z') ? static_cast<char>(a - 'a' + 'A') : a;
+                    const char ub = (b >= 'a' && b <= 'z') ? static_cast<char>(b - 'a' + 'A') : b;
+                    if (ua != ub)
+                    {
+                        match = false;
+                        break;
+                    }
+                }
+                if (match)
+                    return true;
+            }
+            return false;
+        }
+
+        bool vfsDiagPathAlwaysLogged(const std::string &path)
+        {
+            static constexpr const char *kAlwaysLoggedNeedles[] = {
+                "startup", ".cmd", ".xff", "gamecore", "manager", "kernel"
+            };
+            for (const char *needle : kAlwaysLoggedNeedles)
+            {
+                if (vfsDiagPathContains(path, needle))
+                    return true;
+            }
+            return false;
+        }
+
+        bool vfsDiagLogAllowed(const std::string &path)
+        {
+            if (vfsDiagPathAlwaysLogged(path))
+                return true;
+            return g_vfsDiagLogCount.fetch_add(1, std::memory_order_relaxed) < kVfsDiagLogMaxLines;
+        }
+    }
+
     struct VagAccumEntry
     {
         std::vector<uint8_t> data;
@@ -37,7 +93,19 @@ namespace ps2_syscalls
             return;
         }
 
+        // Diagnostic only: capture the requested path before the call and log
+        // the outcome after it. No behavior change (open() still gets ps2Path).
+        const std::string requestedPath(ps2Path);
         const int32_t descriptor = runtime->vfs().open(ps2Path, static_cast<uint32_t>(flags), currentVfsMounts(), runtime->romDevice());
+        if (vfsDiagLogAllowed(requestedPath))
+        {
+            std::cerr << "[vfs:open] path=\"" << requestedPath << "\" flags=0x" << std::hex << static_cast<uint32_t>(flags) << std::dec;
+            if (descriptor >= 0)
+                std::cerr << " -> fd=" << descriptor;
+            else
+                std::cerr << " -> FAIL";
+            std::cerr << std::endl;
+        }
         setReturnS32(ctx, descriptor);
     }
 
@@ -361,8 +429,19 @@ namespace ps2_syscalls
             return;
         }
 
+        // Diagnostic only: capture the requested path before the call and log
+        // the outcome after it. No behavior change (stat() still gets ps2Path).
+        const std::string requestedPath(ps2Path);
         PS2VfsStat status;
-        if (!runtime->vfs().stat(ps2Path, currentVfsMounts(), runtime->romDevice(), status))
+        const bool statOk = runtime->vfs().stat(ps2Path, currentVfsMounts(), runtime->romDevice(), status);
+        if (vfsDiagLogAllowed(requestedPath))
+        {
+            if (statOk)
+                std::cerr << "[vfs:getstat] path=\"" << requestedPath << "\" -> ok size=" << status.size << std::endl;
+            else
+                std::cerr << "[vfs:getstat] path=\"" << requestedPath << "\" -> FAIL" << std::endl;
+        }
+        if (!statOk)
         {
             setReturnS32(ctx, -1);
             return;

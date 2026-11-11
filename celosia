@@ -35,6 +35,39 @@ die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "'$1' is required ($2)"; }
 lower() { echo "$1" | tr '[:upper:]' '[:lower:]'; }
 
+# Path for native Windows tools (ps2_recomp.exe): under MSYS/Git Bash a POSIX
+# path like /d/foo is not openable by them, so use a drive-letter path.
+# macOS/Linux keep the POSIX path untouched.
+win_path() {
+    local p=$1 drive tail windows=0
+    # MSYS/Git Bash detection: MSYSTEM env or cygpath present (uname is not
+    # reliable in the minimal CI PATH).
+    if [ -n "${MSYSTEM:-}" ] || command -v cygpath >/dev/null 2>&1; then
+        windows=1
+    else
+        case "$(uname -s 2>/dev/null || echo unknown)" in
+        MINGW*|MSYS*|CYGWIN*) windows=1 ;;
+        esac
+    fi
+    if [ "$windows" = 1 ]; then
+        if command -v cygpath >/dev/null 2>&1; then
+            cygpath -m "$p"
+            return
+        fi
+        case $p in
+        /[a-zA-Z]/*) drive=${p#/}; drive=${drive%%/*}; tail=${p#??/} ;;
+        *) printf '%s\n' "$p"; return ;;
+        esac
+        # Uppercase the drive letter (bash affix replacement is unreliable here).
+        case $drive in
+        [a-z]) drive=$(printf '%s' "$drive" | tr '[:lower:]' '[:upper:]') ;;
+        esac
+        printf '%s:/%s\n' "$drive" "$tail"
+        return
+    fi
+    printf '%s\n' "$p"
+}
+
 check_tools() {
     need cmake "brew install cmake"
     need ninja "brew install ninja"
@@ -128,7 +161,8 @@ with open(sys.argv[2], "w") as f:
 EOF
     )
     python3 "$ROOT/tools/funcmap_elf.py" "$DISC/$BOOT" "$WORK/scus_symbols.txt" "$dir/functions.csv" >/dev/null
-    sed "s|^input = .*|input = \"$DISC/$BOOT\"|" "$ROOT/game/scus.toml" >"$dir/config.toml"
+    # ps2_recomp.exe is a native Windows binary: it needs a drive-letter path.
+    sed "s|^input = .*|input = \"$(win_path "$DISC/$BOOT")\"|" "$ROOT/game/scus.toml" >"$dir/config.toml"
     recompile "$dir"
 }
 
