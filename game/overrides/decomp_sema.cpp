@@ -50,6 +50,14 @@ namespace decomp_sema
 
     void signalSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        if (__builtin_expect(ps2_worker::isShell(runtime), 0))
+        {
+            if (g_stub)
+                g_stub(rdram, ctx, runtime);
+            else
+                ps2_syscalls::SignalSema(rdram, ctx, runtime);
+            return;
+        }
         const int32_t id = GPR_S32(ctx, 4);
         if (__builtin_expect(runtime->eeScheduler().signalSemaphoreUncontended(id, rdram), 1))
         {
@@ -65,7 +73,10 @@ namespace decomp_sema
         if (g_stats)
             note(false);
 #endif
-        g_stub(rdram, ctx, runtime);
+        if (g_stub)
+            g_stub(rdram, ctx, runtime);
+        else
+            ps2_syscalls::SignalSema(rdram, ctx, runtime);
     }
 
     // Round 139 (SOTC_SEM139, A/B `sem139`): GetThreadId (0x106ed0) and PollSema (0x107030), called
@@ -79,6 +90,14 @@ namespace decomp_sema
     PS2Runtime::RecompiledFunction g_tidStub = nullptr, g_pollStub = nullptr;
     void getThreadIdNative(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        if (__builtin_expect(ps2_worker::isShell(runtime), 0))
+        {
+            if (g_tidStub)
+                g_tidStub(rdram, ctx, runtime);
+            else
+                ps2_syscalls::GetThreadId(rdram, ctx, runtime);
+            return;
+        }
         if (__builtin_expect(stat139::sem139(), 1))
         {
             const int tid = runtime->eeScheduler().currentThreadIdFast(rdram);
@@ -89,10 +108,21 @@ namespace decomp_sema
                 return;
             }
         }
-        g_tidStub(rdram, ctx, runtime);
+        if (g_tidStub)
+            g_tidStub(rdram, ctx, runtime);
+        else
+            ps2_syscalls::GetThreadId(rdram, ctx, runtime);
     }
     void pollSemaNative(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        if (__builtin_expect(ps2_worker::isShell(runtime), 0))
+        {
+            if (g_pollStub)
+                g_pollStub(rdram, ctx, runtime);
+            else
+                ps2_syscalls::PollSema(rdram, ctx, runtime);
+            return;
+        }
         if (__builtin_expect(stat139::sem139(), 1))
         {
             int result;
@@ -103,7 +133,10 @@ namespace decomp_sema
                 return;
             }
         }
-        g_pollStub(rdram, ctx, runtime);
+        if (g_pollStub)
+            g_pollStub(rdram, ctx, runtime);
+        else
+            ps2_syscalls::PollSema(rdram, ctx, runtime);
     }
 }
 
@@ -133,7 +166,7 @@ namespace sotc_decomp
 
     void getThreadId139(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        if (__builtin_expect(stat139::sem139(), 1))
+        if (__builtin_expect(!ps2_worker::isShell(runtime) && stat139::sem139(), 1))
         {
             const int tid = runtime->eeScheduler().currentThreadIdFast(rdram);
             if (__builtin_expect(tid >= 0, 1))
@@ -146,7 +179,7 @@ namespace sotc_decomp
     }
     void pollSema139(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        if (__builtin_expect(stat139::sem139(), 1))
+        if (__builtin_expect(!ps2_worker::isShell(runtime) && stat139::sem139(), 1))
         {
             int result;
             if (__builtin_expect(runtime->eeScheduler().pollSemaphoreFast(GPR_S32(ctx, 4), rdram, result), 1))
