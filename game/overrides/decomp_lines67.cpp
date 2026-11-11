@@ -1,13 +1,17 @@
-// Round 67: the walks' cache-line proxy (lines67.h; SOTC_LINES67=1, macOS/Linux).
+// Round 67: the walks' cache-line proxy (lines67.h; SOTC_LINES67=1, Mac only).
 #include "lines67.h"
 
-#if defined(__APPLE__) || defined(__linux__)
+#if !defined(__vita__)
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
 #include <unordered_map>
 #include <algorithm>
-#include <dlfcn.h>
+#if defined(__APPLE__)
+#include <mach-o/dyld.h> // base(): the host image's base (macOS only)
+#else
+#include <dlfcn.h> // base(): the host image's base via dladdr (dli_fbase)
+#endif
 
 namespace lines67
 {
@@ -53,10 +57,12 @@ namespace lines67
         }
         uint64_t base()
         {
+#if defined(__APPLE__)
+            return reinterpret_cast<uint64_t>(_dyld_get_image_header(0));
+#else
             Dl_info info{};
-            return dladdr(reinterpret_cast<void *>(&base), &info)
-                ? reinterpret_cast<uint64_t>(info.dli_fbase)
-                : 0u;
+            return dladdr(reinterpret_cast<void *>(&base), &info) ? reinterpret_cast<uint64_t>(info.dli_fbase) : 0u;
+#endif
         }
         uint64_t every()
         {
