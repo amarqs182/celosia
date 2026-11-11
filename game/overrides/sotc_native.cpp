@@ -51,6 +51,11 @@ namespace char104 // round 104 (decomp_char104.cpp)
     void setAb111(bool hold, bool delta);            // round 111
     void setAb114(bool gain, bool net);              // round 114
 }
+namespace ps2_log
+{
+    void log_entry(const char *) {}
+    void log_exit(const char *) {}
+}
 #include "lines67.h"
 #include "lean_hot.h"
 #include "ThreadNaming.h"
