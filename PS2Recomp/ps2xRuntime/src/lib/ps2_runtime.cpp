@@ -2878,11 +2878,15 @@ bool PS2Runtime::isStopRequested() const
 
 EeScheduler &PS2Runtime::eeScheduler()
 {
+    if (ps2_worker::isShell(this) && ps2_worker::g_real && ps2_worker::g_real->m_eeScheduler)
+        return *ps2_worker::g_real->m_eeScheduler;
     return *m_eeScheduler;
 }
 
 const EeScheduler &PS2Runtime::eeScheduler() const
 {
+    if (ps2_worker::isShell(this) && ps2_worker::g_real && ps2_worker::g_real->m_eeScheduler)
+        return *ps2_worker::g_real->m_eeScheduler;
     return *m_eeScheduler;
 }
 
