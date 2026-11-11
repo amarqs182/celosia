@@ -1360,7 +1360,7 @@ namespace
     constexpr uint32_t kMaxStubWarningsPerName = 8;
     std::unordered_map<std::string, uint32_t> g_stubWarningCount;
     std::mutex g_stubWarningMutex;
-    constexpr uint32_t kMaxPrintfLogs = 200;
+    constexpr uint32_t kMaxPrintfLogs = 400;
     constexpr size_t kMaxFormattedOutputBytes = 4096;
     uint32_t g_printfLogCount = 0;
     std::mutex g_printfLogMutex;
