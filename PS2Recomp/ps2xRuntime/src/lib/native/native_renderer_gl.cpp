@@ -706,7 +706,11 @@ void main()
     else if (uMode == 9) // soft shadow: alpha mask x uA.x
         oColor = vec4(0.0, 0.0, 0.0, clamp(texture(uSrc, vUV).r * uA.x, 0.0, 1.0));
     else if (uMode == 10) // bloom composite: rgb x uB.rgb x uB.a
-        oColor = vec4(texture(uSrc, vUV).rgb * uB.rgb * uB.a, 1.0);
+    {
+        vec3 b = texture(uSrc, vUV).rgb * uB.rgb * uB.a;
+        b = b / (1.0 + b * 0.4);
+        oColor = vec4(b, 1.0);
+    }
     else if (uMode == 15) // the GS chain's mask at 256 x 256 (rows from the top): bilinear over the PS2 frame's
     {                     // texels (p + 0.5) x (2, 1.75), each white where GS Z <= uA.x + 1; uB the mask colour
         vec2 size = vec2(textureSize(uDepth, 0));
@@ -758,7 +762,9 @@ void main()
         vec2 size = vec2(textureSize(uDepth, 0));
         vec2 x = vec2(gl_FragCoord.x, size.y - gl_FragCoord.y) / uA.xy - 0.5;
         vec2 uv = (0.5 + x * vec2(256.0 / 512.0, 256.0 / 448.0)) / 256.0;
-        oColor = vec4(texture(uSrc, vec2(uv.x, 1.0 - uv.y)).rgb * uB.rgb * uB.a, 1.0);
+        vec3 b = texture(uSrc, vec2(uv.x, 1.0 - uv.y)).rgb * uB.rgb * uB.a;
+        b = b / (1.0 + b * 0.4);
+        oColor = vec4(b, 1.0);
     }
     // SOTC_BLOOM_VITA=1 (Mac): the Vita's bloom modes 8, 11, 15-18 (kQuadFragment's
     // CG below) as 19-24, line for line, so that the Mac runs the Vita's bloom.
