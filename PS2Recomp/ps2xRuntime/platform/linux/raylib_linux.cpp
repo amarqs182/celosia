@@ -569,6 +569,27 @@ void InitWindow(int width, int height, const char *title)
     g_height = height;
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_AUDIO) != 0)
         std::fprintf(stderr, "[linux] SDL_Init failed: %s\n", SDL_GetError());
+
+    // Load external gamecontrollerdb.txt (e.g. PortMaster's database) and
+    // hardcode the R36S / GO-Super Gamepad mapping so that the built-in
+    // controls are recognized as a standard SDL GameController even when no
+    // external db file is present.
+    {
+        const char *dbEnv = std::getenv("SDL_GAMECONTROLLERCONFIG_FILE");
+        if (dbEnv && dbEnv[0])
+            SDL_GameControllerAddMappingsFromFile(dbEnv);
+        else
+            SDL_GameControllerAddMappingsFromFile("gamecontrollerdb.txt");
+        // R36S / ArkOS built-in pad (Vendor=484b Product=1100).
+        SDL_GameControllerAddMapping(
+            "190000004b4800000011000000010000,GO-Super Gamepad,"
+            "a:b0,b:b1,back:b12,dpdown:b9,dpleft:b10,dpright:b11,dpup:b8,"
+            "guide:b16,leftshoulder:b4,leftstick:b14,lefttrigger:b6,"
+            "leftx:a0,lefty:a1,rightshoulder:b5,rightstick:b15,"
+            "righttrigger:b7,rightx:a2,righty:a3,start:b13,"
+            "x:b2,y:b3,platform:Linux,");
+    }
+
     bootMark("window: SDL up");
     // The GLES3 context is SDL's (SDL_GL_CreateContext uses EGL underneath).
     // The GS renderer's shaders are GLSL ES 3.10 (texelFetch), so the context
@@ -623,6 +644,20 @@ void InitWindow(int width, int height, const char *title)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     SDL_GL_MakeCurrent(g_window, nullptr);
     bootMark("window: GLES up");
+
+    // Open any game controllers already connected at startup (the built-in
+    // pad on handhelds like R36S is always present before SDL_Init).
+    for (int i = 0; i < SDL_NumJoysticks() && i < 2; ++i)
+    {
+        if (SDL_IsGameController(i))
+        {
+            g_controllers[i] = SDL_GameControllerOpen(i);
+            if (g_controllers[i])
+                std::fprintf(stderr, "[linux] controller %d: %s\n", i,
+                             SDL_GameControllerName(g_controllers[i]));
+        }
+    }
+
     g_startCounter = SDL_GetPerformanceCounter();
 }
 
