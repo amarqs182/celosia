@@ -703,6 +703,9 @@ __attribute__((always_inline)) inline bool PS2Runtime::hostStackDeep() const noe
 #endif
 }
 
+inline uint32_t g_guestCallsSinceCheck = 0;
+inline constexpr uint32_t kGuestCallsPerCheck = 4u;
+
 // Generated code's JAL / JALR: the callee runs as a host call through the
 // function table (overrides included) after a checkpoint. Inline: no call
 // into the runtime on the way (the Vita reaches it through a veneer).
@@ -713,8 +716,12 @@ __attribute__((always_inline)) inline bool PS2Runtime::callGuestFn(RecompiledFun
     // m_hostStackFloor holds !m_directDispatch too (callGuestSlow tells them apart).
     if (__builtin_expect(!fn || hostStackDeep(), 0))
         return callGuestSlow(rdram, ctx, target, returnPc, sourcePc, kind, debugName);
-    if (eeCheckpointDue(kEeDispatchCycles))
-        return false;
+    if (__builtin_expect(++g_guestCallsSinceCheck >= kGuestCallsPerCheck, 0))
+    {
+        g_guestCallsSinceCheck = 0;
+        if (eeCheckpointDue(kGuestCallsPerCheck * kEeDispatchCycles))
+            return false;
+    }
     const uint32_t jumpSerial = m_guestJumpSerial;
     fn(rdram, ctx, this);
     if (__builtin_expect(ctx->pc == returnPc && !m_eeClock.unwinding, 1))
@@ -731,8 +738,12 @@ __attribute__((always_inline)) inline bool PS2Runtime::callGuestKnown(Recompiled
     ctx->pc = target;
     if (__builtin_expect(!fn || hostStackDeep(), 0))
         return callGuestSlow(rdram, ctx, target, returnPc, sourcePc, kind, debugName);
-    if (eeCheckpointDue(kEeDispatchCycles))
-        return false;
+    if (__builtin_expect(++g_guestCallsSinceCheck >= kGuestCallsPerCheck, 0))
+    {
+        g_guestCallsSinceCheck = 0;
+        if (eeCheckpointDue(kGuestCallsPerCheck * kEeDispatchCycles))
+            return false;
+    }
     const uint32_t jumpSerial = m_guestJumpSerial;
     if (__builtin_expect(fn == known, 1))
         known(rdram, ctx, this);
@@ -763,8 +774,12 @@ __attribute__((always_inline)) inline void PS2Runtime::jumpGuestFn(RecompiledFun
         jumpGuestSlow(fn); // no function, PS2X_DIRECT_DISPATCH=0, or the stack's floor
         return;
     }
-    if (eeCheckpointDue(kEeDispatchCycles))
-        return;
+    if (__builtin_expect(++g_guestCallsSinceCheck >= kGuestCallsPerCheck, 0))
+    {
+        g_guestCallsSinceCheck = 0;
+        if (eeCheckpointDue(kGuestCallsPerCheck * kEeDispatchCycles))
+            return;
+    }
     fn(rdram, ctx, this);
 }
 

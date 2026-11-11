@@ -207,8 +207,18 @@ namespace
         return true;
     }
 
+    int g_dispatchHistoryState = -1;
+    bool dispatchHistoryOn()
+    {
+        if (g_dispatchHistoryState < 0)
+            g_dispatchHistoryState = std::getenv("PS2X_DISPATCH_HISTORY") != nullptr ? 1 : 0;
+        return g_dispatchHistoryState != 0;
+    }
+
     void pushDispatchPc(uint32_t pc)
     {
+        if (!dispatchHistoryOn())
+            return;
         DispatchHistory &h = g_dispatchHistory;
         h.pcs[h.next] = pc;
         h.next = (h.next + 1u) % static_cast<uint32_t>(h.pcs.size());
@@ -1920,9 +1930,17 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     // Every inter-function transfer is also a deterministic EE safe point.
     // Backward edges inside generated functions use eeCheckpointDue(), while
     // this charge bounds straight-line call chains that have no local loop.
-    if (eeCheckpointDue(kEeDispatchCycles))
+    // As at loop edges, the scheduler is asked every few calls with their
+    // cycles together (~30k guest calls a frame, the check a call of its own).
+    static uint32_t s_branchCallsSinceCheck = 0;
+    constexpr uint32_t kCallsPerCheck = 4u;
+    if (++s_branchCallsSinceCheck >= kCallsPerCheck)
     {
-        return false;
+        s_branchCallsSinceCheck = 0;
+        if (eeCheckpointDue(kCallsPerCheck * kEeDispatchCycles))
+        {
+            return false;
+        }
     }
 
     if (!isCall)
