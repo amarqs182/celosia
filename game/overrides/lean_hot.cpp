@@ -106,7 +106,7 @@ namespace ps2_lean
         // On by default on the Vita (SOTC_LEAN=0 turns them off), off on
         // the Mac.
         const char *on = std::getenv("SOTC_LEAN");
-#if defined(__vita__)
+#if defined(__vita__) || defined(__linux__)
         g_mode = on ? std::atoi(on) : 1;
 #else
         g_mode = on ? std::atoi(on) : 0;
