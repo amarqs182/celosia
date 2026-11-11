@@ -170,14 +170,32 @@ A telemetria do dispositivo registrou uma sessão contínua ultrapassando **6.17
 
 ---
 
-## 7. Roteiro de Melhorias e Otimizações para Gameplay
+## 7. Resolução dos Glitches Gráficos e Diagnóstico dos 2.300 mscal/s
 
-1. **Perfis de Otimização e Desativação de Passes Secundários Pesados**:
-   - Fornecer configurações predefinidas para desligar passes de pós-processamento desnecessários na tela de 640x480 do R36S (`SOTC_NATIVE_NOSHADOWS=1`, `SOTC_NATIVE_NOGLOW=1`, `SOTC_NATIVE_NODOF=1`, `SOTC_NATIVE_NOSBLUR=1`).
-2. **Eliminação do Flickering em Tile-Based GPUs**:
-   - Ajustar o ciclo de vida dos FBOs intermediários com `glInvalidateFramebuffer` e garantir apresentação atômica somente do framebuffer final completo.
-3. **Compilação AOT dos Microcódigos Adicionais do Gameplay**:
-   - Fazer o dump e recompilação AOT dos microcódigos de VU1 disparados especificamente no gameplay do mundo aberto.
-4. **Agrupamento (Batching) e Redução de Draw Calls**:
-   - Otimizar a submissão de malhas estáticas e primitivas para diminuir drasticamente o número de draw calls por frame.
+### Resolução dos Glitches e Flickering
+Após a implementação da trava monoinstância no launcher /roms/ports/SotC_Celosia/SotC.sh e a desativação de passes de pós-processamento secundários (SOTC_NATIVE_NOSHADOWS=1, SOTC_NATIVE_NODOF=1, SOTC_NATIVE_NOSBLUR=1, SOTC_NATIVE_NOFEEDBACK=1), os **glitches gráficos e piscadas foram eliminados** no hardware físico.
 
+A medição em tempo real da sessão sem glitches (ultrapassando 8.934 frames) registrou:
+- O número de draw calls por frame caiu de **1.835** para **323 a 332** (redução de 5.5x).
+- O tempo de renderização na GPU Mali-G31 caiu de **297.7 ms** para **44.1 ms**.
+- O tempo total de frame reduziu pela metade (**507 ms ➔ 196 ms**), elevando o gameplay para cerca de **5 a 7 FPS**.
+
+### Diagnóstico do Gargalo Restante de Desempenho no Gameplay
+A análise de telemetria dos frames 8.600 a 8.934 revelou a causa raiz exata do gargalo restante:
+`
+[stats] t=665 gameFps=7.4 mscal=2368 vu1Rec=0/0/0 unpack=38480 vif1KB=28776
+[stats] t=670 gameFps=5.8 mscal=1763 vu1Rec=0/0/0 unpack=28145 vif1KB=21449
+`
+- **Interpretação do VU1 em Gameplay**: Durante a navegação no mundo aberto, ocorrem **mais de 2.300 chamadas mscal por segundo**, com \u1Rec = 0/0/0\ (0 execuções compiladas em AOT).
+- **Causa**: O conjunto inicial de AOT cobria apenas os 6 microcódigos da tela de título. No gameplay de mundo aberto, novos microcódigos de terreno, deformação de tecidos e geometria dinâmica entram em ação e estão caindo 100% no interpretador lento de software na CPU Cortex-A35.
+
+---
+
+## 8. Roteiro Imediato de Otimizações para 30 FPS no Gameplay
+
+1. **Recompilação AOT dos Novos Microcódigos VU1 do Gameplay**:
+   - Extrair os hashes e rotinas dos microcódigos invocados pelo mscal no gameplay e compilá-los em novos shards AOT C++ (esperado ganho similar de 6.6x no tempo de VU1).
+2. **Ativação de Overrides de Alta Performance da CPU**:
+   - Ativar os módulos especializados já existentes no Celosia para simulação de tecidos e colisão (SOTC_CLOTH, SOTC_COLLISION, SOTC_IK).
+3. **Redução Adicional de Overhead de Apresentação e I/O**:
+   - Otimizar taxa de amostragem de telemetria e sincronização de swaps.
