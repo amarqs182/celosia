@@ -536,10 +536,10 @@ bool PS2IopHostAdapter::sendSifCommand(uint32_t commandId,
                      static_cast<unsigned>(packetSize), destination, commandId);
     }
     const bool result = ps2_stubs::dispatchSifCommand(rdram,
-                                                      &m_runtime,
-                                                      commandId,
-                                                      packet,
-                                                      packetSize);
+                                         &m_runtime,
+                                         commandId,
+                                         packet,
+                                         packetSize);
     if (sifCmdLogEnabled())
     {
         std::fprintf(stderr, "[iop:sifcmd] send-result ok=%d\n", result ? 1 : 0);

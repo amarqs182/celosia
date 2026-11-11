@@ -383,8 +383,8 @@ does **not** depend on input — it is the loading-screen redraw.
 - Binary `ps2sotc_aarch64_pie_sdl`, 51.350.952 B, md5
   `d9a17982dc91bcefb1beb895c27521b6`; must run as `SCUS_974.72` (copy of
   `NICO.ELF`) for the overrides to apply.
-- Build: `D:\tools\dev\ninja\ninja.exe -C D:/celosia_upstream/build/linux-aarch64
-  -j4 ps2EntryRunner`, LTO off, sysroot `D:\celosia_sysroot`.
+- Build: `ninja -C build/linux-aarch64
+  -j4 ps2EntryRunner`, LTO off, sysroot `$SYSROOT`.
 - **FORBIDDEN** on the device: `ls /proc/[0-9]*/fd/*` (froze the R36S once),
   `ffmpeg -f fbdev`, `ffmpeg -f kmsgrab`, `pkill` outside the atomic script.
   See `docs/r36s_port.md` (h) and `tools/r36s_smoke.sh` (header).
@@ -392,7 +392,7 @@ does **not** depend on input — it is the loading-screen redraw.
 ### Infrastructure
 
 - Device: **ark@192.168.2.121** (Debian 13 aarch64, EmulationStation).
-- Binary: `D:\celosia_upstream\build\linux-aarch64\ps2xRuntime\ps2EntryRunner`
+- Binary: `build/linux-aarch64/ps2xRuntime/ps2EntryRunner`
   → `/roms/ports/SotC_Celosia/ps2sotc_aarch64_pie_sdl`; **51,350,952 bytes,
   MD5 `d9a17982dc91bcefb1beb895c27521b6`** (current build).
 - Runs as **`SCUS_974.72`** (copy of `NICO.ELF`; symlink blocked by the
@@ -580,8 +580,8 @@ does **not** depend on input — it is the loading-screen redraw.
   - `dd53b12` overrides(sotc): `enableHostClockSync` unconditional in
     `applySotcOverrides`.
 - Build command:
-  `D:\tools\dev\ninja\ninja.exe -C D:/celosia_upstream/build/linux-aarch64 -j4 ps2EntryRunner`
-  (LTO off, sysroot `D:\celosia_sysroot`).
+  `ninja -C build/linux-aarch64 -j4 ps2EntryRunner`
+  (LTO off, sysroot `$SYSROOT`).
 - Matrix A/B/C (3 × 70 s, RAM dump at t=35 s), syscall trace
   (`PS2X_TRACE_SYSCALLS=1`, 33 `[syscall]` lines), semaphore deadlock
   (gid 1..16; gid=14/15 init 0; single signal `gid=6`), GS-buffer PPMs

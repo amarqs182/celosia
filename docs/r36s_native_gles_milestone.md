@@ -241,7 +241,7 @@ Durante o teste em mundo aberto no hardware R36S (quadros 9.500–10.090), o usu
 
 ### 10.2 Correções Implementadas
 1. **Controle Dinâmico de Desenhos Aditivos (`SOTC_NATIVE_NOADDITIVE`)**:
-   - Adicionada leitura da variável `SOTC_NATIVE_NOADDITIVE` em [`native_renderer.cpp`](file:///D:/celosia_upstream/PS2Recomp/ps2xRuntime/src/lib/native/native_renderer.cpp), permitindo desligar `Tuning::additive`.
+   - Adicionada leitura da variável `SOTC_NATIVE_NOADDITIVE` em [`native_renderer.cpp`](../PS2Recomp/ps2xRuntime/src/lib/native/native_renderer.cpp), permitindo desligar `Tuning::additive`.
    - Ignora os desenhos de mistura aditiva (`Blend::Additive`), que desenham os feixes de luz pesados que saturavam a tela sem mapeamento de tons HDR.
 2. **Desativação Completa do Bloom Estourado (`SOTC_BLOOM_SCALE=0`)**:
    - Ao definir `SOTC_BLOOM_SCALE=0`, o renderer nativo desativa os múltiplos passes de redução de FBO e o blur gaussiano `blur(rounds)`, além do passe aditivo `bloomMask`.

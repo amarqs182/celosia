@@ -1,7 +1,7 @@
 R36S Port — SotC Celosia (docs/r36s_port.md)
 
 > Consolidação do port PS2 → R36S (Crouton Alpha). Números medidos nesta sessão; não inventar.
-> Repositório host: D:\celosia_upstream. Device: R36S Debian 13 aarch64 192.168.2.121 ark/ark.
+> Repositório host: o repositório local. Device: R36S Debian 13 aarch64 192.168.2.121 ark/ark.
 > Estado: boot OK, stall em tela de loading (deadlock semáforos + anel pad zero + VU1 zero + GS não exibido).
 > Documento gerado via WSL python3 com LF. Não commitar, não buildar, não tocar no device neste passo.
 
@@ -33,8 +33,8 @@ R36S Port — SotC Celosia (docs/r36s_port.md)
 - ES restaurado após cada run. /tmp é tmpfs 448M; atenção com dumps grandes de RAM/GS.
 - Dir do jogo: /roms/ports/SotC_Celosia/ ; binário rodado como SCUS_974.72 (cópia do NICO.ELF).
 - Binário: ps2sotc_aarch64_pie_sdl 51.350.952 B, md5 d9a17982dc91bcefb1beb895c27521b6.
-- Build host: D:\tools\dev\ninja\ninja.exe -C D:/celosia_upstream/build/linux-aarch64 -j4 ps2EntryRunner.
-- Build flags: LTO off (default upstream); sysroot D:\celosia_sysroot.
+- Build host: ninja -C build/linux-aarch64 -j4 ps2EntryRunner.
+- Build flags: LTO off (default upstream); sysroot $SYSROOT.
 - CMakeLists inclui game/overrides em builds não-Vita (já aplicado).
 - NICO.DAT 2.667.340.678 B (NÃO é ISO9660, sem CD001) — payload principal do jogo.
 - NICO.DAT não é ISO9660: ausência de CD001 confirma arquivo bruto, não imagem ISO.
@@ -52,9 +52,9 @@ R36S Port — SotC Celosia (docs/r36s_port.md)
 - Símbolos-chave: FlushPadHistory=0x114b0a8, padSysGet=0x104e78 (vg. GAMECORE.XFF;1.cmd).
 - memcards/mc0/mc1 vazios. Runtime cria Mcd001.ps2 em branco (0xFF) válido (MemoryCard2.cpp:116-123).
 - CheckNewCard não bloqueia; tools/native_run.sh exige memcards/Mcd001.ps2.
-- Host: D:\celosia_upstream\build\ guarda logs/dumps; ver seção (g) para lista completa.
+- Host: build/ guarda logs/dumps; ver seção (g) para lista completa.
 - WSL Ubuntu no host com sshpass; acesso via ssh `bash -s` < arquivo (ver seção h).
-- sysroot D:\celosia_sysroot reúne headers/libs aarch64 para cross-build.
+- sysroot $SYSROOT reúne headers/libs aarch64 para cross-build.
 
 ## (c) Como rodar e medir
 
@@ -172,7 +172,7 @@ R36S Port — SotC Celosia (docs/r36s_port.md)
 
 ## (g) Artefatos no host
 
-- Dir: D:\celosia_upstream\build\ (logs binários e dumps copiados após cada run).
+- Dir: build/ (logs binários e dumps copiados após cada run).
 - Logs: w50 / w51 / w52 / route / dump / iop / mx_A / mx_B / mx_C / a2_A2 / a2_A3 / tr_T1.log.
 - mx_A.log 1.065.761 B / 35.028 linhas: 33 [syscall] linhas 27-208; ld output em 974, fd=12 em 976.
 - mx_A.log: JALR em 980, signal gid=6 em 10509 (único signal em 16 semáforos).
