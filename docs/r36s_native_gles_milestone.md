@@ -230,3 +230,22 @@ A análise de telemetria dos frames 8.600 a 8.934 revelou a causa raiz exata do 
   - Cenas 3D Complexas / Gameplay: **8.4 a 14.6 gameFps** (salto de mais de 2x em relação aos 2–5 FPS anteriores).
 - **Estabilidade Visual**: Glitches gráficos e piscadas totalmente eliminados.
 
+---
+
+## 10. Otimização de Pós-Processamento: Eliminação de Bloom Estourado e Feixes de Luz
+
+### 10.1 Diagnóstico do Usuário em Gameplay Aberto
+Durante o teste em mundo aberto no hardware R36S (quadros 9.500–10.090), o usuário identificou que:
+- O efeito de **bloom estava estourado/branco**, ofuscando a cena.
+- Os **feixes de luz (ray light / light shafts)** estavam excessivamente brilhantes e pesavam no framerate, consumindo mais de 200 ms por quadro de processamento GPU na Mali-G31.
+
+### 10.2 Correções Implementadas
+1. **Controle Dinâmico de Desenhos Aditivos (`SOTC_NATIVE_NOADDITIVE`)**:
+   - Adicionada leitura da variável `SOTC_NATIVE_NOADDITIVE` em [`native_renderer.cpp`](file:///D:/celosia_upstream/PS2Recomp/ps2xRuntime/src/lib/native/native_renderer.cpp), permitindo desligar `Tuning::additive`.
+   - Ignora os desenhos de mistura aditiva (`Blend::Additive`), que desenham os feixes de luz pesados que saturavam a tela sem mapeamento de tons HDR.
+2. **Desativação Completa do Bloom Estourado (`SOTC_BLOOM_SCALE=0`)**:
+   - Ao definir `SOTC_BLOOM_SCALE=0`, o renderer nativo desativa os múltiplos passes de redução de FBO e o blur gaussiano `blur(rounds)`, além do passe aditivo `bloomMask`.
+3. **Desativação de Passes Secundários de Câmera**:
+   - Ativados `SOTC_NATIVE_NOREFRACT=1` e `SOTC_NATIVE_NOREFLECT=1` para evitar redraws mid-frame de refração de ar quente e reflexo d'água.
+
+
