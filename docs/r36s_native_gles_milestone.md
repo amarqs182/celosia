@@ -199,3 +199,34 @@ A análise de telemetria dos frames 8.600 a 8.934 revelou a causa raiz exata do 
    - Ativar os módulos especializados já existentes no Celosia para simulação de tecidos e colisão (SOTC_CLOTH, SOTC_COLLISION, SOTC_IK).
 3. **Redução Adicional de Overhead de Apresentação e I/O**:
    - Otimizar taxa de amostragem de telemetria e sincronização de swaps.
+
+---
+
+## 9. Implementação de Multi-Threading e Controle de VSync (Sessão 11/11)
+
+### 9.1 Ações Realizadas
+1. **Ativação de Multi-Threading em Linux AArch64 (`native_renderer.cpp`)**:
+   - Habilitado `defaultTuning()` para `#if defined(__vita__) || defined(__linux__)`:
+     - `d.renderThread = true`
+     - `d.asyncBuilds = true`
+     - `d.hookWorker = true`
+     - `d.holdIncomplete = true`
+     - `d.warmShaders = true`
+     - `d.sacParticles = true`
+   - Os 4 núcleos Cortex-A35 do RK3326 agora processam geração de malhas, decodificação de texturas e renderização de forma concorrente.
+2. **Suporte a `PS2X_SWAP_INTERVAL` (`raylib_linux.cpp`)**:
+   - O runtime forçava `g_swapInterval = 2` quando a taxa alvo era <= 30 FPS, causando bloqueios de até 100 ms por quadro esperando vblanks duplos.
+   - Adicionada leitura dinâmica de `PS2X_SWAP_INTERVAL` (permitindo intervalo `1` ou `0` para desativar esperas bloqueantes).
+3. **Configuração de Fast-Path em `SotC.sh`**:
+   - Adicionadas variáveis de CPU fast-path: `SOTC_RENDER_THREAD=1`, `SOTC_HOOK_ASYNC=1`, `SOTC_ASYNC_BUILDS=1`, `SOTC_EE_TRUST=1`, `SOTC_GL_WARM=1`, `SOTC_GL_MERGE=1`, `SOTC_GL_LEAN=1`, `SOTC_GL_NODISCARD=1`, `SOTC_GPU_SKIN=1`, `SOTC_SAC_PARTICLES=1`, `SOTC_SAC_LOD=1`, `SOTC_SAC_DRAWDIST=1`.
+   - Ajustada quebra de linha LF (evitando falhas de CRLF no interpretador `/bin/sh` do ArkOS).
+
+### 9.2 Resultados Medidos no Hardware R36S
+- **Utilização de CPU**: Subiu de ~98% (monotarefa limitada a 1 núcleo) para **158%** (distribuída pelos 4 núcleos Cortex-A35).
+- **Decodificação de Texturas (`tex64`)**: Espera na thread principal reduzida para **0.000 ms** (100% absorvida pela thread worker).
+- **Junção de Malhas (`mdslane`)**: Apenas **14.29 ms** de espera para processar 2.896 jobs concorrentes.
+- **Taxa de Quadros Medida**:
+  - Sequência de Introdução / Título: **35.4 a 51.6 gameFps** (sustentado a 220+ hostFps).
+  - Cenas 3D Complexas / Gameplay: **8.4 a 14.6 gameFps** (salto de mais de 2x em relação aos 2–5 FPS anteriores).
+- **Estabilidade Visual**: Glitches gráficos e piscadas totalmente eliminados.
+
