@@ -75,6 +75,11 @@
 
 #include <cstring>
 
+namespace sotc_native
+{
+    bool nativeDraws();
+}
+
 namespace decomp_hot48b
 {
     using sotc_decomp::callGuest;
@@ -835,9 +840,41 @@ namespace decomp_hot48b
 
     void bossDeathEffectEnd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        if (!sotc_decomp::hotList48On())
+            return fallback(kBossDeathEffectEnd, rdram, ctx, runtime);
+        if (sotc_native::nativeDraws())
+        {
+            const uint64_t ra = GPR_U64(ctx, 31);
+            const uint32_t entrySp = GPR_U32(ctx, 29), sp = entrySp - 0x210u;
+            WRITE64(sp + 0x208u, ra);
+            SET_GPR_S32(ctx, 29, static_cast<int32_t>(sp));
+            if (READ32(kBossFlags) != 0u)
+            {
+                SET_GPR_S32(ctx, 4, 8);
+                callGuest(rdram, ctx, runtime, jalTarget(rdram, kSiteBossPush), kBossDrawLabel, sp);
+                SET_GPR_S32(ctx, 4, 0);
+                callGuest(rdram, ctx, runtime, 0x010AAFA8u, 0x01087084u, sp); // texResetVRAMRequest(0)
+                callGuest(rdram, ctx, runtime, jalTarget(rdram, 0x0108708Cu), 0x01087094u, sp); // iosDlPopLayer
+            }
+            const uint32_t request = READ32(kBossRequest);
+            if (request != 0u)
+            {
+                WRITE32(kBossRequest, 0u);
+                SET_GPR_U64(ctx, 2, sx(READ32(kBossFlags)) | 2u);
+            }
+            else
+            {
+                SET_GPR_U64(ctx, 2, sx(READ32(kBossFlags)) & 1u);
+            }
+            WRITE32(kBossFlags, GPR_U32(ctx, 2));
+            SET_GPR_U64(ctx, 31, READ64(sp + 0x208u));
+            SET_GPR_S32(ctx, 29, static_cast<int32_t>(entrySp));
+            ctx->pc = GPR_U32(ctx, 31);
+            return;
+        }
         // The effect itself (flags != 0: the boss's death, 4 KB of gsReg
         // drawing) stays the recompiled code, decided here before any effect.
-        if (!sotc_decomp::hotList48On() || READ32(kBossFlags) != 0u)
+        if (READ32(kBossFlags) != 0u)
             return fallback(kBossDeathEffectEnd, rdram, ctx, runtime);
         const uint64_t ra = GPR_U64(ctx, 31);
         const uint32_t entrySp = GPR_U32(ctx, 29), sp = entrySp - 0x210u;

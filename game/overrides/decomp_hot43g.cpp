@@ -56,6 +56,11 @@
 
 #include <cstring>
 
+namespace sotc_native
+{
+    bool nativeDraws();
+}
+
 namespace decomp_hot43g
 {
     using sotc_decomp::jalTarget;
@@ -249,6 +254,24 @@ namespace decomp_hot43g
 
         const uint32_t sp = GPR_U32(ctx, 29) - 0x1F0u;
         G g{rdram, ctx, runtime, sp};
+        if (sotc_native::nativeDraws())
+        {
+            g.put64(sp + 0x1D8u, GPR_U64(ctx, 31));
+            SET_GPR_U32(ctx, 29, sp);
+            float f0 = floatOf(0x3DCCCCCCu);
+            f0 = FPU_MUL_S(ctx->f[12], f0);
+            float f1 = floatOf(g.u32(kRippleTime));
+            f1 = FPU_ADD_S(f1, f0);
+            g.put32(kRippleTime, bitsOf(f1));
+            g.call1(0x0109ADC0u, 0xCu); // iosDlPushLayer(0xc)
+            SET_GPR_U64(ctx, 4, 0xC00u);
+            g.callAt(kTexResetVramRequest, 0x0109ADC8u);
+            g.call(0x0109BE1Cu); // iosDlPopLayer
+            SET_GPR_U64(ctx, 31, g.u64(sp + 0x1D8u));
+            SET_GPR_U32(ctx, 29, sp + 0x1F0u);
+            ctx->pc = GPR_U32(ctx, 31);
+            return;
+        }
         // The prologue: s0..s7, fp, ra, f20 to the frame; f20 = the frame step.
         for (int i = 0; i < 8; ++i)
             g.put64(sp + 0x190u + 8u * i, GPR_U64(ctx, 16 + i));

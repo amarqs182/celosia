@@ -88,7 +88,7 @@ namespace char104
         // jobs where their own account is negative: altar +0.74, route 6 +0.34, attract riding +0.45. 1.
         // Round 121: the console's in-run A/B (r117 err.txt, ab116.py --from 2500) has char104 losing 0.4-1.1 ms a frame
         // on the real Vita: 0 on the Vita build (SOTC_CHAR104=1 still turns the jobs on), 1 elsewhere.
-#if defined(__vita__)
+#if defined(__vita__) || defined(__linux__)
         constexpr int kChar104Default = 0;
 #else
         constexpr int kChar104Default = 1;

@@ -3006,8 +3006,69 @@ namespace sotc_native
         }
         // SOTC_SKIP_ZFOG=1 (debugging): the game's own zFog does not run.
         static const bool skip = std::getenv("SOTC_SKIP_ZFOG") != nullptr;
-        if (!skip)
-            g_zFog(rdram, ctx, runtime);
+        if (skip || nativeDraws())
+        {
+            ctx->pc = GPR_U32(ctx, 31);
+            return;
+        }
+        g_zFog(rdram, ctx, runtime);
+    }
+
+    constexpr uint32_t kBossDeathEffectBegin = 0x01085640u;
+    constexpr uint32_t kDepthOfField = 0x010874E8u;
+    constexpr uint32_t kRefractionBegin = 0x0109BEA0u;
+    PS2Runtime::RecompiledFunction g_bossDeathEffectBegin = nullptr;
+    PS2Runtime::RecompiledFunction g_depthOfField = nullptr;
+    PS2Runtime::RecompiledFunction g_refractionBegin = nullptr;
+
+    void bossDeathEffectBeginHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_ram = rdram;
+        static const bool forceFan = std::getenv("SOTC_FORCE_BOSSFAN") != nullptr;
+        const uint32_t flags = word(0x01186290u);
+        if (nativeDraws() && !forceFan && (flags & 1u) == 0u)
+        {
+            const uint64_t ra = GPR_U64(ctx, 31);
+            if (flags != 0u)
+            {
+                const uint32_t entrySp = GPR_U32(ctx, 29), sp = entrySp - 0x1D0u;
+                SET_GPR_S32(ctx, 29, static_cast<int32_t>(sp));
+                SET_GPR_S32(ctx, 4, 8);
+                sotc_decomp::callGuest(rdram, ctx, runtime, sotc_decomp::jalTarget(rdram, 0x01085908u), 0x01085910u, sp);
+                const int32_t w = static_cast<int32_t>(word(0x00213818u)), h = static_cast<int32_t>(word(0x0021381Cu));
+                SET_GPR_S32(ctx, 4, (w * h + 0x15000) >> 6);
+                sotc_decomp::callGuest(rdram, ctx, runtime, 0x010AAFA8u, 0x01085938u, sp);
+                sotc_decomp::callGuest(rdram, ctx, runtime, sotc_decomp::jalTarget(rdram, 0x01085DF8u), 0x01085E00u, sp);
+                SET_GPR_U64(ctx, 31, ra);
+                SET_GPR_S32(ctx, 29, static_cast<int32_t>(entrySp));
+            }
+            ctx->pc = static_cast<uint32_t>(ra);
+            return;
+        }
+        g_bossDeathEffectBegin(rdram, ctx, runtime);
+    }
+
+    void depthOfFieldHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (nativeDraws())
+        {
+            ctx->pc = GPR_U32(ctx, 31);
+            return;
+        }
+        g_depthOfField(rdram, ctx, runtime);
+    }
+
+    void refractionBeginHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (nativeDraws())
+        {
+            uint32_t bits;
+            std::memcpy(&bits, &ctx->f[12], 4);
+            std::memcpy(rdram + 0x0118C054u, &bits, 4);
+            ctx->pc = GPR_U32(ctx, 31);
+            return;
+        }
+        g_refractionBegin(rdram, ctx, runtime);
     }
 
     // Round mem99: the hook jobs' room trim (runJob) off in `keep99` A/B windows.
@@ -12162,6 +12223,21 @@ void installSotcNative(PS2Runtime &runtime)
     {
         g_zFog = runtime.lookupFunction(kZFog);
         runtime.registerFunction(kZFog, zFogHook);
+    }
+    if (runtime.hasFunction(kBossDeathEffectBegin))
+    {
+        g_bossDeathEffectBegin = runtime.lookupFunction(kBossDeathEffectBegin);
+        runtime.registerFunction(kBossDeathEffectBegin, bossDeathEffectBeginHook);
+    }
+    if (runtime.hasFunction(kDepthOfField))
+    {
+        g_depthOfField = runtime.lookupFunction(kDepthOfField);
+        runtime.registerFunction(kDepthOfField, depthOfFieldHook);
+    }
+    if (runtime.hasFunction(kRefractionBegin))
+    {
+        g_refractionBegin = runtime.lookupFunction(kRefractionBegin);
+        runtime.registerFunction(kRefractionBegin, refractionBeginHook);
     }
     std::cerr << "[sotc:native] models drawn by the native renderer" << std::endl;
 }
