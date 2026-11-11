@@ -483,12 +483,14 @@ namespace
             "void main() {\n"
             "    vec4 c = texture2D(tex, vuv) * color;\n"
             "    if (uTonemap == 1) {\n"
-            "        vec3 mapped = c.rgb / (c.rgb + vec3(1.0));\n"
-            "        gl_FragColor = vec4(pow(mapped, vec3(1.0 / 2.2)), c.a);\n"
-            "    } else if (uTonemap == 2) {\n"
+            "        // Single-Pass Modern Contrast & Highlight Soft-Shoulder\n"
+            "        // Hardware polynomial S-curve: preserves pure black at 0.0 and pure white at 1.0\n"
             "        vec3 x = c.rgb;\n"
-            "        vec3 mapped = clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);\n"
-            "        gl_FragColor = vec4(pow(mapped, vec3(1.0 / 2.2)), c.a);\n"
+            "        vec3 sCurve = x * x * (3.0 - 2.0 * x);\n"
+            "        vec3 col = mix(x, sCurve, 0.55);\n"
+            "        vec3 excess = max(col - vec3(0.82), vec3(0.0));\n"
+            "        col = min(col, vec3(0.82)) + excess / (vec3(1.0) + excess * 2.5);\n"
+            "        gl_FragColor = vec4(col, c.a);\n"
             "    } else {\n"
             "        gl_FragColor = c;\n"
             "    }\n"
@@ -821,7 +823,7 @@ void DrawTexturePro(Texture2D texture, Rectangle source, Rectangle dest, Vector2
         glDisable(GL_BLEND);
         static const int tonemapMode = [] {
             const char *env = std::getenv("SOTC_TONEMAP");
-            return env ? std::atoi(env) : 2; // Default to ACES filmic + Gamma 2.2
+            return env ? std::atoi(env) : 0; // Default to 0 (direct clean presentation), 1 = modern single-pass
         }();
         drawQuads(texture.id & 0x7FFFFFFFu, xy, uv, 1, tint, tonemapMode);
         glEnable(GL_BLEND);
