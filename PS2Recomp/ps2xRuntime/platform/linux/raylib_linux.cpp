@@ -715,7 +715,11 @@ void EndDrawing(void)
 {
     if (g_glReady && g_window)
     {
-        const int wantSwap = g_swapInterval.load(std::memory_order_relaxed);
+        int wantSwap = g_swapInterval.load(std::memory_order_relaxed);
+        if (const char *envSwap = std::getenv("PS2X_SWAP_INTERVAL"))
+        {
+            wantSwap = std::atoi(envSwap);
+        }
         if (wantSwap != g_appliedSwapInterval)
         {
             SDL_GL_SetSwapInterval(wantSwap);
