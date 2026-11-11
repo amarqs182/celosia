@@ -975,7 +975,7 @@ namespace
                 as::callbacksLate.fetch_add(1, std::memory_order_relaxed);
         }
         lastCall = start;
-#if defined(PLATFORM_VITA)
+#if defined(PLATFORM_VITA) || defined(__linux__)
         // Once: the audio thread's priority and cores, as SDL left them
         // (round 12: is the mix on a core of its own, above the game?).
         static bool told = false;
@@ -984,11 +984,13 @@ namespace
             told = true;
             // Round 33: off the game thread's core (SOTC_THREADS=1).
             native_renderer::threads::place(native_renderer::threads::kAudio);
+#if defined(PLATFORM_VITA)
             SceKernelThreadInfo info{};
             info.size = sizeof(info);
             if (sceKernelGetThreadInfo(sceKernelGetThreadId(), &info) >= 0)
                 std::fprintf(stderr, "[audio] callback thread %s: priority %d (initial %d), cpu affinity 0x%x, %u frames a call\n", info.name,
                              info.currentPriority, info.initPriority, static_cast<unsigned>(info.currentCpuAffinityMask), frames);
+#endif
         }
 #endif
         auto *out = static_cast<int16_t *>(buffer);
@@ -3183,7 +3185,7 @@ void PS2Runtime::run()
     std::thread gameThread([&]()
                            {
         ThreadNaming::SetCurrentThreadName("GameThread");
-#if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
+#if (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)) || defined(__linux__)
         // Core 0 alone (SOTC_THREADS=0: cores 0 and 1); the render thread has
         // core 2 (native_renderer::threads).
         native_renderer::threads::place(native_renderer::threads::kGame);
@@ -3221,7 +3223,7 @@ void PS2Runtime::run()
 #endif
 
     uint64_t tick = 0;
-#if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
+#if (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)) || defined(__linux__)
     native_renderer::threads::place(native_renderer::threads::kMain); // off the game thread's core (SOTC_THREADS=1)
 #endif
     while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))
@@ -3258,7 +3260,8 @@ void PS2Runtime::run()
         }
         PS2_IF_AGRESSIVE_LOGS({
             tick++;
-            if ((tick % 120) == 0)
+            static const bool logRunTick = std::getenv("PS2X_LOG_RUN_TICK") != nullptr;
+            if (logRunTick && (tick % 120) == 0)
             {
                 uint64_t curDma = m_memory.dmaStartCount();
                 uint64_t curGif = m_memory.gifCopyCount();

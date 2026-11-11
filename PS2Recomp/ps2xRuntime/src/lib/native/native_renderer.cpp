@@ -35,6 +35,9 @@
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
 extern "C" unsigned int _pthread_stack_default_user; // ps2_vita_runtime.cpp
+#elif defined(__linux__)
+#include <pthread.h>
+#include <sched.h>
 #endif
 
 #if defined(__APPLE__) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)) || defined(__linux__)
@@ -1350,7 +1353,51 @@ namespace native_renderer
             return at;
         }
 #else
-        void place(Kind) {}
+        void place(Kind kind)
+        {
+#if defined(__linux__)
+            if (layout() == 0)
+                return;
+            static const char *const kNames[kKinds] = {"game", "worker", "render", "build", "audio", "main", "loader", "recorder", "log", "dma", "lane", "offload"};
+            cpu_set_t cpuset;
+            CPU_ZERO(&cpuset);
+            switch (kind)
+            {
+            case kGame:
+                // Core 0 dedicated exclusively to the EE GameThread
+                CPU_SET(0, &cpuset);
+                break;
+            case kWorker:
+            case kLane:
+            case kOffload:
+                // Fast parallel scene/mesh/texture lanes on Cores 1 & 2
+                CPU_SET(1, &cpuset);
+                CPU_SET(2, &cpuset);
+                break;
+            case kRender:
+                // OpenGL ES 3.2 RenderThread on Core 3 (and Core 2 fallback)
+                CPU_SET(2, &cpuset);
+                CPU_SET(3, &cpuset);
+                break;
+            default:
+                // BuildWorker, Audio, Main, Loader, DMA, Log on Cores 1-3 (never preempt Core 0)
+                CPU_SET(1, &cpuset);
+                CPU_SET(2, &cpuset);
+                CPU_SET(3, &cpuset);
+                break;
+            }
+            const int rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+            unsigned mask = 0;
+            for (int c = 0; c < 4; ++c)
+                if (CPU_ISSET(c, &cpuset))
+                    mask |= (1u << c);
+            std::fprintf(stderr, "[threads] %s: cores 0x%x%s\n",
+                         (kind >= 0 && kind < kKinds) ? kNames[kind] : "other",
+                         mask, rc != 0 ? " (refused)" : "");
+#else
+            (void)kind;
+#endif
+        }
         void sample() {}
         int line(char *out, size_t room, double, bool, bool)
         {
@@ -1653,7 +1700,7 @@ namespace native_renderer
         // queued at a later frame.
         static uint32_t queueBudget()
         {
-#if defined(__vita__)
+#if defined(__vita__) || defined(__linux__)
             constexpr uint32_t kDefault = 500u;
 #else
             constexpr uint32_t kDefault = 0u;
@@ -1668,7 +1715,7 @@ namespace native_renderer
         // meanwhile. SOTC_TAKEUP_MS (the Vita: 8; 0: all at once, as before).
         static uint64_t takeUpUs()
         {
-#if defined(__vita__)
+#if defined(__vita__) || defined(__linux__)
             constexpr double kDefault = 8.0;
 #else
             constexpr double kDefault = 0.0;

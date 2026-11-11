@@ -231,7 +231,7 @@ namespace native_renderer
         // copy taken up again (the console). The Vita's default; the Mac's
         // OpenGL takes the copy unless SOTC_SBLUR_PINGPONG=1 (Metal: its own
         // path). SOTC_SBLUR_PINGPONG=0/1; A/B name `sblurapart`.
-#if defined(__vita__)
+#if defined(__vita__) || defined(__linux__)
         bool blurApart = true;
 #else
         bool blurApart = false;
@@ -270,7 +270,11 @@ namespace native_renderer
         // draws up to 1 level apart on ~0.6% of the altar's pixels (its
         // texture coordinates for such reads), so off by default.
         // SOTC_GL_PLAIN_READS=0/1; A/B name `plainread73` (with it on).
+#if defined(__linux__)
+        bool glPlainReads = true;
+#else
         bool glPlainReads = false;
+#endif
         // Round 74 (the render thread's CPU, the same GL calls in the same
         // order): each pass walks only the draws of its layers that are drawn
         // (merged-away draws and other layers' left out: each pass read every
@@ -334,7 +338,7 @@ namespace native_renderer
         // Round 88: the console's A/B measured it -2.0 ms a frame (matched):
         // the Vita's default (the Mac has no GXM: unused there).
         // SOTC_GL_VOL87=0/1 (Vita default 1); A/B name `vol87` (its windows flip it).
-#if defined(__vita__)
+#if defined(__vita__) || defined(__linux__)
         bool glVol87 = true;
 #else
         bool glVol87 = false;
@@ -357,7 +361,7 @@ namespace native_renderer
         // Round 88: the console's A/B measured it -5.2 ms a frame (matched;
         // the background scene ~20 ms of GPU -> ~1 ms): the Vita's default.
         // SOTC_GL_BGSMALL87=0/1 (Vita default 1, Mac 0); A/B name `bgsmall87` (its windows flip it).
-#if defined(__vita__)
+#if defined(__vita__) || defined(__linux__)
         bool glBgSmall87 = true;
 #else
         bool glBgSmall87 = false;
@@ -371,14 +375,22 @@ namespace native_renderer
         // are all shaded and read the tile, the scene's overdraw in full).
         // Not where the picture's alpha must be kept (the Vita bloom's mask).
         // SOTC_GL_OPAQUE88=0/1 (default 0); A/B name `opaque88` (its windows flip it).
+#if defined(__linux__)
+        bool glOpaque88 = true;
+#else
         bool glOpaque88 = false;
+#endif
         // Round 88 (GPU, console A/B candidate): the mirror (the reflection
         // the water reads, the scene drawn again mirrored) drawn into a
         // 256 x 256 target, the PS2's own size (and the Mac's), instead of
         // 512 x 448: ~3.5x fewer pixels; the water reads it by its screen
         // position, rippled, as before.
         // SOTC_GL_MIRROR88=0/1 (default 0); A/B name `mirror88` (its windows flip it).
+#if defined(__linux__)
+        bool glMirror88 = true;
+#else
         bool glMirror88 = false;
+#endif
         // Round 74 (the console, an experiment): the render thread above the
         // hook worker in priority (149; 191 before) while a frame is drawn:
         // the console's render thread is ~13 ms a frame longer in the wall

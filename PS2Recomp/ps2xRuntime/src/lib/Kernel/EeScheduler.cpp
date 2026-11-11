@@ -440,65 +440,6 @@ void EeScheduler::run()
             updateGate();
             if (g_eeDispatchProbe)
                 g_eeDispatchProbe(&context, 0);
-            // [ee:prof] diagnostic sampler: records which 4 KB page of guest
-            // code is hot. Counters and fprintf(stderr) only; no control flow,
-            // return value, or timing change. (Before the call: counted even
-            // when it throws a thread switch.)
-            {
-                static std::atomic<bool> s_announced{false};
-                if (!s_announced.load(std::memory_order_relaxed))
-                {
-                    s_announced.store(true, std::memory_order_relaxed);
-                    std::fprintf(stderr, "[ee:prof] sampler active pc0=0x%08x\n", context.pc);
-                }
-                static std::atomic<uint64_t> s_total{0};
-                static std::atomic<uint64_t> s_bucket[0x2000];   // 8 KB buckets over 0x20000000 (512 MB), pc>>12 & 0x1FFF
-                static const std::chrono::steady_clock::time_point s_start = std::chrono::steady_clock::now();
-                static std::chrono::steady_clock::time_point s_lastDump = s_start;
-                static uint32_t s_dumps = 0;
-                const uint64_t n = s_total.fetch_add(1, std::memory_order_relaxed) + 1;
-                const uint32_t pcNow = context.pc;
-                s_bucket[(pcNow >> 12) & 0x1FFFu].fetch_add(1, std::memory_order_relaxed);
-                // Time-based dump: the clock is checked only every 1024
-                // dispatches ((n & 0x3FFFull) == 0) and the dump fires at most
-                // once per second, up to 40 dumps. Buckets keep accumulating
-                // (never reset) so the top-8 values are cumulative.
-                if ((n & 0x3FFFull) == 0ull)
-                {
-                    const auto now = std::chrono::steady_clock::now();
-                    if (s_dumps < 40u && now - s_lastDump >= std::chrono::seconds(1))
-                    {
-                        s_lastDump = now;
-                        ++s_dumps;
-                        const uint64_t elapsed = static_cast<uint64_t>(
-                            std::chrono::duration_cast<std::chrono::seconds>(now - s_start).count());
-                        std::fprintf(stderr, "[ee:prof] t=%llu total=%llu recvIters=%llu sendIters=%llu top=",
-                                     (unsigned long long)elapsed,
-                                     (unsigned long long)n,
-                                     (unsigned long long)g_eeRecvIters.load(std::memory_order_relaxed),
-                                     (unsigned long long)g_eeSendIters.load(std::memory_order_relaxed));
-                        // top 8 buckets (accumulated; the buckets are NOT reset)
-                        static uint64_t s_snapshot[0x2000];
-                        for (uint32_t i = 0; i < 0x2000u; ++i)
-                            s_snapshot[i] = s_bucket[i].load(std::memory_order_relaxed);
-                        bool firstTop = true;
-                        for (int k = 0; k < 8; ++k)
-                        {
-                            uint64_t best = 0; uint32_t bestIdx = 0;
-                            for (uint32_t i = 0; i < 0x2000u; ++i)
-                            {
-                                if (s_snapshot[i] > best) { best = s_snapshot[i]; bestIdx = i; }
-                            }
-                            if (best == 0) break;
-                            s_snapshot[bestIdx] = 0;   // consumed in the snapshot only; the bucket keeps its count
-                            std::fprintf(stderr, "%s0x%08x:%llu", firstTop ? "" : " ",
-                                         (unsigned)(bestIdx << 12), (unsigned long long)best);
-                            firstTop = false;
-                        }
-                        std::fprintf(stderr, "\n");
-                    }
-                }
-            }
             function(m_rdram, &context, &m_runtime);
             m_guestExecuting.store(false, std::memory_order_relaxed);
             m_insideInterrupt = false;
@@ -1170,21 +1111,6 @@ int EeScheduler::createSemaphore(int initCount, int maxCount, uint32_t attr, uin
     semaphore.attr = attr;
     semaphore.option = option;
     m_semaphores.emplace(id, std::move(semaphore));
-    {
-        static std::atomic<unsigned> semaCreateCount{0};
-        if (semaCreateCount.fetch_add(1u) < 400u)
-        {
-            if (traceSemaPc())
-            {
-                uint32_t callerPc = 0, callerRa = 0;
-                semaCallerPcRa(*this, callerPc, callerRa);
-                std::fprintf(stderr, "[ee:sema] create gid=%d init=%d max=%d pc=0x%08x ra=0x%08x\n",
-                             id, initCount, maxCount, callerPc, callerRa);
-            }
-            else
-                std::fprintf(stderr, "[ee:sema] create gid=%d init=%d max=%d\n", id, initCount, maxCount);
-        }
-    }
     publishSnapshot();
     return id;
 }
@@ -1216,25 +1142,6 @@ int EeScheduler::signalSemaphore(int id, bool interruptSafe)
 {
     assertExecutor();
     EeSemaphore *object = semaphore(id);
-    {
-        static std::atomic<unsigned> semaSignalCount{0};
-        if (semaSignalCount.fetch_add(1u) < 400u)
-        {
-            if (traceSemaPc())
-            {
-                uint32_t callerPc = 0, callerRa = 0;
-                semaCallerPcRa(*this, callerPc, callerRa);
-                std::fprintf(stderr, "[ee:sema] signal gid=%d cnt=%d waiters=%d pc=0x%08x ra=0x%08x\n",
-                             id, object ? object->count : -1,
-                             object ? static_cast<int>(object->waiters.size()) : -1,
-                             callerPc, callerRa);
-            }
-            else
-                std::fprintf(stderr, "[ee:sema] signal gid=%d cnt=%d waiters=%d\n",
-                             id, object ? object->count : -1,
-                             object ? static_cast<int>(object->waiters.size()) : -1);
-        }
-    }
     if (!object)
     {
         return KE_UNKNOWN_SEMID;
@@ -1279,14 +1186,6 @@ void EeScheduler::waitSemaphore(int id)
 {
     assertExecutor();
     EeSemaphore *object = semaphore(id);
-    {
-        static std::atomic<unsigned> semaWaitCount{0};
-        if (semaWaitCount.fetch_add(1u) < 400u)
-        {
-            std::fprintf(stderr, "[ee:sema] wait gid=%d cnt=%d tid=%d\n",
-                         id, object ? object->count : -1, m_currentThreadId);
-        }
-    }
     if (!object)
     {
         GuestThread *self = currentThread();
@@ -1306,22 +1205,6 @@ void EeScheduler::waitSemaphore(int id)
     GuestThread *self = currentThread();
     assert(self != nullptr);
     object->waiters.push_back(self->id);
-    {
-        static std::atomic<unsigned> semaBlockCount{0};
-        if (semaBlockCount.fetch_add(1u) < 400u)
-        {
-            if (traceSemaPc())
-            {
-                uint32_t callerPc = 0, callerRa = 0;
-                semaCallerPcRa(*this, callerPc, callerRa);
-                std::fprintf(stderr, "[ee:sema] block gid=%d tid=%d pc=0x%08x ra=0x%08x\n",
-                             id, m_currentThreadId, callerPc, callerRa);
-            }
-            else
-                std::fprintf(stderr, "[ee:sema] block gid=%d tid=%d\n", id, m_currentThreadId);
-        }
-    }
-    // std::fprintf(stderr, "[ee:th] waitsema id=%d sema=%d\n", self->id, id);
     blockCurrentOrReturn(EeWaitState{EeWaitReason::Semaphore, EeSemaphoreWait{id}});
 }
 
@@ -2772,40 +2655,15 @@ void EeScheduler::syncCyclesToHostClock()
 void EeScheduler::idleWait()
 {
     assertExecutor();
-    // DIAG (teto: 20 chamadas): qual guarda fez o return (somente log).
-    static std::atomic<int> idleLogN{0};
-    const auto idleLog = [this, &idleLogN](int readyNonEmpty)
-    {
-        if (idleLogN.fetch_add(1, std::memory_order_relaxed) < 20)
-        {
-            std::lock_guard lk(m_eventMutex);
-            std::fprintf(stderr, "[ee:idle] ret hostSync=%d pendInv=%zu pendTimer=%u readyNonEmpty=%d events=%zu\n",
-                         m_hostClockSync ? 1 : 0, m_pendingInvocations.size(),
-                         static_cast<unsigned>(m_pendingEeTimerInterrupts), readyNonEmpty,
-                         m_events.size());
-        }
-    };
     if (!m_hostClockSync || !m_pendingInvocations.empty() || m_pendingEeTimerInterrupts != 0u)
-    {
-        idleLog(0);
         return;
-    }
     for (const auto &queue : m_readyQueues)
         if (!queue.empty())
-        {
-            idleLog(1);
             return;
-        }
     {
         std::unique_lock lock(m_eventMutex);
         if (!m_events.empty() || m_stopRequested.load(std::memory_order_acquire))
-        {
-            if (idleLogN.fetch_add(1, std::memory_order_relaxed) < 20)
-                std::fprintf(stderr, "[ee:idle] ret hostSync=%d pendInv=%zu pendTimer=%u readyNonEmpty=%d events=%zu\n",
-                             m_hostClockSync ? 1 : 0, m_pendingInvocations.size(),
-                             static_cast<unsigned>(m_pendingEeTimerInterrupts), 0, m_events.size());
             return;
-        }
         // A deadline due by cycles is processed first. Host deadlines can lag
         // real time after a slow stretch (each VBlank is scheduled from the
         // previous one): those only pace, so they do not shorten the wait.
@@ -2814,13 +2672,7 @@ void EeScheduler::idleWait()
         for (const ScheduledEvent &item : m_deadlines)
         {
             if (item.deadlineCycle <= eeNow())
-            {
-                if (idleLogN.fetch_add(1, std::memory_order_relaxed) < 20)
-                    std::fprintf(stderr, "[ee:idle] ret hostSync=%d pendInv=%zu pendTimer=%u readyNonEmpty=%d events=%zu\n",
-                                 m_hostClockSync ? 1 : 0, m_pendingInvocations.size(),
-                                 static_cast<unsigned>(m_pendingEeTimerInterrupts), 0, m_events.size());
                 return;
-            }
             if (item.hostDeadline > now)
                 until = std::min(until, item.hostDeadline);
         }
