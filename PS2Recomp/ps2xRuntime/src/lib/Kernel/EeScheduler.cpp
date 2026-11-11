@@ -738,7 +738,7 @@ int EeScheduler::createThread(const EeThreadCreateParams &params)
     thread.currentPriority = params.priority;
     thread.status = EeThreadStatus::Dormant;
     m_threads.emplace(id, std::move(thread));
-    std::fprintf(stderr, "[ee:th] create id=%d entry=0x%08x prio=%d\n", id, params.entry, params.priority);
+    // std::fprintf(stderr, "[ee:th] create id=%d entry=0x%08x prio=%d\n", id, params.entry, params.priority);
     publishSnapshot();
     return id;
 }
@@ -810,7 +810,7 @@ int EeScheduler::startThread(int id, uint32_t arg, const R5900Context &caller, b
     assert(exiting != nullptr);
     const int id = exiting->id;
     const uint32_t ownedStack = deleteThreadRecord && exiting->ownsStack ? exiting->stack : 0u;
-    std::fprintf(stderr, "[ee:th] exit id=%d pc=0x%08x\n", id, exiting->activeContext().pc);
+    // std::fprintf(stderr, "[ee:th] exit id=%d pc=0x%08x\n", id, exiting->activeContext().pc);
     makeDormant(*exiting);
     m_currentThreadId = 0;
     if (deleteThreadRecord && id != kMainThreadId)
@@ -946,7 +946,7 @@ void EeScheduler::sleepCurrent()
         setReturnS32(&self->activeContext(), KE_OK);
         return;
     }
-    std::fprintf(stderr, "[ee:th] sleep id=%d pc=0x%08x\n", self->id, self->activeContext().pc);
+    // std::fprintf(stderr, "[ee:th] sleep id=%d pc=0x%08x\n", self->id, self->activeContext().pc);
     blockCurrentOrReturn(EeWaitState{EeWaitReason::Sleep, std::monostate{}});
 }
 
@@ -1001,7 +1001,7 @@ int EeScheduler::wakeupThread(int id, bool interruptSafe)
     if ((target->status == EeThreadStatus::Waiting || target->status == EeThreadStatus::WaitingSuspended) &&
         target->wait.reason == EeWaitReason::Sleep)
     {
-        std::fprintf(stderr, "[ee:th] wake id=%d by=%d\n", target->id, m_currentThreadId);
+        // std::fprintf(stderr, "[ee:th] wake id=%d by=%d\n", target->id, m_currentThreadId);
         makeReady(*target, KE_OK, interruptSafe);
     }
     else
@@ -1321,7 +1321,7 @@ void EeScheduler::waitSemaphore(int id)
                 std::fprintf(stderr, "[ee:sema] block gid=%d tid=%d\n", id, m_currentThreadId);
         }
     }
-    std::fprintf(stderr, "[ee:th] waitsema id=%d sema=%d\n", self->id, id);
+    // std::fprintf(stderr, "[ee:th] waitsema id=%d sema=%d\n", self->id, id);
     blockCurrentOrReturn(EeWaitState{EeWaitReason::Semaphore, EeSemaphoreWait{id}});
 }
 

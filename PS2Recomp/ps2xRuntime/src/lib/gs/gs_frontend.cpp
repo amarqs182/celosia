@@ -564,6 +564,8 @@ GSPresentationRequest GS::buildPresentationRequestUnlocked() const
 
 void GS::queuePresentation()
 {
+    if (skipRaster())
+        return;
     GSPresentationRequest request{};
     {
         std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
@@ -581,6 +583,8 @@ void GS::queuePresentation()
 
 void GS::latchHostPresentationFrame(uint64_t targetTick)
 {
+    if (skipRaster())
+        return;
     GSPresentationRequest request{};
     {
         std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
