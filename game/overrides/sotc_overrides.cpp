@@ -47,7 +47,9 @@ namespace sotc_decomp
 
 namespace
 {
-    // Entry point of GAMECORE.XFF as laid out by the game's own loader.
+    // Real entry address of GAMECORE.XFF after module relocation at 0x01333500.
+    // The module is entered at 0x01344788 where the runtime's recompiled dispatch table
+    // registers the function; the hook wraps this entry point to enable all 68 overrides.
     constexpr uint32_t kGamecoreEntry = 0x01344788u;
 
     PS2Runtime::RecompiledFunction g_gamecoreEntry = nullptr;
@@ -57,6 +59,15 @@ namespace
     // modules are loaded, switch to real-time pacing.
     void gamecoreEntryHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        // DIAG (teto: 1x): entry do GAMECORE.
+        {
+            static bool logged = false;
+            if (!logged)
+            {
+                logged = true;
+                std::fprintf(stderr, "[ovr] gamecoreEntryHook ENTER pc=0x%08x\n", static_cast<unsigned>(ctx->pc));
+            }
+        }
         static bool enabled = false;
         if (!enabled)
         {
@@ -70,6 +81,28 @@ namespace
             // keeps the IRXs for the boot, the emulated IOP stopping here.
             if (ps2x::iop::IopSubsystem *iop = runtime->iopSubsystem())
                 iop->enterNativeMode();
+        }
+        // SOTC_GAMECORE_ENTRY=0x13447c8: controlled experiment on where the
+        // GAMECORE should start. The loader's JALR lands at 0x01344788, inside
+        // the 0x01344780 function; with this set, resume at the given address
+        // instead of running the rest of that function. Read once; unset or
+        // invalid leaves the behaviour identical to before.
+        static const uint32_t redirectTarget = [] {
+            const char *env = std::getenv("SOTC_GAMECORE_ENTRY");
+            if (!env)
+                return 0u;
+            char *end = nullptr;
+            const unsigned long v = std::strtoul(env, &end, 0);
+            if (end == env || *end != '\0' || v == 0ul || v > 0xfffffffful)
+                return 0u;
+            return static_cast<uint32_t>(v);
+        }();
+        if (ctx->pc == 0x01344788u && redirectTarget != 0u)
+        {
+            std::fprintf(stderr, "[ovr] gamecoreEntryRedirect from=0x%08x to=0x%08x\n",
+                         static_cast<unsigned>(ctx->pc), static_cast<unsigned>(redirectTarget));
+            ctx->pc = redirectTarget;
+            return;
         }
         g_gamecoreEntry(rdram, ctx, runtime);
     }
@@ -1191,6 +1224,16 @@ namespace
 
     void applySotcOverrides(PS2Runtime &runtime)
     {
+        runtime.eeScheduler().enableHostClockSync();
+        // DIAG (teto: 1x): applySotcOverrides chamado?
+        {
+            static bool logged = false;
+            if (!logged)
+            {
+                logged = true;
+                std::fprintf(stderr, "[ovr] applySotcOverrides ENTER\n");
+            }
+        }
         // First: the hooks below wrap whatever is in the table, lean or not.
         ps2_lean::install(runtime);
         if (runtime.hasFunction(0x001AFFD8u) && runtime.hasFunction(0x001B00F0u) && runtime.hasFunction(0x001B0328u))
@@ -1218,6 +1261,25 @@ namespace
         {
             g_iosRecvMsg = runtime.lookupFunction(kIosRecvMsg);
             runtime.registerFunction(kIosRecvMsg, iosRecvMsgHook);
+            // DIAG (teto: 1x): hook instalado?
+            {
+                static bool logged = false;
+                if (!logged)
+                {
+                    logged = true;
+                    std::fprintf(stderr, "[ovr] iosRecvMsgHook INSTALLED hasFunc=%d\n", runtime.hasFunction(kIosRecvMsg) ? 1 : 0);
+                }
+            }
+        }
+        else
+        {
+            // DIAG (teto: 1x): hook NAO instalado; por que?
+            static bool logged = false;
+            if (!logged)
+            {
+                logged = true;
+                std::fprintf(stderr, "[ovr] iosRecvMsgHook NOT installed hasFunc=%d spinEnv=%d\n", runtime.hasFunction(kIosRecvMsg) ? 1 : 0, std::getenv("SOTC_IDLE_SPIN") ? 1 : 0);
+            }
         }
         if (std::getenv("SOTC_DUMP_SPRITE_PACKETS") && runtime.hasFunction(kSpriteDrawSprite))
         {
@@ -1267,6 +1329,7 @@ namespace
 }
 
 PS2_REGISTER_GAME_OVERRIDE("Shadow of the Colossus (USA)", "SCUS_974.72", 0u, 0u, applySotcOverrides)
+PS2_REGISTER_GAME_OVERRIDE("Shadow of the Colossus (USA) - NICO.ELF", "NICO.ELF", 0u, 0u, applySotcOverrides)
 
 // The idle thread's turn once a game frame (round 25: the console's loader
 // stall). A thread that waits for the EE to be idle (the loader, t11, in a
