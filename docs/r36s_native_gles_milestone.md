@@ -141,3 +141,43 @@ frame  1070: gameFps 28.4, hostFps 30.0, vu1Rec 25120/0/0, draws 54
 - **Média sustentada**: **27.6 FPS** (faixa de **26.6 a 28.6 gameFps**).
 - **Quadros gerados e inspecionados**: `shot_30.ppm` até `shot_1050.ppm` verificados, renderização 3D correta e nítida processada pela GPU Mali.
 - **Restauração do Sistema**: EmulationStation reassume a posse de `/dev/dri/card0` de forma segura ao término da sessão.
+
+---
+
+## 6. Marco Histórico: Início de Partida e Gameplay 3D Ativo no Hardware Real
+
+### Execução e Entrada em Partida
+Durante os testes interativos diretamente no console físico R36S via inicializador do EmulationStation, o jogo ultrapassou a tela de carregamento, navegou pela tela de título e **iniciou com sucesso uma partida ativa** (introdução e transição para o templo de entrada).
+
+A telemetria do dispositivo registrou uma sessão contínua ultrapassando **6.177 frames**:
+```
+[frame] slow 6175: 617.5 ms: hooks 17.2, 84 meshes 215 KB, render 61.9 ms, draws 1835, targets 13, verts 71k
+[frame] slow 6176: 507.0 ms: hooks 18.2, 58 meshes 191 KB, render 297.7 ms, draws 1835, targets 13, verts 144k
+[frame] slow 6177: 406.3 ms: hooks 10.3, 58 meshes 190 KB, render 66.5 ms, draws 1833, targets 17, verts 145k
+```
+
+### Análise dos Problemas Identificados no Gameplay
+
+#### 1. Piscadas e Cintilação Visual (Flickering)
+- **Causa**: O motor cria até **17 render targets** simultâneos para efeitos de pós-processamento (glow, bloom, motion blur, shadow volumes, z-fog). Na GPU Mali-G31 (arquitetura tile-based), a troca frenética de FBOs sem `glClear` ou sincronização adequada com o vsync causa descarte prematuro de tiles na tile memory e corrida de exibição entre o buffer intermediário e o framebuffer principal.
+
+#### 2. Glitches Gráficos em Modelos e Superfícies
+- **Causa**: Em GLES 3.2, certas matrizes e coordenadas de textura dependem de precisão de ponto flutuante `highp` em todos os estágios do shader. Além disso, a ausência da extensão `GL_EXT_depth_clamp` requer tratamento de corte no vertex/fragment shader para evitar artefatos em volumes de sombra e planos de corte próximos.
+
+#### 3. Queda de Desempenho no Gameplay Ativo (~2 a 2.5 FPS)
+- **Diferença de carga**: A tela de título demandava apenas 48 a 54 draw calls e 1 a 2 targets. Ao entrar no mundo 3D aberto com personagens, terreno e estruturas, a carga saltou para **1.835 draw calls** e **145.000 vértices** por frame.
+- **Sobrecarga de chamadas no driver**: O processador quad-core Cortex-A35 (1.5 GHz) sofre alto custo de overhead de CPU para submeter 1.835 chamadas de draw individuais em cada frame pelo driver da GPU Mali.
+
+---
+
+## 7. Roteiro de Melhorias e Otimizações para Gameplay
+
+1. **Perfis de Otimização e Desativação de Passes Secundários Pesados**:
+   - Fornecer configurações predefinidas para desligar passes de pós-processamento desnecessários na tela de 640x480 do R36S (`SOTC_NATIVE_NOSHADOWS=1`, `SOTC_NATIVE_NOGLOW=1`, `SOTC_NATIVE_NODOF=1`, `SOTC_NATIVE_NOSBLUR=1`).
+2. **Eliminação do Flickering em Tile-Based GPUs**:
+   - Ajustar o ciclo de vida dos FBOs intermediários com `glInvalidateFramebuffer` e garantir apresentação atômica somente do framebuffer final completo.
+3. **Compilação AOT dos Microcódigos Adicionais do Gameplay**:
+   - Fazer o dump e recompilação AOT dos microcódigos de VU1 disparados especificamente no gameplay do mundo aberto.
+4. **Agrupamento (Batching) e Redução de Draw Calls**:
+   - Otimizar a submissão de malhas estáticas e primitivas para diminuir drasticamente o número de draw calls por frame.
+
