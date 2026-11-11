@@ -1,4 +1,5 @@
 #include "ThreadNaming.h"
+#include "runtime/ps2_diag.h"
 #include "runtime/ps2_thread_load.h"
 #include "ps2_runtime_macros.h"
 #include "runtime/ps2_stats.h"
@@ -2007,7 +2008,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     // copies (VIF1 registers, GS events and MSKPATH3 calls
                     // collected), then for real with it, and the two compared.
                     static const bool dumping = std::getenv("PS2X_DMA_DUMP") != nullptr;
-                    static const bool cacheCheck = std::getenv("SOTC_DMACACHE_CHECK") && std::atoi(std::getenv("SOTC_DMACACHE_CHECK")) != 0;
+                    static const bool cacheCheck = ps2_diag::env("SOTC_DMACACHE_CHECK") && std::atoi(ps2_diag::env("SOTC_DMACACHE_CHECK")) != 0;
                     const bool walk2 = walker && transferTagData && channelBase == 0x10009000u && ps2_fast_paths::g_dmaWalk2 && !dumping;
                     // (SOTC_DMA_ASYNC read again at the first kick: the Vita's
                     // env.txt can come after the static initialisers.)
@@ -3768,7 +3769,7 @@ namespace
 {
     bool dmaAsyncCheck()
     {
-        static const bool on = std::getenv("SOTC_DMA_ASYNC_CHECK") && std::atoi(std::getenv("SOTC_DMA_ASYNC_CHECK")) != 0;
+        static const bool on = ps2_diag::env("SOTC_DMA_ASYNC_CHECK") && std::atoi(ps2_diag::env("SOTC_DMA_ASYNC_CHECK")) != 0;
         return on;
     }
     const char *const kJoinNames[PS2Memory::kJoinReasons] = {"vblank", "poll", "regread", "regwrite", "gs", "gif", "other"};
@@ -3842,7 +3843,7 @@ void PS2Memory::vif1AsyncKick(const Vif1ChainState &st, bool tie, uint32_t chcr)
     a.work.notify_one();
     ++a.kicks;
     a.kickUs = ps2_stats::nowUs();
-    static const bool log = std::getenv("SOTC_DMA_ASYNC_LOG") != nullptr;
+    static const bool log = ps2_diag::env("SOTC_DMA_ASYNC_LOG") != nullptr;
     if (log)
         std::fprintf(stderr, "[dmaasync] kick %llu, ra %08x, TADR %08x\n", (unsigned long long)a.kicks, g_ps2MmioCaller ? g_ps2MmioCaller() : 0u, st.tagAddr);
     m_vif1AsyncPending.store(true, std::memory_order_relaxed);
@@ -3916,7 +3917,7 @@ bool PS2Memory::vif1AsyncJoin(int reason)
     }
     a.inflightUs += ps2_stats::nowUs() - a.kickUs;
     ++a.joins[reason >= 0 && reason < kJoinReasons ? reason : kJoinOther];
-    static const bool log = std::getenv("SOTC_DMA_ASYNC_LOG") != nullptr; // debugging: each join, its reason, the guest's ra
+    static const bool log = ps2_diag::env("SOTC_DMA_ASYNC_LOG") != nullptr; // debugging: each join, its reason, the guest's ra
     if (log)
         std::fprintf(stderr, "[dmaasync] join %llu at %s, ra %08x, %.2f ms after the kick\n", (unsigned long long)a.kicks,
                      kJoinNames[reason >= 0 && reason < kJoinReasons ? reason : kJoinOther], g_ps2MmioCaller ? g_ps2MmioCaller() : 0u,
@@ -4122,6 +4123,13 @@ bool GifEventScanner::fast() { return ps2_fast_paths::g_dmaWalkFast; }
 // READ* / WRITE*): every address at or above 32 MB. The special ranges go to
 // the runtime; the rest (the uncached / kseg0 mirrors of main RAM) is main
 // RAM, masked.
+namespace ps2_worker
+{
+    // Round 111: the worker's scratchpad accesses from generated code (the slow paths below; the worker's only;
+    // read by game/overrides/decomp_char104.cpp while the worker is idle).
+    uint64_t g_sprTouch = 0;
+}
+
 namespace ps2_guest_mem
 {
     // The scratchpad (0x70000000, 16 KB) straight from here: an aligned
@@ -4136,6 +4144,8 @@ namespace ps2_guest_mem
         PS2_FORCE_INLINE uint8_t *spr(PS2Runtime *runtime, uint32_t a)
         {
             const uint32_t offset = a - PS2_SCRATCHPAD_BASE;
+            if (offset < PS2_SCRATCHPAD_SIZE && ps2_worker::isShell(runtime))
+                ++ps2_worker::g_sprTouch; // round 111 (game/overrides/decomp_char104.cpp)
             if (PS2_EXPECT(offset < PS2_SCRATCHPAD_SIZE && (offset & (N - 1u)) == 0u && ps2_fast_paths::g_sprFast, 1))
                 return runtime->memory().getScratchpad() + offset;
             return nullptr;
@@ -4153,31 +4163,31 @@ namespace ps2_guest_mem
     {
         if (const uint8_t *p = spr<1>(runtime, a))
             return *p;
-        return Ps2IsSpecialAddress(a) ? runtime->Load8(rdram, ctx, a) : Ps2FastRead8(rdram, a);
+        return Ps2IsSpecialAddress(a) ? ps2_worker::real(runtime)->Load8(rdram, ctx, a) : Ps2FastRead8(rdram, a);
     }
     uint16_t read16(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t a)
     {
         if (const uint8_t *p = spr<2>(runtime, a))
             return sprLoad<uint16_t>(p);
-        return Ps2IsSpecialAddress(a) ? runtime->Load16(rdram, ctx, a) : Ps2FastRead16(rdram, a);
+        return Ps2IsSpecialAddress(a) ? ps2_worker::real(runtime)->Load16(rdram, ctx, a) : Ps2FastRead16(rdram, a);
     }
     uint32_t read32(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t a)
     {
         if (const uint8_t *p = spr<4>(runtime, a))
             return sprLoad<uint32_t>(p);
-        return Ps2IsSpecialAddress(a) ? runtime->Load32(rdram, ctx, a) : Ps2FastRead32(rdram, a);
+        return Ps2IsSpecialAddress(a) ? ps2_worker::real(runtime)->Load32(rdram, ctx, a) : Ps2FastRead32(rdram, a);
     }
     uint64_t read64(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t a)
     {
         if (const uint8_t *p = spr<8>(runtime, a))
             return sprLoad<uint64_t>(p);
-        return Ps2IsSpecialAddress(a) ? runtime->Load64(rdram, ctx, a) : Ps2FastRead64(rdram, a);
+        return Ps2IsSpecialAddress(a) ? ps2_worker::real(runtime)->Load64(rdram, ctx, a) : Ps2FastRead64(rdram, a);
     }
     __m128i read128(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t a)
     {
         if (const uint8_t *p = spr<16>(runtime, a))
             return sprLoad<__m128i>(p);
-        return Ps2IsSpecialAddress(a) ? runtime->Load128(rdram, ctx, a) : Ps2FastRead128(rdram, a);
+        return Ps2IsSpecialAddress(a) ? ps2_worker::real(runtime)->Load128(rdram, ctx, a) : Ps2FastRead128(rdram, a);
     }
     void write8(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t a, uint8_t v)
     {
@@ -4187,7 +4197,7 @@ namespace ps2_guest_mem
             return;
         }
         if (Ps2IsSpecialAddress(a))
-            return runtime->Store8(rdram, ctx, a, v);
+            return ps2_worker::real(runtime)->Store8(rdram, ctx, a, v);
         trace<uint8_t>(rdram, a, v, "WRITE8", ctx);
         Ps2FastWrite8(rdram, a, v);
     }
@@ -4199,7 +4209,7 @@ namespace ps2_guest_mem
             return;
         }
         if (Ps2IsSpecialAddress(a))
-            return runtime->Store16(rdram, ctx, a, v);
+            return ps2_worker::real(runtime)->Store16(rdram, ctx, a, v);
         trace<uint16_t>(rdram, a, v, "WRITE16", ctx);
         Ps2FastWrite16(rdram, a, v);
     }
@@ -4211,7 +4221,7 @@ namespace ps2_guest_mem
             return;
         }
         if (Ps2IsSpecialAddress(a))
-            return runtime->Store32(rdram, ctx, a, v);
+            return ps2_worker::real(runtime)->Store32(rdram, ctx, a, v);
         trace<uint32_t>(rdram, a, v, "WRITE32", ctx);
         Ps2FastWrite32(rdram, a, v);
     }
@@ -4223,7 +4233,7 @@ namespace ps2_guest_mem
             return;
         }
         if (Ps2IsSpecialAddress(a))
-            return runtime->Store64(rdram, ctx, a, v);
+            return ps2_worker::real(runtime)->Store64(rdram, ctx, a, v);
         trace<uint64_t>(rdram, a, v, "WRITE64", ctx);
         Ps2FastWrite64(rdram, a, v);
     }
@@ -4235,7 +4245,7 @@ namespace ps2_guest_mem
             return;
         }
         if (Ps2IsSpecialAddress(a))
-            return runtime->Store128(rdram, ctx, a, v);
+            return ps2_worker::real(runtime)->Store128(rdram, ctx, a, v);
         trace<__m128i>(rdram, a, v, "WRITE128", ctx);
         Ps2FastWrite128(rdram, a, v);
     }

@@ -32,7 +32,15 @@
 #include "ps2_runtime_macros.h"
 #include "runtime/ps2_memory.h"
 
+#include <cstdlib>
 #include <cstring>
+
+namespace char122::keys
+{
+    bool floatFrame(uint8_t *, R5900Context *, PS2Runtime *, void (*)(uint8_t *, R5900Context *, PS2Runtime *));
+    bool intKeys(const uint8_t *rdram, uint32_t formats, uint32_t chans, int32_t n, uint32_t frame, float *tmp, uint64_t &v0);
+    void intKeysCheck(const uint8_t *rdram, uint32_t out, const float *tmp, int32_t n);
+}
 
 namespace decomp_motionframe
 {
@@ -94,7 +102,7 @@ namespace decomp_motionframe
     constexpr uint32_t kKeys = 0x010B81F8u, kCurveEval = 0x010AC6C8u;
     constexpr uint32_t kFloatFrame = 0x010AD1B0u, kIntFrame = 0x010B3E98u;
 
-    void floatFrame(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void floatFrameOld(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         using sotc_decomp::jalTarget;
         const int64_t n64 = GPR_S64(ctx, 6);
@@ -239,6 +247,13 @@ namespace decomp_motionframe
         finish();
     }
 
+    // Round 122 (SOTC_KEYS122): the keys decoded and blended as host code first (decomp_char122.cpp).
+    void floatFrame(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (!sotc_decomp::switchOn(sotc_decomp::kKeys122) || !sotc_decomp::motionOn() || !char122::keys::floatFrame(rdram, ctx, runtime, floatFrameOld))
+            floatFrameOld(rdram, ctx, runtime);
+    }
+
     void intFrame(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const int64_t a3 = GPR_S64(ctx, 7);
@@ -273,6 +288,28 @@ namespace decomp_motionframe
         const uint32_t sp0 = GPR_U32(ctx, 29), ra0 = GPR_U32(ctx, 31), sp = sp0 - 0xE0u;
         const uint32_t out = GPR_U32(ctx, 4);
         const uint64_t frame = GPR_U64(ctx, 6);
+        // Round 136 (SOTC_KEY136, A/B key136): the keys decoded as host code (round 122's decodeKey, as keys122 does a
+        // float frame with no fraction) instead of a curveEval guest call a channel; v0 / v1 as the loop leaves them.
+        // SOTC_KEY136_CHECK=1: every 16th call the old loop runs after the decode and its keys are compared ([key136c]).
+        float tmp136[256 * 4];
+        bool check136 = false;
+        if (s2 <= 256 && (out & 0xFu) == 0u && out >= 0x1000u && out + static_cast<uint32_t>(s2) * 16u <= PS2_RAM_SIZE && sotc_decomp::switchOn(sotc_decomp::kKey136))
+        {
+            uint64_t v0 = 0;
+            if (char122::keys::intKeys(rdram, formats, r.u32(header + 0x10u), static_cast<int32_t>(s2), static_cast<uint32_t>(frame), tmp136, v0))
+            {
+                static const bool chk = [] { const char *e = std::getenv("SOTC_KEY136_CHECK"); return e && std::atoi(e) != 0; }();
+                static uint64_t n136 = 0;
+                if (!chk || (++n136 % 16u) != 0u)
+                {
+                    std::memcpy(rdram + out, tmp136, static_cast<size_t>(s2) * 16u);
+                    SET_GPR_U64(ctx, 2, v0);
+                    SET_GPR_U64(ctx, 3, 0u);
+                    return returnTo(ctx);
+                }
+                check136 = true;
+            }
+        }
         // a do-while: blez tested the low word, the loop's slt the whole registers
         int32_t i = 0;
         for (bool more = true; more; ++i)
@@ -287,6 +324,8 @@ namespace decomp_motionframe
             if (more)
                 formats = r.u32(header + 8u);
         }
+        if (check136)
+            char122::keys::intKeysCheck(rdram, out, tmp136, static_cast<int32_t>(s2));
         SET_GPR_U32(ctx, 29, sp0);
         SET_GPR_U32(ctx, 31, ra0);
         returnTo(ctx);

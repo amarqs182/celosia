@@ -1,6 +1,7 @@
 #if defined(__APPLE__)
 #include "GLFW/glfw3.h"
 #endif
+#include "runtime/ps2_diag.h"
 #include "runtime/gs/gs_hw_backend.h"
 #include <set>
 #include <map>
@@ -1918,6 +1919,13 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
 {
     ctx->pc = targetPc;
     const bool isCall = (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall);
+    if (ps2_worker::isShell(this)) // round 91: the worker thread (sotc_worker.cpp)
+    {
+        if (isCall)
+            return ps2_worker::g_hooks.call(this, rdram, ctx, targetPc, fallthroughPc);
+        ++m_guestJumpSerial;
+        return false; // pc on the target: the worker's loops go on from there
+    }
 
     // Every inter-function transfer is also a deterministic EE safe point.
     // Backward edges inside generated functions use eeCheckpointDue(), while
@@ -1993,6 +2001,8 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
 bool PS2Runtime::callGuestSlow(uint8_t *rdram, R5900Context *ctx, uint32_t target, uint32_t returnPc,
                                uint32_t sourcePc, GuestBranchKind kind, const char *debugName)
 {
+    if (ps2_worker::isShell(this)) // round 91: every call of the worker thread (sotc_worker.cpp)
+        return ps2_worker::g_hooks.call(this, rdram, ctx, target, returnPc);
     // No function there (reported by dispatchGuestBranch), or the fast paths
     // are off (PS2X_DIRECT_DISPATCH=0).
     if (!m_directDispatch || !guestFunctionAt(target))
@@ -2005,6 +2015,13 @@ bool PS2Runtime::callGuestSlow(uint8_t *rdram, R5900Context *ctx, uint32_t targe
 
 void PS2Runtime::jumpGuestSlow(RecompiledFunction fn)
 {
+    jumpGuestSlow(fn, m_memory.getRDRAM(), (ps2_worker::isShell(this) && ps2_worker::g_ctx) ? ps2_worker::g_ctx : &m_cpuContext);
+}
+
+void PS2Runtime::jumpGuestSlow(RecompiledFunction fn, uint8_t *rdram, R5900Context *ctx)
+{
+    if (ps2_worker::isShell(this)) // round 91: every jump of the worker thread (sotc_worker.cpp)
+        return ps2_worker::g_hooks.jump(this, rdram, ctx, fn, ctx->pc);
     // jumpGuestFn's cases off its fast path, in the order it had them: no
     // function or the fast paths off (ctx->pc left on the target for the
     // scheduler), then the checkpoint, then the host stack's floor.
@@ -2050,6 +2067,8 @@ void PS2Runtime::SignalException(R5900Context *ctx, PS2Exception exception)
 
 void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint32_t address)
 {
+    if (ps2_worker::isShell(this)) // round 91: the VU0 interpreter is the game thread's
+        return ps2_worker::g_hooks.fault(this, rdram, ctx, "VU0 microprogram");
     (void)rdram;
 
     uint8_t *const vu0Code = m_memory.getVU0Code();
@@ -2092,6 +2111,8 @@ void PS2Runtime::handleSyscall(uint8_t *rdram, R5900Context *ctx)
 
 void PS2Runtime::handleSyscall(uint8_t *rdram, R5900Context *ctx, uint32_t encodedSyscallId)
 {
+    if (ps2_worker::isShell(this)) // round 91: the kernel is the game thread's
+        return ps2_worker::g_hooks.fault(this, rdram, ctx, "syscall");
     if (ctx->in_delay_slot)
     {
         throw std::runtime_error("Attempted to execute a syscall inside a branch delay slot! "
@@ -2104,6 +2125,7 @@ void PS2Runtime::handleSyscall(uint8_t *rdram, R5900Context *ctx, uint32_t encod
     const uint32_t syscallId = (encodedSyscallId != 0u)
                                    ? encodedSyscallId
                                    : getRegU32(ctx, 3); // $v1 / $3 is the EE kernel syscall number
+    const ps2_load::GameZone zone(0x1000u | (syscallId & 0xFFFu)); // round 129's sampler: the game thread in a syscall
 
     static const bool traceSyscalls = std::getenv("PS2X_TRACE_SYSCALLS") != nullptr;
     if (traceSyscalls)
@@ -2128,6 +2150,8 @@ void PS2Runtime::handleSyscall(uint8_t *rdram, R5900Context *ctx, uint32_t encod
 
 void PS2Runtime::handleBreak(uint8_t *rdram, R5900Context *ctx)
 {
+    if (ps2_worker::isShell(this)) // round 91
+        return ps2_worker::g_hooks.fault(this, rdram, ctx, "break");
     raiseCop0Exception(ctx, EXCEPTION_BREAKPOINT);
 }
 
@@ -2874,6 +2898,11 @@ void PS2Runtime::postEeEvent(EeEvent event)
 
 bool PS2Runtime::eeCheckpointSlow() noexcept
 {
+    if (ps2_worker::isShell(this)) // round 91: the worker's clock has no scheduler (its gate is not reached)
+    {
+        m_eeClock.run = 0;
+        return false;
+    }
     return m_eeScheduler->checkpointSlow();
 }
 
@@ -3191,6 +3220,9 @@ void PS2Runtime::run()
         native_renderer::threads::place(native_renderer::threads::kGame);
 #endif
         ps2_load::setThreadSlot(ps2_load::kGame);
+#if defined(__vita__)
+        ps2_load::gameThreadUid.store(sceKernelGetThreadId(), std::memory_order_relaxed); // round 129's sampler
+#endif
         // Guest float code runs like the EE: round toward zero, no denormals.
         ps2SetEeFloatingPointMode();
         g_ps2FpuSetcsrNearest = std::getenv("PS2X_FPU_SETCSR") != nullptr && std::atoi(std::getenv("PS2X_FPU_SETCSR")) != 0;
@@ -3251,7 +3283,12 @@ void PS2Runtime::run()
                     std::fprintf(stderr, "[cap30] %s at vblank %llu (%u draws)\n", slowGame ? "on" : "off",
                                  (unsigned long long)ps2_stats::vblanks.load(std::memory_order_relaxed), draws);
             }
-            const int wantFps = (native_renderer::tuning().frameCap30 && slowGame) ? 30 : 60;
+            // Round 107, Frame rate "Steady 20": the game's frame release
+            // holds a third VBlank (sotc_overrides.cpp cap20) and the display
+            // shows each picture three refreshes at least (the Vita: vsync
+            // interval 3; a late one shows at the next refresh).
+            const bool steady20 = native_renderer::g_cap20Active.load(std::memory_order_relaxed);
+            const int wantFps = steady20 ? 20 : (native_renderer::tuning().frameCap30 && slowGame) ? 30 : 60;
             if (wantFps != presentedFps)
             {
                 presentedFps = wantFps;
@@ -3455,6 +3492,7 @@ void PS2Runtime::run()
                       << " shownFps=" << ps2_stats::presentedFrames.exchange(0) / 5.0
                       << " hostFps=" << static_cast<double>(hostFrames) / 5.0
                       << " frames=" << statChains
+                      << " gfx=" << native_renderer::presetName(native_renderer::gfxPresetNow()) // round 124: the Graphics preset
                       << []
                       {
                           // Frame timeline averages (ms): vu1 (its idle part) / gs tail / rest, and GS backend waits.
@@ -3733,7 +3771,7 @@ void PS2Runtime::run()
                 // buffers 336 / 448 / 480 / 488 / 510; exact with
                 // PS2X_GS_GPU=0) and the OpenGL renderer's targets of the
                 // frame native_N shows (bloom_N_<stage>.ppm, _a.pgm alpha).
-                static const bool bloomDump = std::getenv("SOTC_BLOOM_DUMP") && std::atoi(std::getenv("SOTC_BLOOM_DUMP")) != 0;
+                static const bool bloomDump = ps2_diag::env("SOTC_BLOOM_DUMP") && std::atoi(ps2_diag::env("SOTC_BLOOM_DUMP")) != 0;
                 if (bloomDump)
                 {
                     const std::string base = std::string(snapshotDir) + "/";

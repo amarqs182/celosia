@@ -85,6 +85,8 @@
 // GAMEUTIL_get_interp_value_interp_value_cntrl: not called through the
 // table), and the loops' EE checkpoints (left out).
 #include "sotc_decomp.h"
+#include "sotc_pf141.h"
+#include "runtime/ps2_diag.h"
 
 #include "ps2_runtime_macros.h"
 #include "runtime/ps2_memory.h"
@@ -95,6 +97,9 @@
 #include <cstring>
 #include <vector>
 #include <chrono>
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
 #if defined(__vita__)
 #include <psp2/kernel/processmgr.h>
 #endif
@@ -540,6 +545,7 @@ namespace decomp_hot47j
         {
             auto call = [&](uint32_t target, uint32_t ret) { callGuest(rdram, ctx, runtime, target, ret, sp); };
             const uint32_t cloth = static_cast<uint32_t>(cloth64);
+            pf141::noteCloth(rdram, cloth); // round 141 (prefetch only)
             const uint8_t toggle = static_cast<uint8_t>((READ8(cloth + 0x80u) + 1u) & 1u);
             uint32_t points = READ32(cloth + 0xCu);
             uint32_t n = READ32(READ32(cloth) + 4u);
@@ -634,9 +640,9 @@ namespace decomp_hot47j
                     eps = static_cast<float>(std::atof(e));
                 if (const char *e = std::getenv("SOTC_FIND84_AGE"))
                     age = static_cast<uint32_t>(std::atoi(e));
-                if (const char *e = std::getenv("SOTC_FIND84_CHECK"))
+                if (const char *e = ps2_diag::env("SOTC_FIND84_CHECK"))
                     check = std::atoi(e);
-                log = std::getenv("SOTC_FIND84_LOG") && std::atoi(std::getenv("SOTC_FIND84_LOG")) != 0;
+                log = ps2_diag::env("SOTC_FIND84_LOG") && std::atoi(ps2_diag::env("SOTC_FIND84_LOG")) != 0;
             }
         };
         const Params &params()
@@ -688,7 +694,7 @@ namespace decomp_hot47j
         }
         inline bool on()
         {
-            static const bool v = std::getenv("SOTC_GROUND85_LOG") && std::atoi(std::getenv("SOTC_GROUND85_LOG")) != 0; // at first use: the Vita's env.txt comes after static init
+            static const bool v = ps2_diag::env("SOTC_GROUND85_LOG") && std::atoi(ps2_diag::env("SOTC_GROUND85_LOG")) != 0; // at first use: the Vita's env.txt comes after static init
             return v;
         }
         struct Rec
@@ -799,7 +805,7 @@ namespace decomp_hot47j
                     margin = static_cast<float>(std::atof(e));
                 if (const char *e = std::getenv("SOTC_GROUND85_AGE"))
                     age = static_cast<uint32_t>(std::atoi(e));
-                if (const char *e = std::getenv("SOTC_GROUND85_CHECK"))
+                if (const char *e = ps2_diag::env("SOTC_GROUND85_CHECK"))
                     check = std::atoi(e);
                 if (const char *e = std::getenv("SOTC_GROUND85_COOL"))
                     cool = static_cast<uint32_t>(std::atoi(e));
@@ -862,6 +868,104 @@ namespace decomp_hot47j
         int select(const Slot &s, const float c[3], float r, const float box[4], uint32_t *out)
         {
             int m = 0;
+            // The tree path and the duplicate check of one surface that passed the sphere and the plane.
+            auto rest = [&](int i)
+            {
+                const ground85::Split *sp = s.splits.data() + s.path[i];
+                bool visit = true;
+                for (int j = 0; visit && j < s.len[i]; ++j)
+                {
+                    const float coord = box[sp[j].axis & 3u];
+                    visit = sp[j].low ? coord <= sp[j].value + box[3] : sp[j].value - box[3] <= coord;
+                }
+                if (!visit)
+                    return;
+                bool seen = false;
+                for (int j = 0; j < m && !seen; ++j)
+                    seen = out[j] == s.ids[i];
+                if (!seen)
+                    out[m++] = s.ids[i];
+            };
+#if defined(__ARM_NEON)
+            if (sotc_decomp::sel96On() && sotc_decomp::sel97On())
+            {
+                // Round 97 (SOTC_SEL97): round 96's sphere and plane tests four surfaces at a
+                // time (the slot's arrays are already one per component). The same products
+                // and sums in the same order as the scalar code (NEON's multiply-accumulate
+                // rounds the product and the sum apart, like VFP's), compared the same way;
+                // the surfaces that pass go through the tree path and the duplicate check
+                // in index order: the same surfaces, in the same order.
+                const float32x4_t cx = vdupq_n_f32(c[0]), cy = vdupq_n_f32(c[1]), cz = vdupq_n_f32(c[2]), rv = vdupq_n_f32(r);
+                int i = 0;
+                for (; i + 4 <= s.n; i += 4)
+                {
+                    const float32x4_t dx = vsubq_f32(vld1q_f32(s.bx + i), cx), dy = vsubq_f32(vld1q_f32(s.by + i), cy), dz = vsubq_f32(vld1q_f32(s.bz + i), cz);
+                    const float32x4_t reach = vaddq_f32(vld1q_f32(s.br + i), rv);
+                    float32x4_t d2 = vmulq_f32(dx, dx);
+                    d2 = vmlaq_f32(d2, dy, dy);
+                    d2 = vmlaq_f32(d2, dz, dz);
+                    const uint32x4_t inSphere = vcltq_f32(d2, vmulq_f32(reach, reach));
+                    float32x4_t d = vmulq_f32(vld1q_f32(s.nx + i), cx);
+                    d = vmlaq_f32(d, vld1q_f32(s.ny + i), cy);
+                    d = vmlaq_f32(d, vld1q_f32(s.nz + i), cz);
+                    d = vaddq_f32(d, vld1q_f32(s.nw + i));
+                    const uint32x4_t pass = vandq_u32(inSphere, vcltq_f32(vabsq_f32(d), rv));
+                    const uint32x2_t h = vorr_u32(vget_low_u32(pass), vget_high_u32(pass));
+                    if ((vget_lane_u32(h, 0) | vget_lane_u32(h, 1)) == 0u)
+                        continue;
+                    uint32_t lanes[4];
+                    vst1q_u32(lanes, pass);
+                    for (int k = 0; k < 4; ++k)
+                        if (lanes[k])
+                            rest(i + k);
+                }
+                for (; i < s.n; ++i)
+                {
+                    const float dx = s.bx[i] - c[0], dy = s.by[i] - c[1], dz = s.bz[i] - c[2];
+                    const float reach = s.br[i] + r;
+                    if (!(dx * dx + dy * dy + dz * dz < reach * reach))
+                        continue;
+                    const float d = s.nx[i] * c[0] + s.ny[i] * c[1] + s.nz[i] * c[2] + s.nw[i];
+                    if (!(std::fabs(d) < r))
+                        continue;
+                    rest(i);
+                }
+                return m;
+            }
+#endif
+            if (sotc_decomp::sel96On())
+            {
+                // Round 96 (SOTC_SEL96): the same three tests, all of which must pass, with
+                // the two cheap ones (the boundary sphere, the plane) first and the tree
+                // walk's splits (up to 64 per surface) only for the surfaces that pass
+                // them: the same surfaces, in the same order (each test reads only its
+                // own inputs).
+                for (int i = 0; i < s.n; ++i)
+                {
+                    const float dx = s.bx[i] - c[0], dy = s.by[i] - c[1], dz = s.bz[i] - c[2];
+                    const float reach = s.br[i] + r;
+                    if (!(dx * dx + dy * dy + dz * dz < reach * reach))
+                        continue;
+                    const float d = s.nx[i] * c[0] + s.ny[i] * c[1] + s.nz[i] * c[2] + s.nw[i];
+                    if (!(std::fabs(d) < r))
+                        continue;
+                    const ground85::Split *sp = s.splits.data() + s.path[i];
+                    bool visit = true;
+                    for (int j = 0; visit && j < s.len[i]; ++j)
+                    {
+                        const float coord = box[sp[j].axis & 3u];
+                        visit = sp[j].low ? coord <= sp[j].value + box[3] : sp[j].value - box[3] <= coord;
+                    }
+                    if (!visit)
+                        continue;
+                    bool seen = false;
+                    for (int j = 0; j < m && !seen; ++j)
+                        seen = out[j] == s.ids[i];
+                    if (!seen)
+                        out[m++] = s.ids[i];
+                }
+                return m;
+            }
             for (int i = 0; i < s.n; ++i)
             {
                 const ground85::Split *sp = s.splits.data() + s.path[i];
@@ -1000,9 +1104,12 @@ namespace decomp_hot47j
                 else
                     n += 4;
             }
-            uint64_t h = 1469598103934665603ull;
+            // (Round 119: a 32-bit FNV-1a: the slot's key words are compared in full after it; the 64-bit
+            // multiply per word was half of this step's samples on the A9.)
+            uint32_t h32 = 2166136261u;
             for (int i = 0; i < n; ++i)
-                h = (h ^ key[i]) * 1099511628211ull;
+                h32 = (h32 ^ key[i]) * 16777619u;
+            const uint64_t h = h32;
             float qa[3], qb[3], mid[3];
             float l2 = 0.0f;
             for (int i = 0; i < 3; ++i)
@@ -1230,13 +1337,16 @@ namespace decomp_hot47j
             SET_GPR_U64(ctx, 2, static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(READ32(finder) - static_cast<uint32_t>(before)))));
             return true;
         };
-        const bool ground85Here = sotc_decomp::ground85On() && (ra == 0x010D4668u || ra == 0x010D46B0u);
+        // (Round 108: the memos below, g85 / find84, and probe85's records are lane 0's: on the guest worker
+        // the steps run as the original's, and nothing kept by the game thread is read or written.)
+        const bool lane1 = sotc_decomp::onWorkerLane(runtime);
+        const bool ground85Here = sotc_decomp::ground85On() && !lane1 && (ra == 0x010D4668u || ra == 0x010D46B0u);
         // Round 84: the step through find84's memo for still layout objects.
         auto step = [&](uint64_t object, uint32_t ret)
         {
             if (ground85Here && ground(object, ret))
                 return;
-            if (!sotc_decomp::find84On())
+            if (!sotc_decomp::find84On() || lane1)
                 return realStep(object, ret);
             find84::log();
             ++find84::g_stats.steps;
@@ -1356,7 +1466,7 @@ namespace decomp_hot47j
             call(static_cast<uint32_t>(filter), ret);
             return GPR_U64(ctx, 2) != 0u;
         };
-        const bool probe = probe85::on() && (ra == 0x010D4668u || ra == 0x010D46B0u);
+        const bool probe = probe85::on() && !sotc_decomp::onWorkerLane(runtime) && (ra == 0x010D4668u || ra == 0x010D46B0u);
         uint64_t probeT0 = 0;
         if (probe)
         {
@@ -1523,6 +1633,7 @@ namespace decomp_hot47j
             if (n >= 0 && n <= ground85::View::kMax && find84::plainRam(list, 8u * static_cast<uint32_t>(n) + 8u))
             {
                 const uint64_t frame = sotc_decomp::g_gameFrame;
+                const uint32_t age = g85::params().age; // (round 119: read once, not per slot)
                 const g85::Slot *last = nullptr;
                 for (int32_t i = 0; i < n; ++i)
                 {
@@ -1532,7 +1643,7 @@ namespace decomp_hot47j
                     {
                         last = nullptr; // the object's most recently used patch
                         for (const g85::Slot &sl : g85::g_slots)
-                            if (sl.live && !sl.bad && sl.frame + g85::params().age >= frame && sl.key[0] == static_cast<uint32_t>(ra) && sl.key[1] == finder && sl.key[2] == obj &&
+                            if (sl.live && !sl.bad && sl.frame + age >= frame && sl.key[0] == static_cast<uint32_t>(ra) && sl.key[1] == finder && sl.key[2] == obj &&
                                 (!last || sl.used > last->used))
                                 last = &sl;
                     }
@@ -1555,6 +1666,7 @@ namespace decomp_hot47j
                 }
                 v.count = n;
                 v.sum = ground85::listSum(rdram, list, n);
+                std::memcpy(v.words, rdram + list, 8u * static_cast<uint32_t>(n)); // (plainRam checked above)
             }
         }
         if (probe)

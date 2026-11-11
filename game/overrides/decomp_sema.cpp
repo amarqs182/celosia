@@ -20,9 +20,12 @@
 // sotc_decomp::install. SOTC_SEMA_FAST=0 (or SOTC_DECOMP=0,
 // SOTC_DECOMP_SKIP=SignalSema) leaves the stub in the table.
 #include "sotc_decomp.h"
+#include "runtime/ps2_diag.h"
 
 #include "ps2_runtime_macros.h"
 #include "runtime/ee_scheduler.h"
+#include "runtime/ps2_stats.h"
+#include "ps2_syscalls.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -64,6 +67,44 @@ namespace decomp_sema
 #endif
         g_stub(rdram, ctx, runtime);
     }
+
+    // Round 139 (SOTC_SEM139, A/B `sem139`): GetThreadId (0x106ed0) and PollSema (0x107030), called
+    // by the isys group / object locks' recompiled callers (and the natives through getThreadId139 /
+    // pollSema139) a few hundred times a frame. The table's entries are the runtime's stubs: ctx->pc =
+    // ra, the syscall bound to the calling context (bindMainContextForSyscall: nothing to do while a
+    // thread runs), the scheduler's lookups, the snapshot publish. With a thread running in this rdram:
+    // GetThreadId's v0 = the running thread, PollSema's the count taken or KE_SEMA_ZERO (exact: what the
+    // syscalls answer then; the debug snapshot is made at the next publish). Otherwise the stub.
+    constexpr uint32_t kGetThreadId = 0x00106ED0u, kPollSema = 0x00107030u;
+    PS2Runtime::RecompiledFunction g_tidStub = nullptr, g_pollStub = nullptr;
+    void getThreadIdNative(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (__builtin_expect(stat139::sem139(), 1))
+        {
+            const int tid = runtime->eeScheduler().currentThreadIdFast(rdram);
+            if (__builtin_expect(tid >= 0, 1))
+            {
+                ctx->pc = GPR_U32(ctx, 31);
+                setReturnS32(ctx, tid);
+                return;
+            }
+        }
+        g_tidStub(rdram, ctx, runtime);
+    }
+    void pollSemaNative(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (__builtin_expect(stat139::sem139(), 1))
+        {
+            int result;
+            if (__builtin_expect(runtime->eeScheduler().pollSemaphoreFast(GPR_S32(ctx, 4), rdram, result), 1))
+            {
+                ctx->pc = GPR_U32(ctx, 31);
+                setReturnS32(ctx, result);
+                return;
+            }
+        }
+        g_pollStub(rdram, ctx, runtime);
+    }
 }
 
 namespace sotc_decomp
@@ -76,9 +117,44 @@ namespace sotc_decomp
         if (!runtime.hasFunction(decomp_sema::kSignalSema))
             return;
 #if !defined(__vita__)
-        decomp_sema::g_stats = std::getenv("SOTC_SEMA_STATS") != nullptr;
+        decomp_sema::g_stats = ps2_diag::env("SOTC_SEMA_STATS") != nullptr;
 #endif
         decomp_sema::g_stub = runtime.lookupFunction(decomp_sema::kSignalSema);
         runtime.registerFunction(decomp_sema::kSignalSema, decomp_sema::signalSema);
+        // Round 139 (sem139; SOTC_SEM139=0 leaves the natives in, on their stub paths).
+        if (runtime.hasFunction(decomp_sema::kGetThreadId) && runtime.hasFunction(decomp_sema::kPollSema))
+        {
+            decomp_sema::g_tidStub = runtime.lookupFunction(decomp_sema::kGetThreadId);
+            runtime.registerFunction(decomp_sema::kGetThreadId, decomp_sema::getThreadIdNative);
+            decomp_sema::g_pollStub = runtime.lookupFunction(decomp_sema::kPollSema);
+            runtime.registerFunction(decomp_sema::kPollSema, decomp_sema::pollSemaNative);
+        }
+    }
+
+    void getThreadId139(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (__builtin_expect(stat139::sem139(), 1))
+        {
+            const int tid = runtime->eeScheduler().currentThreadIdFast(rdram);
+            if (__builtin_expect(tid >= 0, 1))
+            {
+                setReturnS32(ctx, tid);
+                return;
+            }
+        }
+        ps2_syscalls::GetThreadId(rdram, ctx, runtime);
+    }
+    void pollSema139(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (__builtin_expect(stat139::sem139(), 1))
+        {
+            int result;
+            if (__builtin_expect(runtime->eeScheduler().pollSemaphoreFast(GPR_S32(ctx, 4), rdram, result), 1))
+            {
+                setReturnS32(ctx, result);
+                return;
+            }
+        }
+        ps2_syscalls::PollSema(rdram, ctx, runtime);
     }
 }

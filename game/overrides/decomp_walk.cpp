@@ -65,20 +65,31 @@
 // with the registers it has there, the callbacks from their entry before
 // anything is written.
 #include "sotc_decomp.h"
+#include "runtime/ps2_diag.h"
+#include "sotc_worker.h"
 #include "lines67.h"
 #include "sotc_prof.h"
 
 #include "ps2_runtime_macros.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/native_tuning.h"
+#include "runtime/native_renderer.h"
+#include "runtime/ps2_thread_load.h"
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <vector>
 #include <algorithm>
 #include <string>
+#include <unordered_map>
 
 namespace decomp_prefetch
 {
@@ -86,6 +97,15 @@ namespace decomp_prefetch
     void aheadDisp(const uint8_t *rdram, uint32_t object);
     void aheadWalkClip(const uint8_t *rdram, uint32_t object);
     void aheadWalkDisp(const uint8_t *rdram, uint32_t object);
+}
+
+namespace sotc_native
+{
+    bool nativeDraws(); // round 103: the model hook draws natively (no PS2 lists, no GS raster)
+    // round 128 (imm128): an immediate primitive's pairs straight to the 2D assembler; its check's records
+    void immFeed128(uint8_t *rdram, const uint64_t *pairs, uint32_t count, uint32_t layer, bool haze);
+    void immRecord128(std::vector<uint64_t> &rec, const uint64_t *pairs, uint32_t count, uint32_t layer, bool haze);
+    void immArm128(std::vector<uint64_t> *rec);
 }
 
 namespace decomp_walk
@@ -287,8 +307,79 @@ namespace decomp_walk
     inline uint32_t geoDispClass(const Ram m, uint32_t object) { return m.u8(object + 8u) == 0x24u ? object + 0x20u : 0u; }
 
     // The sort lists (decomp_sortlist.cpp's GetNextSortObj / ClearSortList, GetFirstSortObj).
+    // Round 140 (sort140, SOTC_SORT140, default on; A/B `sort140`): the sort lists' bucket arrays (~1000 buckets,
+    // a few dozen used) as host words. The clears, the order copies and the scans for the next non-empty
+    // bucket did ~8-15 host instructions a bucket with the list's count and array read again each one (two
+    // clears, two order copies and two scans a walk: Vita3K's sampler 1.2% of the game thread in sortOrder
+    // and clearSortList alone). The same words are read and written, the same values left: the array in
+    // plain RAM and away from the list's own words (+0 .. +0x14) or the per-bucket code as before.
+    namespace sort140
+    {
+        typedef uint32_t __attribute__((may_alias)) AliasU32;
+        inline AliasU32 *words(const Ram m, uint32_t list, uint32_t buckets, int32_t count)
+        {
+            if (count <= 0 || count > 0x10000 || (buckets & 3u) || !sotc_decomp::sort140On())
+                return nullptr;
+            const uint32_t bytes = static_cast<uint32_t>(count) * 4u;
+            if (!Ram::ok(buckets, bytes) || !Ram::ok(list, 0x14u) || (list < buckets + bytes && buckets < list + 0x14u))
+                return nullptr;
+            return reinterpret_cast<AliasU32 *>(m.rdram + buckets);
+        }
+        // SOTC_SORT140_CHECK=1: each scan also done bucket by bucket and compared ([sort140]).
+        inline bool checkOn()
+        {
+            static const bool v = ps2_diag::env("SOTC_SORT140_CHECK") != nullptr;
+            return v;
+        }
+        inline uint64_t g_checks = 0, g_differ = 0;
+        // The first i in [from, count) whose word is nonzero (count when none).
+        inline int32_t scanFast(const AliasU32 *w, int32_t from, int32_t count)
+        {
+            int32_t i = from;
+            for (; i + 8 <= count; i += 8)
+                if ((w[i] | w[i + 1] | w[i + 2] | w[i + 3] | w[i + 4] | w[i + 5] | w[i + 6] | w[i + 7]) != 0u)
+                    break;
+            for (; i < count; ++i)
+                if (w[i] != 0u)
+                    return i;
+            return count;
+        }
+        inline int32_t scan(const AliasU32 *w, int32_t from, int32_t count)
+        {
+            const int32_t i = scanFast(w, from, count);
+            if (__builtin_expect(checkOn(), 0))
+            {
+                int32_t j = from;
+                while (j < count && w[j] == 0u)
+                    ++j;
+                ++g_checks;
+                if (j != i && ++g_differ <= 20u)
+                    std::fprintf(stderr, "[sort140] differ: from %d count %d fast %d slow %d\n", from, count, i, j);
+                if (g_checks % 100000u == 0u)
+                    std::fprintf(stderr, "[sort140] scans %llu differ %llu\n", (unsigned long long)g_checks, (unsigned long long)g_differ);
+            }
+            return i;
+        }
+    }
     void clearSortList(const Ram m, uint32_t list)
     {
+        if (sort140::AliasU32 *w = sort140::words(m, list, m.u32(list), m.s32(list + 4u)))
+        {
+            // (stores in the loop, not memset: Vita3K's sceClibMemset is an HLE call)
+            const int32_t count = m.s32(list + 4u);
+            int32_t i = 0;
+            uint8_t *b = reinterpret_cast<uint8_t *>(const_cast<uint32_t *>(w));
+            const __m128i zero = _mm_setzero_si128();
+            for (; i + 8 <= count; i += 8)
+            {
+                _mm_storeu_si128(reinterpret_cast<__m128i *>(b + i * 4), zero);
+                _mm_storeu_si128(reinterpret_cast<__m128i *>(b + i * 4 + 16), zero);
+            }
+            for (; i < count; ++i)
+                w[i] = 0u;
+            m.put32(list + 0x10u, 0u);
+            return;
+        }
         if (0 < m.s32(list + 4u))
             for (int32_t i = 0; i < m.s32(list + 4u); ++i)
                 m.put32(m.u32(list) + static_cast<uint32_t>(i) * 4u, 0u);
@@ -301,6 +392,14 @@ namespace decomp_walk
             return 0u;
         m.put32(list + 0x10u, 0u);
         const uint32_t buckets = m.u32(list);
+        if (const sort140::AliasU32 *w = sort140::words(m, list, buckets, count))
+        {
+            // The original stores each index it moves to: the bucket found, or count - 1 (none past 0).
+            const int32_t i = sort140::scan(w, 0, count);
+            if (i != 0)
+                m.put32(list + 0x10u, static_cast<uint32_t>(i < count ? i : count - 1));
+            return i < count ? w[i] : 0u;
+        }
         uint32_t result = m.u32(buckets);
         for (int32_t index = 1; result == 0u; ++index)
         {
@@ -321,6 +420,14 @@ namespace decomp_walk
         const int32_t count = m.s32(list + 4u);
         const uint32_t buckets = m.u32(list);
         int32_t index = m.s32(list + 0x10u);
+        if (index >= -1 && index < count)
+            if (const sort140::AliasU32 *w = sort140::words(m, list, buckets, count))
+            {
+                index = sort140::scan(w, index + 1, count);
+                result = index < count ? w[index] : 0u;
+                m.put32(list + 0x10u, static_cast<uint32_t>(index));
+                return result;
+            }
         for (;;)
         {
             ++index;
@@ -401,6 +508,17 @@ namespace decomp_walk
         const uint32_t buckets = m.u32(list);
         if (count <= 0 || count > 0x10000 || !Ram::ok(buckets, static_cast<uint32_t>(count) * 4u))
             return;
+        if (const sort140::AliasU32 *w = sort140::words(m, list, buckets, count))
+        {
+            for (int32_t index = sort140::scan(w, 0, count); index < count && out.size() < 4096u; index = sort140::scan(w, index + 1, count))
+                for (uint32_t node = w[index]; node != 0u && out.size() < 4096u; node = m.u32(node + 8u))
+                {
+                    if (!Ram::ok(node, 0x10u))
+                        break;
+                    out.push_back(node);
+                }
+            return;
+        }
         for (int32_t index = 0; index < count && out.size() < 4096u; ++index)
             for (uint32_t node = m.u32(buckets + static_cast<uint32_t>(index) * 4u); node != 0u && out.size() < 4096u; node = m.u32(node + 8u))
             {
@@ -477,7 +595,7 @@ namespace decomp_walk
     {
         inline bool on()
         {
-            static const bool v = std::getenv("SOTC_WALK79_LOG") && std::atoi(std::getenv("SOTC_WALK79_LOG")) != 0;
+            static const bool v = ps2_diag::env("SOTC_WALK79_LOG") && std::atoi(ps2_diag::env("SOTC_WALK79_LOG")) != 0;
             return v;
         }
         struct Slot
@@ -1101,7 +1219,7 @@ namespace decomp_walk
         uint64_t g_calls = 0, g_fast = 0, g_checks = 0, g_bad = 0, g_frames = 0;
         int checkMode()
         {
-            static const int v = std::getenv("SOTC_WALK83_CHECK") ? std::atoi(std::getenv("SOTC_WALK83_CHECK")) : 0;
+            static const int v = ps2_diag::env("SOTC_WALK83_CHECK") ? std::atoi(ps2_diag::env("SOTC_WALK83_CHECK")) : 0;
             return v;
         }
         struct Out
@@ -1273,6 +1391,445 @@ namespace decomp_walk
             std::memcpy(rec + 0x24u, gp + 0x234u, 4);
             out = {object, geo, hf(gp, 0x234u)};
             return true;
+        }
+    }
+
+    // ---- Round 140 (clip140, SOTC_CLIP140; A/B `clip140`): the group pass's ClipLayoutObjModel run ahead ----
+    // The walk's group pass calls each layout object's update, ClipLayoutObjModel (clip83's fast path: the
+    // LOD level and the sort keys from the object's matrix, its model's sphere / boxes and the camera), one
+    // object after the other on the game thread (the console's profile: ClipLayoutObjModel 2.06% + the walk's
+    // misses around it). Here a helper thread (cores 1-2) computes those clips for the group's objects ahead
+    // of the walk, from the same words, without writing guest memory: each result is the words the clip
+    // would write (rec +0x20 .. +0x34, geo +0x230 .. +0x23c, geo +0x250 .. +0x257) and its v0 / f0. When the
+    // walk reaches the object, it writes them there and sets the registers the call leaves (ra / sp / pc as
+    // callGuest, v0, f0), in place of the call; an object the helper has not reached yet is claimed by the
+    // walk and clipped there as before. What the walk does between (the earlier objects' clips, billboards'
+    // simple updates, particle geodisps' updates, the visibility callbacks, AddSortObj) does not write what a
+    // clip reads (the object's class words, its matrix, its model's header / LOD record, the camera):
+    // SOTC_CLIP140_CHECK=1 runs every taken object's clip the old way too and compares ([clip140]).
+    // Objects with a billboard / camera link (their simple update before the clip), another update, a clip
+    // callback, or clip83's other paths (skinned, self-LOD models: ~characters) are left to the walk.
+    namespace clip140
+    {
+        using clip83::V4;
+        using clip83::host;
+        using clip83::hf;
+        using clip83::hu;
+        using clip83::hq;
+        using clip83::rows;
+        using clip83::load4;
+        using clip83::clipBits;
+        using clip83::boxOut;
+        struct Result
+        {
+            uint32_t object = 0, geo = 0, rec = 0;
+            float f0 = 0.0f;
+            uint8_t kind = 0; // 0 none (the walk clips), 1 geo 0, 2 faded (>= 1), 3 the full clip
+            bool keys = false; // geo +0x230 .. +0x23c written
+            uint32_t w30 = 0, w34 = 0, w20 = 0, w24 = 0, w28 = 0;
+            uint32_t k[4] = {};
+            uint64_t w250 = 0;
+        };
+        // clip83::clip's computation (the same reads and arithmetic, in the same order), its writes kept in r.
+        bool compute(const uint8_t *rdram, uint32_t object, Result &r)
+        {
+            r.kind = 0;
+            const uint8_t *ob = host(rdram, object, 0x10u);
+            if (!ob)
+                return false;
+            const uint32_t index = static_cast<uint32_t>(ob[8]) - 9u;
+            if (index >= 0xEu)
+                return false;
+            const uint32_t target = hu(rdram, kClassTable + index * 4u);
+            const uint32_t s0 = target == 0x010F1A58u ? object + 0x20u : target == 0x010F1A98u ? object + 0x90u : 0u;
+            const uint8_t *c0 = s0 ? host(rdram, s0, 0x170u) : nullptr;
+            if (!c0)
+                return false;
+            const uint32_t s1 = hu(c0, 0x140u), geo = hu(c0, 0x144u);
+            if (!host(rdram, s1, 0x40u))
+                return false;
+            r.object = object;
+            r.rec = s1;
+            r.geo = geo;
+            const float m1 = -1.0f;
+            if (geo == 0u)
+            {
+                std::memcpy(&r.w30, &m1, 4);
+                r.f0 = -1.0f;
+                r.kind = 1;
+                return true;
+            }
+            const uint8_t *gp = host(rdram, geo, 0x260u);
+            if (!gp)
+                return false;
+            // The kept words land at their places in one go: the record's and the geometry's ranges apart.
+            if (s1 + 0x20u < geo + 0x258u && geo + 0x230u < s1 + 0x38u)
+                return false;
+            const uint8_t *model = host(rdram, hu(gp, 0u), 0x24u);
+            const uint8_t *hd = model ? host(rdram, hu(model, 0x20u), 0x60u) : nullptr;
+            if (!hd || (hu(hd, 0x18u) & 1u) != 0u || hu(hd, 0xCu) != 0u)
+                return false;
+            const uint8_t *lod = host(rdram, hu(hd, 8u), 0x40u);
+            const uint8_t *mx = host(rdram, hu(c0, 0x15Cu), 0x40u);
+            const uint32_t cam = hu(rdram, 0x0122A8F0u + (hu(rdram, 0x0118FE4Cu) << 2));
+            const uint8_t *cp = host(rdram, cam, 0x5E0u);
+            if (hu(hd, 8u) == 0u || !lod || !mx || !cp)
+                return false;
+            const int32_t count = static_cast<int32_t>(hu(hd, 0x1Cu));
+            if (count <= 0 || count > 8)
+                return false;
+            const uint32_t mode = hu(lod, 0x14u);
+            uint32_t modeTarget = 0u;
+            if (mode < 5u)
+            {
+                modeTarget = hu(rdram, kLodModes + mode * 4u);
+                if (modeTarget != 0x01098968u && modeTarget != 0x01098970u && modeTarget != 0x01098978u && modeTarget != 0x01098980u && modeTarget != 0x010989D0u)
+                    return false;
+            }
+            std::memcpy(&r.w30, &m1, 4);
+            const float fade = hf(gp, 0x244u);
+            std::memcpy(&r.w34, &fade, 4);
+            if (!(fade < 1.0f))
+            {
+                r.f0 = fade;
+                r.kind = 2;
+                return true;
+            }
+            float lens = 1.0f;
+            if (hu(lod, 0x3Cu) != 0u && cam != 0u)
+                lens = 500.0f / hf(cp, 0xCu);
+            const float lodScale = hf(c0, 0x9Cu) * lens;
+            // geo +0x250 as the clip leaves it after its first store there (the scale in the low word).
+            uint32_t scaleBits;
+            std::memcpy(&scaleBits, &lodScale, 4);
+            uint64_t w250 = (static_cast<uint64_t>(hu(gp, 0x254u)) << 32) | scaleBits;
+            float level;
+            const V4 eye = hq(cp, 0x140u);
+            V4 M[4];
+            load4(mx, 0u, M);
+            auto dist3 = [](float x, float y, float z) { return std::sqrt(x * x + y * y + z * z); };
+            bool done = false;
+            if ((hu(hd, 0x18u) >> 24) & 1u)
+            {
+                level = -2.0f;
+                done = true;
+            }
+            if (!done && hu(rdram, kLodOn) != 0u)
+            {
+                const float far = hf(lod, 0x30u);
+                if (0.0f < far && dist3(M[3].x - eye.x, M[3].y - eye.y, M[3].z - eye.z) < far)
+                {
+                    level = -2.0f;
+                    done = true;
+                }
+            }
+            float keys[4];
+            for (int i = 0; i < 4; ++i)
+                keys[i] = hf(gp, 0x230u + static_cast<uint32_t>(i) * 4u);
+            if (!done)
+            {
+                const V4 c = hq(hd, 0x20u);
+                const float rr = c.w * lodScale;
+                const V4 world = rows(M, c.x, c.y, c.z, 1.0f);
+                V4 P[4], VP[4], V[4];
+                load4(cp, 0x1E0u, P);
+                load4(cp, 0x5A0u, VP);
+                load4(cp, 0x1A0u, V);
+                const V4 pr = rows(P, rr, 0.0f, 0.0f, 1.0f);
+                V4 clipP = rows(VP, world.x, world.y, world.z, 1.0f);
+                clipP.w += pr.x;
+                const bool crosses = clipBits(clipP) != 0u;
+                const V4 vc = rows(V, world.x, world.y, world.z, world.w);
+                keys[0] = vc.z + rr;
+                keys[1] = vc.z;
+                keys[2] = vc.z - rr;
+                keys[3] = vc.w;
+                r.keys = true;
+                const float f21 = crosses ? dist3(world.x - eye.x, world.y - eye.y, world.z - eye.z) : -1.0f;
+                float d = 0.0f;
+                switch (modeTarget)
+                {
+                case 0x01098968u: d = keys[1]; break;
+                case 0x01098970u: d = keys[2]; break;
+                case 0x01098978u: d = keys[0]; break;
+                case 0x01098980u: d = dist3(world.x - eye.x, 0.0f, world.z - eye.z); break;
+                case 0x010989D0u: d = dist3(world.x - eye.x, world.y - eye.y, world.z - eye.z); break;
+                default: d = 0.0f; break;
+                }
+                const bool keepsLast = static_cast<int32_t>(hu(lod, 0x28u)) == 0;
+                if (native_renderer::tuning().sacLod && keepsLast)
+                    d *= 1.6f;
+                if (native_renderer::tuning().sacDrawDist && !keepsLast)
+                    d *= 1.5f;
+                const Ram m{const_cast<uint8_t *>(rdram)};
+                float f12 = lodByDistance(m, hu(hd, 8u), d, static_cast<int32_t>(static_cast<int64_t>(w250 << 21) >> 61));
+                const int32_t lv = static_cast<int32_t>(f12);
+                float f20;
+                if (static_cast<uint64_t>(static_cast<int64_t>(lv)) < static_cast<uint64_t>(static_cast<int64_t>(count)))
+                    f20 = f12;
+                else
+                    f20 = keepsLast ? static_cast<float>(count - 1) : -1.0f;
+                if (f20 < 0.0f)
+                    level = -1.0f;
+                else if (f21 < 0.0f)
+                    level = f20;
+                else
+                {
+                    const uint32_t table = hu(hd, 0x30u + static_cast<uint32_t>(static_cast<int32_t>(f20)) * 4u);
+                    const uint8_t *tb = host(rdram, table, 0x20u);
+                    level = f20;
+                    if (tb)
+                    {
+                        V4 PM[4];
+                        for (int i = 0; i < 4; ++i)
+                            PM[i] = rows(VP, M[i].x, M[i].y, M[i].z, M[i].w);
+                        if (boxOut(PM, hq(tb, 0u), hq(tb, 0x10u)))
+                            level = -2.0f;
+                    }
+                }
+            }
+            const int32_t lvl = static_cast<int32_t>(level);
+            w250 = (w250 & 0xFFFFF8FFFFFFFFFFull) | (static_cast<uint64_t>(static_cast<uint32_t>(lvl) & 7u) << 40);
+            r.w250 = w250;
+            const float lf = static_cast<float>(static_cast<int32_t>(static_cast<int64_t>(w250 << 21) >> 61));
+            std::memcpy(&r.w30, &lf, 4);
+            std::memcpy(r.k, keys, 16);
+            r.w20 = r.k[0];
+            r.w28 = r.k[2];
+            r.w24 = r.k[1];
+            r.f0 = keys[1];
+            r.kind = 3;
+            return true;
+        }
+        // The kept words into guest memory (the walk, at the object's turn).
+        void apply(uint8_t *rdram, const Result &r)
+        {
+            uint8_t *rec = rdram + r.rec;
+            std::memcpy(rec + 0x30u, &r.w30, 4);
+            if (r.kind == 1)
+                return;
+            std::memcpy(rec + 0x34u, &r.w34, 4);
+            if (r.kind == 2)
+                return;
+            uint8_t *gp = rdram + r.geo;
+            std::memcpy(gp + 0x250u, &r.w250, 8);
+            if (r.keys)
+                std::memcpy(gp + 0x230u, r.k, 16);
+            std::memcpy(rec + 0x20u, &r.w20, 4);
+            std::memcpy(rec + 0x28u, &r.w28, 4);
+            std::memcpy(rec + 0x24u, &r.w24, 4);
+        }
+
+
+        // ---- the helper thread and the walk's side ----
+        // A slot's state: the walk's generation << 2 | 0 free, 1 the helper's, 2 done (result kept), 3 the
+        // walk's. The helper claims and finishes a slot by compare-and-swap on its generation, so a helper
+        // still busy with an earlier walk's slot when the next walk lists its objects only loses that result
+        // (the walk never waits for the helper to stop, and never reads a result of another walk).
+        constexpr int kMax = 2048;
+        struct Slot
+        {
+            std::atomic<uint32_t> state{0};
+            Result r;
+        };
+        Slot g_slots[kMax];
+        uint32_t g_objects[kMax];
+        std::atomic<int> g_count{0};
+        std::atomic<uint32_t> g_gen{0};
+        std::atomic<bool> g_abort{false};
+        std::atomic<uint32_t> g_posted{0};
+        std::mutex g_mutex;
+        std::condition_variable g_work;
+        bool g_started = false;
+        int g_n = 0; // this walk's count (the game thread's)
+        const uint8_t *g_rdram = nullptr;
+        // Counters (SOTC_CLIP140_LOG=1: a line every 600 walks).
+        uint64_t g_walks = 0, g_listed = 0, g_taken = 0, g_byWalk = 0, g_waited = 0, g_none = 0, g_missed = 0, g_checks = 0, g_differ = 0;
+        int checkMode()
+        {
+            static const int v = ps2_diag::env("SOTC_CLIP140_CHECK") ? std::atoi(ps2_diag::env("SOTC_CLIP140_CHECK")) : 0;
+            return v;
+        }
+        bool logOn()
+        {
+            static const bool v = ps2_diag::env("SOTC_CLIP140_LOG") != nullptr;
+            return v;
+        }
+        void loop()
+        {
+            native_renderer::threads::place(native_renderer::threads::kOffload);
+            ps2SetEeFloatingPointMode(); // the game thread's rounding (toward zero) and flush-to-zero
+            uint32_t seen = 0;
+            for (;;)
+            {
+                {
+                    std::unique_lock<std::mutex> lock(g_mutex);
+                    g_work.wait(lock, [&] { return g_posted.load(std::memory_order_acquire) != seen; });
+                }
+                seen = g_posted.load(std::memory_order_acquire);
+                const uint32_t gen = g_gen.load(std::memory_order_acquire) << 2;
+                const int n = g_count.load(std::memory_order_acquire);
+                // From the list's end back: the walk takes the objects from its start, the two meet (the
+                // walk never waits for an object the helper is clipping: it clips that one itself).
+                for (int i = n - 1; i >= 0 && !g_abort.load(std::memory_order_relaxed); --i)
+                {
+                    uint32_t expect = gen;
+                    if (!g_slots[i].state.compare_exchange_strong(expect, gen | 1u, std::memory_order_acq_rel))
+                        continue;
+                    compute(g_rdram, g_objects[i], g_slots[i].r);
+                    expect = gen | 1u;
+                    g_slots[i].state.compare_exchange_strong(expect, gen | 2u, std::memory_order_acq_rel);
+                }
+            }
+        }
+        // The walk's start: the group's objects the helper may clip, in the walk's order (the chain read as
+        // isysGroupForNext walks it, without its counters' writes). False: nothing posted.
+        bool post(const Ram m, uint32_t first, PS2Runtime *runtime)
+        {
+            g_n = 0;
+            if (!sotc_decomp::clip140On() || !sotc_decomp::walk83On() || clip83::checkMode() != 0 ||
+                sotc_decomp::guestFunction(runtime, kClip) != &clipLayoutObjModel)
+                return false;
+            static const bool clipPart83 = !(std::getenv("SOTC_WALK83_CLIP") && std::getenv("SOTC_WALK83_CLIP")[0] == '0');
+            if (!clipPart83)
+                return false;
+            int n = 0;
+            for (uint32_t e = first, steps = 0; e != 0u && n < kMax && steps < 0x10000u; ++steps)
+            {
+                if (!Ram::ok(e, 0x10u))
+                    break;
+                const uint32_t object = m.u32(e);
+                if (Ram::ok(object, 0x1C0u))
+                    if (const uint32_t lc = layoutClassHint(m, object); lc != 0u && Ram::ok(lc, 0x1C0u))
+                        if (m.s8(lc + 0x1B6u) == 0 && m.s8(lc + 0x1B7u) == 0 && m.s8(lc + 0x1B8u) != 0)
+                            if (const uint32_t rec = m.u32(lc + 0x140u); Ram::ok(rec, 0xE0u) && m.u32(rec + 0xD8u) == kClip && m.u32(rec + 0xDCu) == 0u)
+                                g_objects[n++] = object;
+                // isysGroupForNext's walk: the next index in +0xc's high half, past entries being deleted
+                // (+0xc's byte) and hidden objects (+0xa bit 0).
+                uint32_t index = static_cast<uint16_t>(m.u32(e + 0xCu) >> 16);
+                e = 0u;
+                for (uint32_t k = 0; index != 0u && k < 0x10000u; ++k)
+                {
+                    const uint32_t c = kEntries + index * 24u;
+                    if (!Ram::ok(c, 0x10u))
+                        break;
+                    if (m.u8(c + 0xCu) == 0u)
+                    {
+                        const uint32_t o = m.u32(c);
+                        if (Ram::ok(o, 0xCu) && (m.u8(o + 0xAu) & 1u) == 0u)
+                        {
+                            e = c;
+                            break;
+                        }
+                    }
+                    index = static_cast<uint16_t>(m.u32(c + 0xCu) >> 16);
+                }
+            }
+            if (n == 0)
+                return false;
+            const uint32_t gen = (g_gen.load(std::memory_order_relaxed) + 1u) & 0x3FFFFFFFu;
+            for (int i = 0; i < n; ++i)
+                g_slots[i].state.store(gen << 2, std::memory_order_relaxed);
+            g_rdram = m.rdram;
+            g_abort.store(false, std::memory_order_relaxed);
+            g_count.store(n, std::memory_order_relaxed);
+            g_gen.store(gen, std::memory_order_release);
+            g_n = n;
+            ++g_walks;
+            g_listed += static_cast<uint64_t>(n);
+            if (!g_started)
+            {
+                g_started = true;
+                std::thread(loop).detach();
+            }
+            {
+                std::lock_guard<std::mutex> lock(g_mutex);
+                g_posted.fetch_add(1u, std::memory_order_release);
+            }
+            g_work.notify_one();
+            return true;
+        }
+        // The walk's end (every way out): the helper told to stop (its results are of no use any more).
+        void finish()
+        {
+            if (g_n == 0)
+                return;
+            g_abort.store(true, std::memory_order_relaxed);
+            g_n = 0;
+            if (logOn() && g_walks % 600u == 0u)
+            {
+                std::fprintf(stderr, "[clip140] walks %llu: listed %.1f a walk, taken %.1f, met the helper %.2f, clipped by the walk %.1f, not the fast path %.1f, "
+                                     "out of order %.2f; checks %llu differ %llu\n",
+                             (unsigned long long)g_walks, g_listed / 600.0, g_taken / 600.0, g_waited / 600.0, g_byWalk / 600.0, g_none / 600.0, g_missed / 600.0,
+                             (unsigned long long)g_checks, (unsigned long long)g_differ);
+                g_listed = g_taken = g_waited = g_byWalk = g_none = g_missed = 0;
+            }
+        }
+        // SOTC_CLIP140_CHECK=1: the clip ran the old way (the truth); its writes and registers against the result.
+        void check(const uint8_t *rdram, const R5900Context *ctx, const Result &r)
+        {
+            ++g_checks;
+            auto w32 = [&](uint32_t a) { uint32_t v; std::memcpy(&v, rdram + a, 4); return v; };
+            uint32_t f0;
+            std::memcpy(&f0, &ctx->f[0], 4);
+            uint32_t rf0;
+            std::memcpy(&rf0, &r.f0, 4);
+            bool bad = GPR_U32(ctx, 2) != r.geo || f0 != rf0 || w32(r.rec + 0x30u) != r.w30;
+            if (r.kind >= 2)
+                bad |= w32(r.rec + 0x34u) != r.w34;
+            if (r.kind == 3)
+            {
+                uint64_t w250;
+                std::memcpy(&w250, rdram + r.geo + 0x250u, 8);
+                bad |= w250 != r.w250 || w32(r.rec + 0x20u) != r.w20 || w32(r.rec + 0x24u) != r.w24 || w32(r.rec + 0x28u) != r.w28;
+                if (r.keys)
+                    bad |= std::memcmp(rdram + r.geo + 0x230u, r.k, 16) != 0;
+            }
+            if (bad && ++g_differ <= 20u)
+                std::fprintf(stderr, "[clip140] differ: object %08x kind %d v0 %08x / %08x f0 %08x / %08x rec+30 %08x / %08x\n", r.object, r.kind, GPR_U32(ctx, 2), r.geo, f0, rf0,
+                             w32(r.rec + 0x30u), r.w30);
+            if (g_checks % 20000u == 0u)
+                std::fprintf(stderr, "[clip140] checks %llu differ %llu\n", (unsigned long long)g_checks, (unsigned long long)g_differ);
+        }
+        // The walk at `object` (its update ClipLayoutObjModel): the helper's result when it has one (the
+        // slot claimed), else nullptr (the walk calls the clip). cursor: the next slot in the list's order.
+        const Result *take(uint32_t object, int &cursor)
+        {
+            const int n = g_n;
+            int at = -1;
+            for (int i = cursor; i < n && i < cursor + 8; ++i)
+                if (g_objects[i] == object)
+                {
+                    at = i;
+                    break;
+                }
+            if (at < 0)
+            {
+                if (n)
+                    ++g_missed;
+                return nullptr;
+            }
+            cursor = at + 1;
+            const uint32_t gen = g_gen.load(std::memory_order_relaxed) << 2;
+            uint32_t expect = gen;
+            if (g_slots[at].state.compare_exchange_strong(expect, gen | 3u, std::memory_order_acq_rel))
+            {
+                ++g_byWalk;
+                return nullptr;
+            }
+            if (expect != (gen | 2u))
+            {
+                ++g_waited; // the helper is clipping it now: the walk clips it too (the helper's result unused)
+                return nullptr;
+            }
+            const Result &r = g_slots[at].r;
+            if (r.kind == 0 || r.object != object)
+            {
+                ++g_none;
+                return nullptr;
+            }
+            ++g_taken;
+            return &r;
         }
     }
 
@@ -1483,7 +2040,37 @@ namespace decomp_walk
             const int32_t index = (i << 2) + ((i + 1) >> 6);
             return static_cast<uint32_t>(index << 4) + base;
         };
-        if (s0 == 0u)
+        // Round 103 (SOTC_SOLID103, A/B `solid103`, `r103all`): with the
+        // native renderer drawing, the parts' matrix blocks (the camera's
+        // +0x1a0 x each part's matrix, into the instance packet's +0x104
+        // block) are the PS2's VU1 input only: the model hook draws from the
+        // parts' own matrices (a1) and the camera's +0x5a0, and nothing
+        // native reads the blocks. Left out (with their camera lookup) for a
+        // model without a shadow (shadowDisp's rigid matrix comes from its
+        // packets) whose LOD record asks for no lens scale (which rescales
+        // the blocks). Everything else as before.
+        const auto lensScaled = [&]
+        {
+            const uint32_t lodRecord = m.u32(m.u32(m.u32(m.u32(s1 + 0x144u)) + 0x20u) + 8u);
+            return lodRecord != 0u && m.u32(lodRecord + 0x3Cu) != 0u;
+        };
+        if (s0 == 0u && sotc_decomp::solid103On() && sotc_native::nativeDraws() && m.u32(m.u32(s1 + 0x144u) + 0x280u) == 0u && !lensScaled())
+        {
+            const int32_t s2 = m.s16(s1 + 0x1B4u);
+            SET_GPR_S32(ctx, 18, s2);
+            ctx->f[0] = 1.0f;
+            // SOTC_SOLID103_POISON=1 (checking): the skipped blocks filled with
+            // NaNs, so any reader left would show (a model gone or broken).
+            static const bool poison = std::getenv("SOTC_SOLID103_POISON") && std::atoi(std::getenv("SOTC_SOLID103_POISON")) != 0;
+            if (poison)
+            {
+                const __m128 nan = _mm_set1_ps(std::numeric_limits<float>::quiet_NaN());
+                for (int32_t i = 0; i < s2 && i < 256; ++i)
+                    for (uint32_t k = 0; k < 4u; ++k)
+                        m.putq(block(i) + k * 0x10u, nan);
+            }
+        }
+        else if (s0 == 0u)
         {
             const int32_t s2 = m.s16(s1 + 0x1B4u);
             SET_GPR_S32(ctx, 18, s2);
@@ -1786,8 +2373,33 @@ namespace decomp_walk
     // The vertex ring wraps at 256: glEnd, then glBeginWithDlLayerNo again
     // (guest calls). An untransformed vertex (bit 3 of +0x1b0 clear) is
     // 0108D478's, a guest call.
+    // Round 116 (SOTC_GLV116_LOG=1, diagnostic): the kick's callers (its return
+    // address) and the gl* layer, counted; a [glv116] line every 30 000 kicks.
+    void glv116Note(uint32_t ra)
+    {
+        static std::unordered_map<uint32_t, uint64_t> calls;
+        static uint64_t total = 0;
+        ++calls[ra];
+        if (++total % 30000u != 0u)
+            return;
+        std::vector<std::pair<uint64_t, uint32_t>> v;
+        for (const auto &kv : calls)
+            v.push_back({kv.second, kv.first});
+        std::sort(v.rbegin(), v.rend());
+        std::string line = "[glv116] kicks " + std::to_string(total) + " by caller:";
+        for (size_t i = 0; i < v.size() && i < 12u; ++i)
+        {
+            char b[48];
+            std::snprintf(b, sizeof b, " %08x %llu", v[i].second, (unsigned long long)v[i].first);
+            line += b;
+        }
+        std::fprintf(stderr, "%s\n", line.c_str());
+    }
     void glVertexKick(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        static const bool glv116 = ps2_diag::env("SOTC_GLV116_LOG") != nullptr;
+        if (glv116)
+            glv116Note(GPR_U32(ctx, 31));
         sotc_decomp::clipNeeded(ctx); // round 61: it reads the whole CLIP register (left in s0)
         G g(rdram, ctx, runtime);
         const Ram m = g.m;
@@ -2103,8 +2715,826 @@ namespace decomp_walk
         ctx->f[2] = 2048.0f;
     }
 
+    // ---- Round 117 (SOTC_GLV117, default on; A/B `glv117`, `r117all`): the
+    // strips' four vertices between a glBegin and its glEnd in one pass.
+    // Each vertex is glColor4f, glTexCoord2f, glVertex3fv's own part and the
+    // kick (0108D730), as above and in their order, writing what they write
+    // (the colour / ST words, the ring slot, the state words, the GIF pairs,
+    // the CLIP history, +0x1b4, the ADC byte, the ring index); but the three
+    // matrices (the view on top of the stack, the camera's clip +0x5e0 and
+    // screen +0x660) are read and clamped once for the four (the VU0 add /
+    // mul clamp is idempotent: the products and sums are the same bits as
+    // the kick's, which clamps every operand), the kick's frame and saved
+    // registers are not written (dead stack: the kick restores every
+    // s-register it uses), and the VU0 registers, Q, f0 - f2, v0 / a0 / ra
+    // are set once, as the fourth kick leaves them. False (nothing written)
+    // when the kick would take another path for any of them (no camera, an
+    // untransformed vertex, UV texturing, an unknown primitive, a full
+    // ring): then the vertices go through the calls as before.
+    // SOTC_GLV117_CHECK=<n>: every n-th quad run both ways from the same
+    // state and compared ([glv117c]: the gl block, the packet, VU0, f0 - f2).
+    struct Vert117
+    {
+        float alpha, u, v;
+        uint32_t pos, site;
+        bool colour = true; // false: no glColor4f per vertex (glColor4fv once before: 01142350's quads)
+    };
+    // host (round 128, imm128): the pairs into host[] (value, register; *hostCount of them) instead of the GIF packet.
+    bool quad117Body(const G g, uint32_t sp, const Vert117 *vs, int n, uint64_t *host, uint32_t *hostCount)
+    {
+        const Ram m = g.m;
+        R5900Context *ctx = g.ctx;
+        const uint32_t camera = m.u32(kGl);
+        const uint32_t index0 = m.u32(kGl + 0x41F0u);
+        static int said = 0;
+        auto no = [&](int why)
+        {
+            if (said++ < 8)
+                std::fprintf(stderr, "[glv117] quad by the calls: reason %d (camera %08x index %u view %u prim %u texturing %u mode %u)\n", why, camera, index0,
+                             m.u32(kViewIndex), m.u32(kGl + 0x10u), m.u32(kGl + 0x18u), m.u32(kGl + 0x2Cu));
+            return false;
+        };
+        if (camera == 0u || !Ram::ok(camera, 0x6A0u) || index0 + static_cast<uint32_t>(n) >= 0x100u || m.u32(kViewIndex) >= 0x20u)
+            return no(1);
+        // UV texturing (mode 1): iosFTOI4Vector on the slot's ST (0x1be700, a relocated jal: checked).
+        const uint32_t uvMode = m.u32(kGl + 0x18u) != 0u ? m.u32(kGl + 0x2Cu) : 0u;
+        if (uvMode > 1u || (uvMode == 1u && sotc_decomp::jalTarget(g.rdram, 0x0108D9B0u) != 0x001BE700u))
+            return no(2);
+        const uint32_t prim = m.u32(kGl + 0x10u);
+        const uint32_t target = prim < 7u ? m.u32(0x01191730u + prim * 4u) : 0x0108DC48u;
+        if (target != 0x0108DAE0u && target != 0x0108DAF8u && target != 0x0108DB58u && target != 0x0108DB78u && target != 0x0108DC48u)
+            return no(3);
+        for (int i = 0; i < n; ++i)
+            if (!Ram::ok(vs[i].pos, 0x10u))
+                return no(4);
+        // Round 134 (clip134): a fresh primitive (index 0) decides only on its own vertices' judgements (each
+        // case below masks the judgements of vertices index .. index - 2, all of this call's), so the lane's
+        // pending CLIP register is not needed: the judgements are recorded (clipShift) and the next reader's
+        // join puts the true register (the lane's, shifted by them) in the context, as clipByMinMaxCube's
+        // corners do. Before, the first quad after the model hooks joined the lane here (the game thread ran
+        // its pending modelDispState jobs: the console's 'joins at clip', ~1 a frame, inside the strips).
+        const bool lazy134 = index0 == 0u && sotc_decomp::clip134On() && sotc_decomp::g_lazyClip.ctx == ctx &&
+                             (sotc_decomp::g_lazyClip.pending || sotc_decomp::g_lazyClip.tracking);
+        if (!lazy134)
+            sotc_decomp::clipNeeded(ctx);
+        static const bool glv116 = ps2_diag::env("SOTC_GLV116_LOG") != nullptr;
+        __m128 *vf = ctx->vu0_vf;
+        const __m128 vf0 = vf[0];
+        const uint32_t view = kViewStack + (m.u32(kViewIndex) << 6);
+        const __m128 viewM[4] = {m.q(view), m.q(view + 0x10u), m.q(view + 0x20u), m.q(view + 0x30u)};
+        const __m128 clipM[4] = {m.q(camera + 0x5E0u), m.q(camera + 0x5F0u), m.q(camera + 0x600u), m.q(camera + 0x610u)};
+        const __m128 screenM[4] = {m.q(camera + 0x660u), m.q(camera + 0x670u), m.q(camera + 0x680u), m.q(camera + 0x690u)};
+        __m128 viewN[4], clipN[4], screenN[4];
+        for (int i = 0; i < 4; ++i)
+        {
+            viewN[i] = PS2X_VU_IN(viewM[i]);
+            clipN[i] = PS2X_VU_IN(clipM[i]);
+            screenN[i] = PS2X_VU_IN(screenM[i]);
+        }
+        // apply() on clamped rows and a clamped vector: each product / sum the kick's.
+        auto applyN = [](const __m128 c[4], __m128 v, __m128 &acc) -> __m128
+        {
+            const __m128 vn = PS2X_VU_IN(v);
+            acc = PS2_VMUL_K(1, 1, c[0], lane<0>(vn));
+            acc = PS2_VADD_K(1, 1, acc, PS2_VMUL_K(1, 1, c[1], lane<1>(vn)));
+            acc = PS2_VADD_K(1, 1, acc, PS2_VMUL_K(1, 1, c[2], lane<2>(vn)));
+            return PS2_VADD_K(1, 1, acc, PS2_VMUL_K(1, 1, c[3], lane<3>(vn)));
+        };
+        const bool perspective = m.u32(kGl + 0x5Cu) != 0u;
+        const bool texturing = m.u32(kGl + 0x18u) != 0u;
+        __m128 vf5 = vf[5], vf6 = vf[6];
+        __m128 vf10 = vf[10], vf23 = vf[23], vf24 = vf[24], vf25 = vf[25], vf26 = vf[26], vf27 = vf[27], acc = ctx->vu0_acc;
+        float f0 = 0.0f, f1 = 0.0f, f2 = 0.0f;
+        for (int i = 0; i < n; ++i)
+        {
+            const Vert117 &vx = vs[i];
+            if (glv116)
+                glv116Note(vx.site + 8u);
+            if (vx.colour)
+                glColor4f(ctx, m, 0.5f, 0.5f, 0.5f, vx.alpha);
+            glTexCoord2f(ctx, m, vx.u, vx.v); // (glTexCoord2fv writes the same words)
+            // glVertex3fv's own part (the lit colour never: bit 0 is cleared first).
+            const uint64_t state = (m.u64(kGl + 0x1B0u) & ~9ull) | 8u;
+            m.put64(kGl + 0x1B0u, state);
+            const uint32_t index = m.u32(kGl + 0x41F0u);
+            const uint32_t slot = kGl + (index << 6);
+            m.putqi(slot + 0x220u, m.qi(kGl + 0x90u));
+            if (texturing)
+            {
+                m.putf(slot + 0x210u, m.f32(kGl + 0xA0u));
+                m.putf(slot + 0x214u, m.f32(kGl + 0xA4u));
+            }
+            m.put64(kGl + 0x1B0u, m.u64(kGl + 0x1B0u) & ~1ull);
+            m.putqi(slot + 0x200u, m.qi(vx.pos));
+            // The kick (transformed: bit 3 was just set).
+            vf23 = m.q(slot + 0x200u);
+            vf24 = m.q(slot + 0x210u);
+            vf25 = m.q(slot + 0x220u);
+            vf10 = applyN(viewN, vf23, acc);
+            vf27 = applyN(screenN, vf10, acc);
+            vf26 = applyN(clipN, vf10, acc);
+            ctx->vu0_q = ps2VuDivide(ctx->vu0_status, _mm_cvtss_f32(lane<3>(vf0)), _mm_cvtss_f32(lane<3>(vf27)));
+            vf25 = ftoi(vf25, 1.0f);
+            const uint32_t judgement = ps2VuClipFlags(vf26, vf26);
+            const uint32_t flags = ((ctx->vu0_clip_flags << 6) | judgement) & 0xFFFFFFu;
+            ctx->vu0_clip_flags = flags;
+            if (lazy134)
+                sotc_decomp::clipShift(ctx, judgement & 0x3Fu);
+            const __m128 q = _mm_set1_ps(ctx->vu0_q);
+            vf27 = sel(vf27, PS2_VMUL(vf27, q), kXyz);
+            vf27 = sel(vf27, PS2_VMUL(vf0, q), kW);
+            if (perspective)
+                vf24 = sel(vf24, PS2_VMUL(vf24, q), kXyz);
+            const uint32_t s0 = flags;
+            vf27 = sel(vf27, ftoi(vf27, 16.0f), kXyz);
+            m.putq(slot + 0x1F0u, vf26);
+            uint32_t w24[4], w25[4], w27[4];
+            std::memcpy(w24, &vf24, 16);
+            std::memcpy(w25, &vf25, 16);
+            std::memcpy(w27, &vf27, 16);
+            auto emit = [&](uint64_t value, uint64_t reg)
+            {
+                if (host)
+                {
+                    host[2u * *hostCount] = value;
+                    host[2u * *hostCount + 1u] = reg;
+                    ++*hostCount;
+                    return;
+                }
+                uint32_t at = m.u32(kGl + 4u);
+                m.put64(at, value);
+                at += 8u;
+                m.put32(kGl + 4u, at);
+                m.put64(at, reg);
+                m.put32(kGl + 4u, at + 8u);
+            };
+            auto sx = [](uint32_t v) -> uint64_t { return static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(v))); };
+            if (texturing && uvMode == 0u)
+                emit(static_cast<uint64_t>(w24[0]) | (static_cast<uint64_t>(w24[1]) << 32), 2u); // ST
+            else if (texturing)
+            {
+                // UV: iosFTOI4Vector(the frame, the slot's ST): vftoi4 of the raw ST.
+                vf5 = m.q(slot + 0x210u);
+                vf6 = ftoi(vf5, 16.0f);
+                uint32_t uv[4];
+                std::memcpy(uv, &vf6, 16);
+                emit(static_cast<uint64_t>(uv[0]) | (static_cast<uint64_t>(uv[1]) << 16), 3u);
+            }
+            {
+                const uint64_t q32 = perspective ? (sx(w27[3]) << 32) : 0x3F80000000000000ull;
+                const uint64_t value = (sx(w25[0]) | q32) | ((sx(w25[2]) << 16) | (sx(w25[1]) << 8)) | (sx(w25[3]) << 24);
+                emit(value, 1u);
+            }
+            uint32_t s2 = 0u, s5 = 0u;
+            const int32_t count = static_cast<int32_t>(index);
+            auto pairs = [&](const uint32_t *masks, int k) -> bool
+            {
+                for (int j = 0; j < k; ++j)
+                    if ((s0 & masks[j]) == masks[j])
+                        return true;
+                return false;
+            };
+            switch (target)
+            {
+            case 0x0108DAE0u:
+                if (s0 & 0x3Fu)
+                    s2 = 1u;
+                break;
+            case 0x0108DAF8u:
+            {
+                static const uint32_t two[] = {0x41u, 0x82u, 0x104u, 0x208u, 0x410u};
+                if (count > 0 && (s0 & 0xFFFu) != 0u)
+                {
+                    if (!pairs(two, 5))
+                        s5 = ((s0 & 0x820u) ^ 0x820u) != 0u ? 1u : 0u;
+                    s2 = 1u;
+                }
+                break;
+            }
+            case 0x0108DB58u:
+                if (count > 0 && (s0 & 0xFFFu) != 0u)
+                    s2 = 1u;
+                break;
+            case 0x0108DB78u:
+            {
+                static const uint32_t two[] = {0x41u, 0x82u, 0x104u, 0x208u, 0x410u};
+                if (count == 0 && (s0 & 0x3Fu) != 0u)
+                {
+                    m.put64(kGl + 0x1B0u, m.u64(kGl + 0x1B0u) | 0x10u);
+                    s2 = 1u;
+                }
+                const bool run = ((m.u64(kGl + 0x1B0u) >> 4) & 1u) != 0u;
+                if (count < 2)
+                {
+                    if (run)
+                    {
+                        s5 = 1u;
+                        s2 = 1u;
+                    }
+                }
+                else if ((s0 & 0xFFFu) == 0u)
+                {
+                    if (run)
+                    {
+                        s5 = 1u;
+                        s2 = 1u;
+                    }
+                }
+                else
+                {
+                    if (pairs(two, 5) || (s0 & 0x820u) == 0x820u)
+                        s5 = run ? 0u : 1u;
+                    else
+                        s5 = 1u;
+                    s2 = 1u;
+                }
+                break;
+            }
+            default: // 0x0108DC48: triangles / fans
+            {
+                static const uint32_t three[] = {0x1041u, 0x2082u, 0x4104u, 0x8208u, 0x10410u};
+                if (!(count < 2) && (s0 & 0x3FFFFu) != 0u)
+                {
+                    if (!pairs(three, 5))
+                        s5 = ((s0 & 0x20820u) ^ 0x20820u) != 0u ? 1u : 0u;
+                    s2 = 1u;
+                }
+                break;
+            }
+            }
+            const int32_t pending = m.s32(kGl + 0x1B4u);
+            s2 |= (0 < pending) ? 1u : 0u;
+            uint64_t reg = 4u;
+            if (s2 != 0u)
+            {
+                if (pending > 0)
+                    m.put32(kGl + 0x1B4u, static_cast<uint32_t>(pending - 1));
+                reg = 0xCu;
+            }
+            f1 = m.f32(kGl + 0x41F4u);
+            f2 = 2147483648.0f;
+            f0 = FPU_MUL_S(FPU_CVT_S_W(static_cast<int32_t>(w27[2]) >> 4), f1);
+            uint64_t z;
+            if (FPU_C_OLE_S(f2, f0))
+            {
+                f0 = FPU_SUB_S(f0, f2);
+                z = static_cast<uint64_t>(static_cast<int64_t>(FPU_CVT_W_S(f0))) | 0xFFFFFFFF80000000ull;
+            }
+            else
+                z = static_cast<uint64_t>(static_cast<int64_t>(FPU_CVT_W_S(f0)));
+            {
+                const int32_t zi = static_cast<int32_t>(z);
+                std::memcpy(&f1, &zi, 4);
+            }
+            const uint64_t a3v = sx(w27[0]) | (static_cast<uint64_t>(m.u32(kGl + 0x60u)) << 56);
+            const uint64_t xyz = a3v | ((z << 32) | (sx(w27[1]) << 16));
+            emit(xyz, reg);
+            m.put8(kGl + 0x41F8u + index, static_cast<uint8_t>(s5));
+            m.put32(kGl + 0x41F0u, index + 1u);
+        }
+        // What the last kick leaves.
+        vf[5] = vf5;
+        vf[6] = vf6;
+        vf[10] = vf10;
+        for (int i = 0; i < 4; ++i)
+        {
+            vf[11 + i] = viewM[i];
+            vf[15 + i] = clipM[i];
+            vf[19 + i] = screenM[i];
+        }
+        vf[23] = vf23;
+        vf[24] = vf24;
+        vf[25] = vf25;
+        vf[26] = vf26;
+        vf[27] = vf27;
+        ctx->vu0_acc = acc;
+        ctx->f[0] = f0;
+        ctx->f[1] = f1;
+        ctx->f[2] = f2;
+        const uint32_t last = m.u32(kGl + 0x41F0u);
+        SET_GPR_S32(ctx, 2, static_cast<int32_t>(last));
+        SET_GPR_U32(ctx, 4, last - 1u);
+        SET_GPR_U32(ctx, 31, vs[n - 1].site + 8u);
+        SET_GPR_U32(ctx, 29, sp);
+        return true;
+    }
+    // Round 140 (quad140, SOTC_QUAD140, default on; A/B `quad140`): the same body with everything it calls
+    // inlined (GCC's flatten). The PGO build left its per-vertex helpers as calls, several through long-branch
+    // veneers (the hot order puts them apart): the VU0 product lambda (three a vertex), the blend `sel`, the
+    // GIF pair emitter, glColor4f / glTexCoord2f; Vita3K's sampler had quad117 and those helpers at ~2.5% of the
+    // game thread (the heat-haze strips, Wander's and the colossi's). Same operations in the same order (the
+    // A9 has no fused multiply-add: a contracted vmla rounds as the separate multiply and add did).
+    __attribute__((flatten)) bool quad117Flat(const G g, uint32_t sp, const Vert117 *vs, int n, uint64_t *host, uint32_t *hostCount)
+    {
+        return quad117Body(g, sp, vs, n, host, hostCount);
+    }
+    // SOTC_QUAD140_CHECK=<n>: every n-th quad run both ways from the same state (the flat copy first, then the
+    // body as before: the truth stays) and compared: the gl block, the GIF packet's next 0x100 bytes, the host
+    // pairs, the context ([quad140]).
+    bool quad117Checked(const G g, uint32_t sp, const Vert117 *vs, int n, uint64_t *host, uint32_t *hostCount)
+    {
+        static uint64_t quads = 0, checks = 0, differ = 0;
+        static const uint64_t every = ps2_diag::env("SOTC_QUAD140_CHECK") ? std::strtoull(ps2_diag::env("SOTC_QUAD140_CHECK"), nullptr, 10) : 0u;
+        const Ram m = g.m;
+        const uint32_t pkt = m.u32(kGl + 4u);
+        if (++quads % every != 0u || !Ram::ok(pkt, 0x100u) || !Ram::ok(kGl, 0x5300u))
+            return quad117Flat(g, sp, vs, n, host, hostCount);
+        // (static: nothing 16-aligned on the stack)
+        static std::vector<uint8_t> blk0(0x5300u), pk0(0x100u), blkA(0x5300u), pkA(0x100u), ctx0(sizeof(R5900Context)), ctxA(sizeof(R5900Context));
+        static std::vector<uint64_t> hostA;
+        // The lane's pending CLIP register joined first (clipNeeded would join it in one run only); the
+        // recorded judgements kept and put back with the rest.
+        sotc_decomp::clipNeeded(g.ctx);
+        const sotc_decomp::LazyClip lazy0 = sotc_decomp::g_lazyClip;
+        const uint32_t count0 = hostCount ? *hostCount : 0u;
+        std::memcpy(blk0.data(), m.p(kGl), 0x5300u);
+        std::memcpy(pk0.data(), m.p(pkt), 0x100u);
+        std::memcpy(ctx0.data(), g.ctx, sizeof(R5900Context));
+        const bool a = quad117Flat(g, sp, vs, n, host, hostCount);
+        const uint32_t countA = hostCount ? *hostCount : 0u;
+        hostA.assign(host ? host + 2u * count0 : nullptr, host ? host + 2u * countA : nullptr);
+        std::memcpy(blkA.data(), m.p(kGl), 0x5300u);
+        std::memcpy(pkA.data(), m.p(pkt), 0x100u);
+        std::memcpy(ctxA.data(), g.ctx, sizeof(R5900Context));
+        std::memcpy(m.p(kGl), blk0.data(), 0x5300u);
+        std::memcpy(m.p(pkt), pk0.data(), 0x100u);
+        std::memcpy(g.ctx, ctx0.data(), sizeof(R5900Context));
+        const sotc_decomp::LazyClip lazyA = sotc_decomp::g_lazyClip;
+        sotc_decomp::g_lazyClip = lazy0;
+        if (hostCount)
+            *hostCount = count0;
+        const bool b = quad117Body(g, sp, vs, n, host, hostCount);
+        ++checks;
+        const uint32_t countB = hostCount ? *hostCount : 0u;
+        const sotc_decomp::LazyClip &lazyB = sotc_decomp::g_lazyClip;
+        const bool same = a == b && countA == countB && lazyA.known == lazyB.known && lazyA.shifts == lazyB.shifts && lazyA.pending == lazyB.pending && std::memcmp(blkA.data(), m.p(kGl), 0x5300u) == 0 && std::memcmp(pkA.data(), m.p(pkt), 0x100u) == 0 &&
+                          std::memcmp(ctxA.data(), g.ctx, sizeof(R5900Context)) == 0 &&
+                          (!host || std::memcmp(hostA.data(), host + 2u * count0, hostA.size() * 8u) == 0);
+        if (!same && ++differ <= 20u)
+            std::fprintf(stderr, "[quad140] DIFFERS (site %08x): taken %d / %d pairs %u / %u\n", vs[0].site, a ? 1 : 0, b ? 1 : 0, countA, countB);
+        if (checks % 2000u == 0u)
+            std::fprintf(stderr, "[quad140] %llu quads checked, %llu differ\n", (unsigned long long)checks, (unsigned long long)differ);
+        return b;
+    }
+    bool quad117(const G g, uint32_t sp, const Vert117 *vs, int n, uint64_t *host = nullptr, uint32_t *hostCount = nullptr)
+    {
+        if (sotc_decomp::quad140On())
+        {
+            static const bool check = ps2_diag::env("SOTC_QUAD140_CHECK") != nullptr;
+            if (__builtin_expect(check, 0))
+                return quad117Checked(g, sp, vs, n, host, hostCount);
+            return quad117Flat(g, sp, vs, n, host, hostCount);
+        }
+        return quad117Body(g, sp, vs, n, host, hostCount);
+    }
+
+    // SOTC_GLV117_CHECK=<n>: every n-th quad both ways (glv117c).
+    struct Glv117Check
+    {
+        int every = -1;
+        uint64_t quads = 0, checks = 0, differ = 0;
+    };
+    Glv117Check g_glv117Check;
+
+    // quad117, or the calls when it does not take them; SOTC_GLV117_CHECK=<n>:
+    // every n-th quad both ways from the same state (the gl block 0x5300 bytes,
+    // the packet's next 0x100, VU0 / Q / CLIP, f0 - f2), the calls' result kept.
+    template <class Calls>
+    void quadRun117(const G g, uint32_t sp, const Vert117 *vs, int n, const Calls &calls)
+    {
+        const Ram m = g.m;
+        R5900Context *ctx = g.ctx;
+        Glv117Check &c = g_glv117Check;
+        if (c.every < 0)
+            c.every = ps2_diag::env("SOTC_GLV117_CHECK") ? std::atoi(ps2_diag::env("SOTC_GLV117_CHECK")) : 0;
+        const uint32_t pkt = m.u32(kGl + 4u);
+        if (!(c.every > 0 && ++c.quads % static_cast<uint64_t>(c.every) == 0u) || !Ram::ok(pkt, 0x100u))
+        {
+            if (!quad117(g, sp, vs, n))
+                calls();
+            return;
+        }
+        // (static: nothing 16-aligned on the stack)
+        static std::vector<uint8_t> blk0(0x5300u), pk0(0x100u), blkA(0x5300u), pkA(0x100u), ctx0(sizeof(R5900Context)), ctxA(sizeof(R5900Context));
+        std::memcpy(blk0.data(), m.p(kGl), 0x5300u);
+        std::memcpy(pk0.data(), m.p(pkt), 0x100u);
+        std::memcpy(ctx0.data(), ctx, sizeof(R5900Context));
+        if (!quad117(g, sp, vs, n))
+        {
+            calls();
+            return;
+        }
+        std::memcpy(blkA.data(), m.p(kGl), 0x5300u);
+        std::memcpy(pkA.data(), m.p(pkt), 0x100u);
+        std::memcpy(ctxA.data(), ctx, sizeof(R5900Context));
+        std::memcpy(m.p(kGl), blk0.data(), 0x5300u);
+        std::memcpy(m.p(pkt), pk0.data(), 0x100u);
+        std::memcpy(ctx, ctx0.data(), sizeof(R5900Context));
+        calls();
+        ++c.checks;
+        const R5900Context *A = reinterpret_cast<const R5900Context *>(ctxA.data());
+        const bool blkSame = std::memcmp(blkA.data(), m.p(kGl), 0x5300u) == 0, pkSame = std::memcmp(pkA.data(), m.p(pkt), 0x100u) == 0;
+        const bool vuSame = std::memcmp(A->vu0_vf, ctx->vu0_vf, sizeof(ctx->vu0_vf)) == 0 && std::memcmp(&A->vu0_acc, &ctx->vu0_acc, 16) == 0 &&
+                            std::memcmp(&A->vu0_q, &ctx->vu0_q, 4) == 0 && A->vu0_clip_flags == ctx->vu0_clip_flags;
+        const bool fSame = std::memcmp(A->f, ctx->f, 3 * sizeof(float)) == 0;
+        if (!(blkSame && pkSame && vuSame && fSame) && c.differ++ < 20u)
+        {
+            uint32_t first = 0x5300u;
+            for (uint32_t i = 0; i < 0x5300u; ++i)
+                if (blkA[i] != m.p(kGl)[i])
+                {
+                    first = i;
+                    break;
+                }
+            std::fprintf(stderr, "[glv117c] DIFFERS (site %08x): gl block %d (first +%x) packet %d vu0 %d f %d\n", vs[0].site, blkSame ? 0 : 1, first, pkSame ? 0 : 1,
+                         vuSame ? 0 : 1, fSame ? 0 : 1);
+        }
+        if (c.checks % 500u == 0u)
+            std::fprintf(stderr, "[glv117c] %llu quads checked, %llu differ\n", (unsigned long long)c.checks, (unsigned long long)c.differ);
+    }
+
+    // ---- Round 128 (SOTC_IMM128, default on; A/B `imm128`, `r128all`): an
+    // immediate-mode quad (glBegin, the four vertices, glEnd) without the
+    // guest GIF packet when the native renderer draws. glEnd's hook only
+    // reads the packet's pairs back into the 2D assembler; the rest of glEnd
+    // (the GIF / DMA tags' counts, iosSetPacketPtrPath1, the chain into the
+    // layer's list, the pop of glBegin's push) feeds the PS2's GS, which
+    // draws nothing with the native renderer (GS::skipRaster: the chains are
+    // walked for SIGNAL / FINISH / LABEL only, and this A+D packet has none;
+    // round 103's ptcl103 leaves its packets out the same way). So: glBegin's
+    // state words (begin128, below), quad117's pairs into host memory, the
+    // pairs fed as glEndHook feeds them (the layer glBegin would have pushed,
+    // the haze's screen copy; sotc_native::immFeed128). glEnd's 0108CD80
+    // (the software clip of the primitives the kicks flagged, ADC bytes at
+    // +0x41f8; its own glBegin .. glEnd) is called as glEnd calls it, after
+    // the feed, when a flag is set; with none it does nothing. Not taken (the
+    // calls as before): another renderer, a packet already open (glBegin
+    // would return -1), an unknown primitive table entry, quad117 not taking
+    // the vertices. SOTC_IMM128_CHECK=<n>: every n-th quad both ways from the
+    // same state (the new path dry), the 2D assembler's input compared (the
+    // layer, the texture header, every pair), the gl block (but its packet
+    // pointers +4 / +8), VU0 and f0 - f2; the old path's result kept.
+    struct Imm128Stats
+    {
+        int every = -1;
+        uint64_t quads = 0, fast = 0, clipped = 0, byCalls = 0, checks = 0, differ = 0;
+    };
+    Imm128Stats g_imm128;
+
+    // glBegin(prim) (0x108e530 -> glBeginWithDlLayerNo(prim, iosDlGetLayer()))
+    // as its writes to the gl block, without the packet; pairs[0..3] its TEST
+    // and PRIM pairs, *layer the layer it would push. False (nothing
+    // written): a packet open, or a primitive / table entry not known.
+    bool begin128(const Ram m, uint32_t prim, uint64_t *pairs, uint32_t *layer)
+    {
+        if (prim >= 8u || m.u32(kGl + 4u) != 0u)
+            return false;
+        uint32_t s4;
+        switch (m.u32(0x011916E0u + prim * 4u))
+        {
+        case 0x0108BB98u: s4 = m.u32(kGl + 0x20u); break;
+        case 0x0108BBA4u: case 0x0108BBA8u: s4 = m.u32(kGl + 0x24u); break;
+        case 0x0108BBB0u: s4 = 0u; break;
+        default: return false;
+        }
+        const uint32_t gsPrim = m.u32(0x011916C0u + prim * 4u);
+        if (gsPrim >= 8u)
+            return false;
+        *layer = m.u32(0x002132D8u + 0x1Cu); // iosDlGetLayer: the display list's current layer
+        m.put32(kGl + 0xCu, prim);
+        m.put32(kGl + 0x41F0u, 0u);
+        m.put32(kGl + 0x5220u, 0u);
+        m.put32(kGl + 0x14u, 1u);
+        m.put32(kGl + 0x10u, gsPrim);
+        m.put32(kGl + 0x1B8u, 0u);
+        m.put32(kGl + 0x1B4u, m.u32(0x011916A0u + gsPrim * 4u) - 1u);
+        m.put64(kGl + 0x1B0u, m.u64(kGl + 0x1B0u) & ~0x10ull);
+        auto lw = [&](uint32_t off) -> int64_t { return static_cast<int64_t>(m.s32(kGl + off)); };
+        const int64_t test = (static_cast<int64_t>(static_cast<int32_t>(m.u32(kGl + 0x34u) + 1u)) << 17) | (lw(0x38u) != 0 ? 0x1164A : 0x11001);
+        pairs[0] = static_cast<uint64_t>(test);
+        pairs[1] = lw(0x30u) != 0 ? 0x48u : 0x47u;
+        const int64_t primValue = lw(0x10u) | (lw(0x30u) << 9) | (lw(0x28u) << 5) | (static_cast<int64_t>(static_cast<int32_t>(s4)) << 7) | (lw(0x14u) << 3) |
+                                  (lw(0x18u) << 4) | (lw(0x1Cu) << 6) | (lw(0x2Cu) << 8);
+        pairs[2] = static_cast<uint64_t>(primValue);
+        pairs[3] = 0u;
+        return true;
+    }
+
+    // The quad without the packet (above); false: nothing written, take the calls.
+    // dry (the check): the pairs made into *rec, nothing fed or clipped.
+    bool imm128(const G g, uint32_t sp, const Vert117 *vs, int n, uint32_t prim, bool haze, std::vector<uint64_t> *rec)
+    {
+        const Ram m = g.m;
+        uint64_t pairs[2u * (2u + 3u * 4u)];
+        uint32_t layer = 0, count = 0;
+        if (n > 4 || !begin128(m, prim, pairs, &layer))
+            return false;
+        if (!quad117(g, sp, vs, n, pairs + 4, &count))
+            return false; // (begin128's words are glBegin's own: the calls write them again)
+        count += 2u;
+        if (rec)
+        {
+            sotc_native::immRecord128(*rec, pairs, count, layer, haze);
+            return true;
+        }
+        sotc_native::immFeed128(g.rdram, pairs, count, layer, haze);
+        bool clipped = false;
+        for (int i = 0; i < n; ++i)
+            clipped |= m.u8(kGl + 0x41F8u + static_cast<uint32_t>(i)) != 0u;
+        if (clipped)
+        {
+            // glEnd's 0108CD80 (it sets +4 to 0 first: not open here either).
+            ++g_imm128.clipped;
+            sotc_decomp::clipNeeded(g.ctx); // round 134: guest code next (the register true for it if clip134 recorded the judgements)
+            g.call(0x0108CD80u, 0x0108D128u, sp);
+        }
+        SET_GPR_U32(g.ctx, 2, 0u);
+        return true;
+    }
+
+    // glBegin(prim) at beginSite, body() (the vertices), glEnd at endSite: as
+    // imm128 when it takes them, else as the calls.
+    template <class Body>
+    void prim128(const G g, uint32_t sp, const Vert117 *vs, int n, uint32_t prim, uint32_t beginSite, uint32_t endSite, bool haze, const Body &body)
+    {
+        Imm128Stats &st = g_imm128;
+        if (st.every < 0)
+            st.every = ps2_diag::env("SOTC_IMM128_CHECK") ? std::atoi(ps2_diag::env("SOTC_IMM128_CHECK")) : 0;
+        const bool on = sotc_decomp::imm128On() && sotc_decomp::glv117On() && sotc_native::nativeDraws();
+        ++st.quads;
+        auto calls = [&]
+        {
+            g.a(4, prim);
+            g.call(kGlBegin, beginSite, sp);
+            body();
+            g.call(kGlEnd, endSite, sp);
+        };
+        if (on && st.every > 0 && st.quads % static_cast<uint64_t>(st.every) == 0u)
+        {
+            const Ram m = g.m;
+            R5900Context *ctx = g.ctx;
+            static std::vector<uint8_t> blk0(0x5300u), blkN(0x5300u), ctx0(sizeof(R5900Context)), ctxN(sizeof(R5900Context));
+            static std::vector<uint64_t> recN, recO;
+            recN.clear();
+            recO.clear();
+            std::memcpy(blk0.data(), m.p(kGl), 0x5300u);
+            std::memcpy(ctx0.data(), ctx, sizeof(R5900Context));
+            const bool took = imm128(g, sp, vs, n, prim, haze, &recN);
+            bool clipped = false;
+            for (int i = 0; took && i < n; ++i)
+                clipped |= m.u8(kGl + 0x41F8u + static_cast<uint32_t>(i)) != 0u;
+            std::memcpy(blkN.data(), m.p(kGl), 0x5300u);
+            std::memcpy(ctxN.data(), ctx, sizeof(R5900Context));
+            std::memcpy(m.p(kGl), blk0.data(), 0x5300u);
+            std::memcpy(ctx, ctx0.data(), sizeof(R5900Context));
+            sotc_native::immArm128(&recO);
+            calls();
+            sotc_native::immArm128(nullptr);
+            if (!took)
+            {
+                ++st.byCalls;
+                return;
+            }
+            ++st.checks;
+            // The gl block but its packet pointers (+4, +8): the old path leaves +8 at its packet.
+            std::memcpy(blkN.data() + 4u, m.p(kGl) + 4u, 8u);
+            const bool recSame = recN == recO;
+            // With a clip flag 0108CD80 ran in the old path only (its work area, VU0): the record alone.
+            const bool blkSame = clipped || std::memcmp(blkN.data(), m.p(kGl), 0x5300u) == 0;
+            const R5900Context *N = reinterpret_cast<const R5900Context *>(ctxN.data());
+            const bool vuSame = clipped || (std::memcmp(N->vu0_vf, ctx->vu0_vf, sizeof(ctx->vu0_vf)) == 0 && std::memcmp(&N->vu0_acc, &ctx->vu0_acc, 16) == 0 &&
+                                            std::memcmp(&N->vu0_q, &ctx->vu0_q, 4) == 0 && N->vu0_clip_flags == ctx->vu0_clip_flags &&
+                                            std::memcmp(N->f, ctx->f, 3 * sizeof(float)) == 0);
+            if (!(recSame && blkSame && vuSame) && st.differ++ < 20u)
+            {
+                uint32_t first = 0x5300u;
+                for (uint32_t i = 0; i < 0x5300u; ++i)
+                    if (blkN[i] != m.p(kGl)[i])
+                    {
+                        first = i;
+                        break;
+                    }
+                size_t at = 0;
+                while (at < recN.size() && at < recO.size() && recN[at] == recO[at])
+                    ++at;
+                std::fprintf(stderr, "[imm128c] DIFFERS (site %08x): record %d (sizes %u / %u, first word %u: %016llx / %016llx) gl block %d (first +%x) vu0/f %d clipped %d\n",
+                             beginSite, recSame ? 0 : 1, (unsigned)recN.size(), (unsigned)recO.size(), (unsigned)at, (unsigned long long)(at < recN.size() ? recN[at] : 0),
+                             (unsigned long long)(at < recO.size() ? recO[at] : 0), blkSame ? 0 : 1, first, vuSame ? 0 : 1, clipped ? 1 : 0);
+            }
+            if (st.checks % 500u == 0u)
+                std::fprintf(stderr, "[imm128c] %llu quads checked, %llu differ (quads %llu fast %llu clipped %llu by the calls %llu)\n", (unsigned long long)st.checks,
+                             (unsigned long long)st.differ, (unsigned long long)st.quads, (unsigned long long)st.fast, (unsigned long long)st.clipped,
+                             (unsigned long long)st.byCalls);
+            return;
+        }
+        if (on && imm128(g, sp, vs, n, prim, haze, nullptr))
+        {
+            ++st.fast;
+            static const bool log = ps2_diag::env("SOTC_IMM128_LOG") != nullptr;
+            if (log && st.fast % 20000u == 0u)
+                std::fprintf(stderr, "[imm128] quads %llu fast %llu clipped %llu\n", (unsigned long long)st.quads, (unsigned long long)st.fast,
+                             (unsigned long long)st.clipped);
+            return;
+        }
+        if (on)
+            ++st.byCalls;
+        calls();
+    }
+
+    // ---- Round 117 (glv117): manager_sub_01142350, one particle as a quad of
+    // the gl* immediate API (the quads drawer 01141D20, a particle a call;
+    // a0 its 48-byte record, a1 the size pair, a2 the world matrix). The
+    // frame: the constant corner block (0x1195900) at sp, memset(sp + 0x80,
+    // 0, 0x40) and the size pair into its corners, copied to sp + 0x40 (the
+    // corners' ST); iosRotMatrixAxis(sp + 0xc0, the record's axis +0x30,
+    // 1, the angle +0x40) (a guest call); the VU0 block (the corners scaled
+    // by the record's size +0xc, rotated, x the world matrix, + the position,
+    // into sp + 0x80: the recompiled statements, generated by
+    // r117/gen_1142350.py); glBegin(5) (a guest call), glColor4fv(+0x10),
+    // the four corners through quad117 (glTexCoord2fv + glVertex4fv + the
+    // kick each), glEnd (a guest call; its hook draws). Off (or quad117 not
+    // taking them): the four vertices as the calls (the recompiled code from
+    // 0x11425a0, the registers as there).
+    void quad1142350(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        constexpr uint32_t kSelf = 0x01142350u;
+        G g(rdram, ctx, runtime);
+        const Ram m = g.m;
+        const uint32_t s0 = GPR_U32(ctx, 4), s1in = GPR_U32(ctx, 5), s3 = GPR_U32(ctx, 6);
+        const uint32_t sp0 = GPR_U32(ctx, 29), ra0 = GPR_U32(ctx, 31), sp = sp0 - 0x130u;
+        if (!sotc_decomp::glv117On() || !Ram::ok(sp, 0x130u) || !Ram::ok(s0, 0x50u) || !Ram::ok(s1in, 8u) || !Ram::ok(s3, 0x40u) ||
+            sotc_decomp::jalTarget(rdram, 0x0114240Cu) != 0x001283D0u)
+            return fallback(rdram, ctx, runtime, kSelf);
+        const uint64_t e16 = GPR_U64(ctx, 16), e17 = GPR_U64(ctx, 17), e18 = GPR_U64(ctx, 18), e19 = GPR_U64(ctx, 19), e20 = GPR_U64(ctx, 20);
+        m.put64(sp + 0x120u, e20);
+        m.put64(sp + 0x100u, e16);
+        m.put64(sp + 0x108u, e17);
+        m.put64(sp + 0x118u, e19);
+        m.put64(sp + 0x110u, e18);
+        m.put64(sp + 0x128u, ra0);
+        const uint32_t s4 = sp + 0x80u, s2 = sp + 0xC0u;
+        SET_GPR_U32(ctx, 29, sp);
+        SET_GPR_U32(ctx, 16, s0);
+        SET_GPR_U32(ctx, 17, s1in);
+        SET_GPR_U32(ctx, 19, s3);
+        SET_GPR_U32(ctx, 20, s4);
+        for (uint32_t i = 0; i < 0x40u; i += 8u)
+            m.put64(sp + i, m.u64(0x01195900u + i));
+        std::memset(m.p(s4), 0, 0x40u); // memset (0x1283d0, checked above): the same bytes
+        {
+            const float f0 = m.f32(s1in), f1 = m.f32(s1in + 4u);
+            m.putf(sp + 0xB0u, f0);
+            m.putf(sp + 0x90u, f0);
+            m.putf(sp + 0xB4u, f1);
+            m.putf(sp + 0xA4u, f1);
+            for (uint32_t i = 0; i < 0x40u; i += 8u)
+                m.put64(sp + 0x40u + i, m.u64(sp + 0x80u + i));
+        }
+        SET_GPR_U32(ctx, 18, s2);
+        g.a(4, s2);
+        g.a(5, s0 + 0x30u);
+        g.a(6, 1u);
+        ctx->f[12] = m.f32(s0 + 0x40u);
+        g.call(0x01133748u, 0x0114247Cu, sp); // iosRotMatrixAxis
+        {
+            const float f0 = m.f32(s0 + 0xCu);
+            ctx->f[0] = f0;
+            uint32_t bits;
+            std::memcpy(&bits, &f0, 4);
+            SET_GPR_U32(ctx, 8, bits);
+        }
+        ctx->vu0_vf[14] = _mm_castsi128_ps(m.qi(s2 + 0u));
+        ctx->vu0_vf[15] = _mm_castsi128_ps(m.qi(s2 + 16u));
+        ctx->vu0_vf[16] = _mm_castsi128_ps(m.qi(s2 + 32u));
+        // (lwc1 f0, 0xc(s0); mfc1 t0, f0; qmtc2.ni t0, vf10: below)
+        ctx->vu0_vf[10] = _mm_castsi128_ps(GPR_VEC(ctx, 8));
+        ctx->vu0_vf[17] = _mm_castsi128_ps(m.qi(s2 + 48u));
+        { __m128 res = _mm_shuffle_ps(ctx->vu0_vf[0], ctx->vu0_vf[0], _MM_SHUFFLE(0,3,2,1)); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[26] = _mm_blendv_ps(ctx->vu0_vf[26], res, _mm_castsi128_ps(mask)); }
+        { __m128 res = _mm_shuffle_ps(ctx->vu0_vf[26], ctx->vu0_vf[26], _MM_SHUFFLE(0,3,2,1)); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[25] = _mm_blendv_ps(ctx->vu0_vf[25], res, _mm_castsi128_ps(mask)); }
+        { __m128 res = _mm_shuffle_ps(ctx->vu0_vf[25], ctx->vu0_vf[25], _MM_SHUFFLE(0,3,2,1)); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[24] = _mm_blendv_ps(ctx->vu0_vf[24], res, _mm_castsi128_ps(mask)); }
+        { __m128 res = PS2_VMUL_K(1, 0, ctx->vu0_vf[25], _mm_shuffle_ps(ctx->vu0_vf[10], ctx->vu0_vf[10], _MM_SHUFFLE(0,0,0,0))); __m128i mask = _mm_set_epi32(0, 0, -1, 0); ctx->vu0_vf[25] = _mm_blendv_ps(ctx->vu0_vf[25], res, _mm_castsi128_ps(mask)); }
+        { __m128 res = PS2_VMUL_K(1, 0, ctx->vu0_vf[24], ctx->vu0_vf[10]); __m128i mask = _mm_set_epi32(0, 0, 0, -1); ctx->vu0_vf[24] = PS2_VBLEND(ctx->vu0_vf[24], res, _mm_castsi128_ps(mask)); }
+        { __m128 res = PS2_VMUL_K(0, 1, ctx->vu0_vf[14], _mm_shuffle_ps(ctx->vu0_vf[26], ctx->vu0_vf[26], _MM_SHUFFLE(0,0,0,0))); ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, res, _mm_castsi128_ps(_mm_set_epi32(-1, -1, -1, -1))); }
+        { __m128 mul_res = PS2_VMUL_K(0, 1, ctx->vu0_vf[15], _mm_shuffle_ps(ctx->vu0_vf[26], ctx->vu0_vf[26], _MM_SHUFFLE(1,1,1,1))); __m128 res = PS2_VADD_K(1, 1, ctx->vu0_acc, mul_res); ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, res, _mm_castsi128_ps(_mm_set_epi32(-1, -1, -1, -1))); }
+        { __m128 mul_res = PS2_VMUL_K(0, 1, ctx->vu0_vf[16], _mm_shuffle_ps(ctx->vu0_vf[26], ctx->vu0_vf[26], _MM_SHUFFLE(2,2,2,2))); __m128 res = PS2_VADD_K(1, 1, ctx->vu0_acc, mul_res); ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, res, _mm_castsi128_ps(_mm_set_epi32(-1, -1, -1, -1))); }
+        { __m128 mul_res = PS2_VMUL_K(0, 1, ctx->vu0_vf[17], _mm_shuffle_ps(ctx->vu0_vf[26], ctx->vu0_vf[26], _MM_SHUFFLE(3,3,3,3))); __m128 res = PS2_VADD_K(1, 1, ctx->vu0_acc, mul_res); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[26] = _mm_blendv_ps(ctx->vu0_vf[26], res, _mm_castsi128_ps(mask)); }
+        { __m128 res = PS2_VMUL_K(0, 1, ctx->vu0_vf[14], _mm_shuffle_ps(ctx->vu0_vf[25], ctx->vu0_vf[25], _MM_SHUFFLE(0,0,0,0))); ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, res, _mm_castsi128_ps(_mm_set_epi32(-1, -1, -1, -1))); }
+        { __m128 mul_res = PS2_VMUL_K(0, 1, ctx->vu0_vf[15], _mm_shuffle_ps(ctx->vu0_vf[25], ctx->vu0_vf[25], _MM_SHUFFLE(1,1,1,1))); __m128 res = PS2_VADD_K(1, 1, ctx->vu0_acc, mul_res); ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, res, _mm_castsi128_ps(_mm_set_epi32(-1, -1, -1, -1))); }
+        { __m128 mul_res = PS2_VMUL_K(0, 1, ctx->vu0_vf[16], _mm_shuffle_ps(ctx->vu0_vf[25], ctx->vu0_vf[25], _MM_SHUFFLE(2,2,2,2))); __m128 res = PS2_VADD_K(1, 1, ctx->vu0_acc, mul_res); ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, res, _mm_castsi128_ps(_mm_set_epi32(-1, -1, -1, -1))); }
+        { __m128 mul_res = PS2_VMUL_K(0, 1, ctx->vu0_vf[17], _mm_shuffle_ps(ctx->vu0_vf[25], ctx->vu0_vf[25], _MM_SHUFFLE(3,3,3,3))); __m128 res = PS2_VADD_K(1, 1, ctx->vu0_acc, mul_res); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[25] = _mm_blendv_ps(ctx->vu0_vf[25], res, _mm_castsi128_ps(mask)); }
+        { __m128 res = PS2_VMUL_K(0, 1, ctx->vu0_vf[14], _mm_shuffle_ps(ctx->vu0_vf[24], ctx->vu0_vf[24], _MM_SHUFFLE(0,0,0,0))); ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, res, _mm_castsi128_ps(_mm_set_epi32(-1, -1, -1, -1))); }
+        { __m128 mul_res = PS2_VMUL_K(0, 1, ctx->vu0_vf[15], _mm_shuffle_ps(ctx->vu0_vf[24], ctx->vu0_vf[24], _MM_SHUFFLE(1,1,1,1))); __m128 res = PS2_VADD_K(1, 1, ctx->vu0_acc, mul_res); ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, res, _mm_castsi128_ps(_mm_set_epi32(-1, -1, -1, -1))); }
+        { __m128 mul_res = PS2_VMUL_K(0, 1, ctx->vu0_vf[16], _mm_shuffle_ps(ctx->vu0_vf[24], ctx->vu0_vf[24], _MM_SHUFFLE(2,2,2,2))); __m128 res = PS2_VADD_K(1, 1, ctx->vu0_acc, mul_res); ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, res, _mm_castsi128_ps(_mm_set_epi32(-1, -1, -1, -1))); }
+        { __m128 mul_res = PS2_VMUL_K(0, 1, ctx->vu0_vf[17], _mm_shuffle_ps(ctx->vu0_vf[24], ctx->vu0_vf[24], _MM_SHUFFLE(3,3,3,3))); __m128 res = PS2_VADD_K(1, 1, ctx->vu0_acc, mul_res); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[24] = _mm_blendv_ps(ctx->vu0_vf[24], res, _mm_castsi128_ps(mask)); }
+        ctx->vu0_vf[14] = _mm_castsi128_ps(m.qi(s3 + 0u));
+        ctx->vu0_vf[15] = _mm_castsi128_ps(m.qi(s3 + 16u));
+        ctx->vu0_vf[16] = _mm_castsi128_ps(m.qi(s3 + 32u));
+        ctx->vu0_vf[17] = _mm_castsi128_ps(m.qi(s3 + 48u));
+        { __m128 res = PS2_VMUL_K(0, 1, ctx->vu0_vf[14], _mm_shuffle_ps(ctx->vu0_vf[24], ctx->vu0_vf[24], _MM_SHUFFLE(0,0,0,0))); ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, res, _mm_castsi128_ps(_mm_set_epi32(-1, -1, -1, -1))); }
+        { __m128 mul_res = PS2_VMUL_K(0, 1, ctx->vu0_vf[15], _mm_shuffle_ps(ctx->vu0_vf[24], ctx->vu0_vf[24], _MM_SHUFFLE(1,1,1,1))); __m128 res = PS2_VADD_K(1, 1, ctx->vu0_acc, mul_res); ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, res, _mm_castsi128_ps(_mm_set_epi32(-1, -1, -1, -1))); }
+        { __m128 mul_res = PS2_VMUL_K(0, 1, ctx->vu0_vf[16], _mm_shuffle_ps(ctx->vu0_vf[24], ctx->vu0_vf[24], _MM_SHUFFLE(2,2,2,2))); __m128 res = PS2_VADD_K(1, 1, ctx->vu0_acc, mul_res); ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, res, _mm_castsi128_ps(_mm_set_epi32(-1, -1, -1, -1))); }
+        { __m128 mul_res = PS2_VMUL_K(0, 1, ctx->vu0_vf[17], _mm_shuffle_ps(ctx->vu0_vf[24], ctx->vu0_vf[24], _MM_SHUFFLE(3,3,3,3))); __m128 res = PS2_VADD_K(1, 1, ctx->vu0_acc, mul_res); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[24] = _mm_blendv_ps(ctx->vu0_vf[24], res, _mm_castsi128_ps(mask)); }
+        { __m128 res = PS2_VMUL_K(0, 1, ctx->vu0_vf[14], _mm_shuffle_ps(ctx->vu0_vf[25], ctx->vu0_vf[25], _MM_SHUFFLE(0,0,0,0))); ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, res, _mm_castsi128_ps(_mm_set_epi32(-1, -1, -1, -1))); }
+        { __m128 mul_res = PS2_VMUL_K(0, 1, ctx->vu0_vf[15], _mm_shuffle_ps(ctx->vu0_vf[25], ctx->vu0_vf[25], _MM_SHUFFLE(1,1,1,1))); __m128 res = PS2_VADD_K(1, 1, ctx->vu0_acc, mul_res); ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, res, _mm_castsi128_ps(_mm_set_epi32(-1, -1, -1, -1))); }
+        { __m128 mul_res = PS2_VMUL_K(0, 1, ctx->vu0_vf[16], _mm_shuffle_ps(ctx->vu0_vf[25], ctx->vu0_vf[25], _MM_SHUFFLE(2,2,2,2))); __m128 res = PS2_VADD_K(1, 1, ctx->vu0_acc, mul_res); ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, res, _mm_castsi128_ps(_mm_set_epi32(-1, -1, -1, -1))); }
+        { __m128 mul_res = PS2_VMUL_K(0, 1, ctx->vu0_vf[17], _mm_shuffle_ps(ctx->vu0_vf[25], ctx->vu0_vf[25], _MM_SHUFFLE(3,3,3,3))); __m128 res = PS2_VADD_K(1, 1, ctx->vu0_acc, mul_res); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[25] = _mm_blendv_ps(ctx->vu0_vf[25], res, _mm_castsi128_ps(mask)); }
+        { __m128 res = PS2_VMUL_K(0, 1, ctx->vu0_vf[14], _mm_shuffle_ps(ctx->vu0_vf[26], ctx->vu0_vf[26], _MM_SHUFFLE(0,0,0,0))); ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, res, _mm_castsi128_ps(_mm_set_epi32(-1, -1, -1, -1))); }
+        { __m128 mul_res = PS2_VMUL_K(0, 1, ctx->vu0_vf[15], _mm_shuffle_ps(ctx->vu0_vf[26], ctx->vu0_vf[26], _MM_SHUFFLE(1,1,1,1))); __m128 res = PS2_VADD_K(1, 1, ctx->vu0_acc, mul_res); ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, res, _mm_castsi128_ps(_mm_set_epi32(-1, -1, -1, -1))); }
+        { __m128 mul_res = PS2_VMUL_K(0, 1, ctx->vu0_vf[16], _mm_shuffle_ps(ctx->vu0_vf[26], ctx->vu0_vf[26], _MM_SHUFFLE(2,2,2,2))); __m128 res = PS2_VADD_K(1, 1, ctx->vu0_acc, mul_res); ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, res, _mm_castsi128_ps(_mm_set_epi32(-1, -1, -1, -1))); }
+        { __m128 mul_res = PS2_VMUL_K(0, 1, ctx->vu0_vf[17], _mm_shuffle_ps(ctx->vu0_vf[26], ctx->vu0_vf[26], _MM_SHUFFLE(3,3,3,3))); __m128 res = PS2_VADD_K(1, 1, ctx->vu0_acc, mul_res); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[26] = _mm_blendv_ps(ctx->vu0_vf[26], res, _mm_castsi128_ps(mask)); }
+        ctx->vu0_vf[27] = _mm_castsi128_ps(m.qi(s0 + 0u));
+        ctx->vu0_vf[20] = _mm_castsi128_ps(m.qi(sp + 0u));
+        ctx->vu0_vf[21] = _mm_castsi128_ps(m.qi(sp + 16u));
+        ctx->vu0_vf[22] = _mm_castsi128_ps(m.qi(sp + 32u));
+        { __m128i mask = _mm_set_epi32(-1, 0, 0, 0); ctx->vu0_vf[27] = _mm_blendv_ps(ctx->vu0_vf[27], ctx->vu0_vf[0], _mm_castsi128_ps(mask)); }
+        ctx->vu0_vf[23] = _mm_castsi128_ps(m.qi(sp + 48u));
+        { __m128 res = PS2_VMUL_K(1, 0, ctx->vu0_vf[24], _mm_shuffle_ps(ctx->vu0_vf[20], ctx->vu0_vf[20], _MM_SHUFFLE(0,0,0,0))); ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, res, _mm_castsi128_ps(_mm_set_epi32(-1, -1, -1, -1))); }
+        { __m128 mul_res = PS2_VMUL_K(1, 0, ctx->vu0_vf[25], _mm_shuffle_ps(ctx->vu0_vf[20], ctx->vu0_vf[20], _MM_SHUFFLE(1,1,1,1))); __m128 res = PS2_VADD_K(1, 1, ctx->vu0_acc, mul_res); ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, res, _mm_castsi128_ps(_mm_set_epi32(-1, -1, -1, -1))); }
+        { __m128 mul_res = PS2_VMUL_K(1, 0, ctx->vu0_vf[26], _mm_shuffle_ps(ctx->vu0_vf[20], ctx->vu0_vf[20], _MM_SHUFFLE(2,2,2,2))); __m128 res = PS2_VADD_K(1, 1, ctx->vu0_acc, mul_res); ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, res, _mm_castsi128_ps(_mm_set_epi32(-1, -1, -1, -1))); }
+        { __m128 mul_res = PS2_VMUL_K(0, 1, ctx->vu0_vf[27], _mm_shuffle_ps(ctx->vu0_vf[0], ctx->vu0_vf[0], _MM_SHUFFLE(3,3,3,3))); __m128 res = PS2_VADD_K(1, 1, ctx->vu0_acc, mul_res); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[20] = _mm_blendv_ps(ctx->vu0_vf[20], res, _mm_castsi128_ps(mask)); }
+        { __m128 res = PS2_VMUL_K(1, 0, ctx->vu0_vf[24], _mm_shuffle_ps(ctx->vu0_vf[21], ctx->vu0_vf[21], _MM_SHUFFLE(0,0,0,0))); ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, res, _mm_castsi128_ps(_mm_set_epi32(-1, -1, -1, -1))); }
+        { __m128 mul_res = PS2_VMUL_K(1, 0, ctx->vu0_vf[25], _mm_shuffle_ps(ctx->vu0_vf[21], ctx->vu0_vf[21], _MM_SHUFFLE(1,1,1,1))); __m128 res = PS2_VADD_K(1, 1, ctx->vu0_acc, mul_res); ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, res, _mm_castsi128_ps(_mm_set_epi32(-1, -1, -1, -1))); }
+        { __m128 mul_res = PS2_VMUL_K(1, 0, ctx->vu0_vf[26], _mm_shuffle_ps(ctx->vu0_vf[21], ctx->vu0_vf[21], _MM_SHUFFLE(2,2,2,2))); __m128 res = PS2_VADD_K(1, 1, ctx->vu0_acc, mul_res); ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, res, _mm_castsi128_ps(_mm_set_epi32(-1, -1, -1, -1))); }
+        { __m128 mul_res = PS2_VMUL_K(0, 1, ctx->vu0_vf[27], _mm_shuffle_ps(ctx->vu0_vf[0], ctx->vu0_vf[0], _MM_SHUFFLE(3,3,3,3))); __m128 res = PS2_VADD_K(1, 1, ctx->vu0_acc, mul_res); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[21] = _mm_blendv_ps(ctx->vu0_vf[21], res, _mm_castsi128_ps(mask)); }
+        { __m128 res = PS2_VMUL_K(1, 0, ctx->vu0_vf[24], _mm_shuffle_ps(ctx->vu0_vf[22], ctx->vu0_vf[22], _MM_SHUFFLE(0,0,0,0))); ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, res, _mm_castsi128_ps(_mm_set_epi32(-1, -1, -1, -1))); }
+        { __m128 mul_res = PS2_VMUL_K(1, 0, ctx->vu0_vf[25], _mm_shuffle_ps(ctx->vu0_vf[22], ctx->vu0_vf[22], _MM_SHUFFLE(1,1,1,1))); __m128 res = PS2_VADD_K(1, 1, ctx->vu0_acc, mul_res); ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, res, _mm_castsi128_ps(_mm_set_epi32(-1, -1, -1, -1))); }
+        { __m128 mul_res = PS2_VMUL_K(1, 0, ctx->vu0_vf[26], _mm_shuffle_ps(ctx->vu0_vf[22], ctx->vu0_vf[22], _MM_SHUFFLE(2,2,2,2))); __m128 res = PS2_VADD_K(1, 1, ctx->vu0_acc, mul_res); ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, res, _mm_castsi128_ps(_mm_set_epi32(-1, -1, -1, -1))); }
+        { __m128 mul_res = PS2_VMUL_K(0, 1, ctx->vu0_vf[27], _mm_shuffle_ps(ctx->vu0_vf[0], ctx->vu0_vf[0], _MM_SHUFFLE(3,3,3,3))); __m128 res = PS2_VADD_K(1, 1, ctx->vu0_acc, mul_res); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[22] = _mm_blendv_ps(ctx->vu0_vf[22], res, _mm_castsi128_ps(mask)); }
+        { __m128 res = PS2_VMUL_K(1, 0, ctx->vu0_vf[24], _mm_shuffle_ps(ctx->vu0_vf[23], ctx->vu0_vf[23], _MM_SHUFFLE(0,0,0,0))); ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, res, _mm_castsi128_ps(_mm_set_epi32(-1, -1, -1, -1))); }
+        { __m128 mul_res = PS2_VMUL_K(1, 0, ctx->vu0_vf[25], _mm_shuffle_ps(ctx->vu0_vf[23], ctx->vu0_vf[23], _MM_SHUFFLE(1,1,1,1))); __m128 res = PS2_VADD_K(1, 1, ctx->vu0_acc, mul_res); ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, res, _mm_castsi128_ps(_mm_set_epi32(-1, -1, -1, -1))); }
+        { __m128 mul_res = PS2_VMUL_K(1, 0, ctx->vu0_vf[26], _mm_shuffle_ps(ctx->vu0_vf[23], ctx->vu0_vf[23], _MM_SHUFFLE(2,2,2,2))); __m128 res = PS2_VADD_K(1, 1, ctx->vu0_acc, mul_res); ctx->vu0_acc = _mm_blendv_ps(ctx->vu0_acc, res, _mm_castsi128_ps(_mm_set_epi32(-1, -1, -1, -1))); }
+        { __m128 mul_res = PS2_VMUL_K(0, 1, ctx->vu0_vf[27], _mm_shuffle_ps(ctx->vu0_vf[0], ctx->vu0_vf[0], _MM_SHUFFLE(3,3,3,3))); __m128 res = PS2_VADD_K(1, 1, ctx->vu0_acc, mul_res); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[23] = _mm_blendv_ps(ctx->vu0_vf[23], res, _mm_castsi128_ps(mask)); }
+        m.putqi(s4 + 0u, _mm_castps_si128(ctx->vu0_vf[20]));
+        m.putqi(s4 + 16u, _mm_castps_si128(ctx->vu0_vf[21]));
+        m.putqi(s4 + 32u, _mm_castps_si128(ctx->vu0_vf[22]));
+        m.putqi(s4 + 48u, _mm_castps_si128(ctx->vu0_vf[23]));
+
+        SET_GPR_U32(ctx, 17, 0u);
+        // (glBegin below, in prim128: it writes nothing glColor4fv or the corners read)
+        // glColor4fv(+0x10): glColor4f's words and clamp; f1 - f5 as it leaves them.
+        {
+            const uint32_t c = s0 + 0x10u;
+            glColor4f(ctx, m, m.f32(c), m.f32(c + 4u), m.f32(c + 8u), m.f32(c + 0xCu));
+            ctx->f[1] = FPU_MUL_S(m.f32(c + 8u), 255.0f);
+            ctx->f[2] = 255.0f;
+            ctx->f[3] = 128.0f;
+            ctx->f[4] = 255.0f;
+            ctx->f[5] = 0.0f;
+        }
+        const uint32_t st = sp + 0x40u;
+        Vert117 vs[4];
+        for (int i = 0; i < 4; ++i)
+        {
+            vs[i].alpha = 0.0f;
+            vs[i].u = m.f32(st + i * 16u);
+            vs[i].v = m.f32(st + i * 16u + 4u);
+            vs[i].pos = s4 + i * 16u;
+            vs[i].site = 0x011425B4u;
+            vs[i].colour = false;
+        }
+        auto calls = [&]
+        {
+            // The loop as the code has it: glTexCoord2fv(sp + 0x40 + 16 i), glVertex4fv(sp + 0x80 + 16 i) (guest calls).
+            for (uint32_t i = 0; i < 4u; ++i)
+            {
+                SET_GPR_U32(ctx, 16, i << 4);
+                SET_GPR_U32(ctx, 17, i + 1u);
+                g.a(4, st + (i << 4));
+                g.call(0x0108E9F0u, 0x011425ACu, sp);
+                g.a(4, s4 + (i << 4));
+                g.call(0x0108ECA0u, 0x011425B4u, sp);
+            }
+        };
+        // Round 128 (imm128): glBegin(5), the corners, glEnd without the GIF packet (prim128), else as the calls.
+        prim128(g, sp, vs, 4, 5u, 0x01142590u, 0x011425C8u, false,
+                [&]
+                {
+                    SET_GPR_U32(ctx, 18, st);
+                    SET_GPR_U32(ctx, 20, s4);
+                    quadRun117(g, sp, vs, 4, calls);
+                    SET_GPR_U32(ctx, 16, 0x30u);
+                    SET_GPR_U32(ctx, 17, 4u);
+                });
+        SET_GPR_U64(ctx, 16, e16);
+        SET_GPR_U64(ctx, 17, e17);
+        SET_GPR_U64(ctx, 18, e18);
+        SET_GPR_U64(ctx, 19, e19);
+        SET_GPR_U64(ctx, 20, e20);
+        SET_GPR_U32(ctx, 29, sp0);
+        SET_GPR_U32(ctx, 31, ra0);
+        returnTo(ctx);
+    }
+
     void strips(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        // Round 134: prof129 zones (0x2010 set-up / tail, 0x2011 a segment's math, 0x2012 its two quads): the
+        // console's 3.2% at pc 0x10f4020 (this loop after glZOffset's return) told apart.
+        const ps2_load::GameZone zone134(0x2010u);
+        const auto zone = [](uint32_t z)
+        {
+            if (ps2_load::t_slot == ps2_load::kGame)
+                ps2_load::gameZone.store(z, std::memory_order_relaxed);
+        };
         G g(rdram, ctx, runtime);
         const Ram m = g.m;
         const uint32_t sp0 = GPR_U32(ctx, 29), ra0 = GPR_U32(ctx, 31), sp = sp0 - 0x1F0u;
@@ -2309,6 +3739,7 @@ namespace decomp_walk
                     return runToReturn(rdram, ctx, runtime, sotc_decomp::recompiled(kStrips), ra0, sp0);
                 }
                 sreg(17, s1);
+                zone(0x2011u);
                 const int32_t a = m.s16(s1 + 8u), b = m.s16(s1 + 0x20u);
                 m.putf(sp + 0x80u, m.f32(s1 + 0xCu));
                 m.putf(sp + 0x84u, m.f32(s1 + 0x10u));
@@ -2391,20 +3822,34 @@ namespace decomp_walk
                         glTexCoord2f(ctx, m, u, v);
                         glVertex3fv(g, pos, site, sp);
                     };
-                    g.a(4, 5u);
-                    g.call(kGlBegin, 0x010F4664u, sp);
-                    vertex(f20, m.f32(s6), m.f32(sp + 0xE4u), sp + 0xA0u, 0x010F4690u);
-                    vertex(f21, m.f32(sp + 0xF0u), m.f32(sp + 0xF4u), sp + 0xB0u, 0x010F46BCu);
-                    vertex(f20, m.f32(s6), m.f32(sp + 0xE4u), sp + 0x120u, 0x010F46E8u);
-                    vertex(f21, m.f32(sp + 0xF0u), m.f32(sp + 0xF4u), sp + 0x130u, 0x010F4714u);
-                    g.call(kGlEnd, 0x010F471Cu, sp);
-                    g.a(4, 5u);
-                    g.call(kGlBegin, 0x010F4724u, sp);
-                    vertex(f20, m.f32(s6), m.f32(sp + 0xE4u), sp + 0x120u, 0x010F4750u);
-                    vertex(f21, m.f32(sp + 0xF0u), m.f32(sp + 0xF4u), sp + 0x130u, 0x010F477Cu);
-                    vertex(FPU_MUL_S(f20, f28), m.f32(s6), m.f32(sp + 0xE4u), sp + 0x100u, 0x010F47A8u);
-                    vertex(FPU_MUL_S(f21, f28), m.f32(sp + 0xF0u), m.f32(sp + 0xF4u), sp + 0x110u, 0x010F47D4u);
-                    g.call(kGlEnd, 0x010F47DCu, sp);
+                    // Round 117 (glv117): each strip's four vertices in one pass (quad117), else as the calls.
+                    auto four = [&](const Vert117 *vs)
+                    {
+                        auto calls = [&]
+                        {
+                            for (int i = 0; i < 4; ++i)
+                                vertex(vs[i].alpha, vs[i].u, vs[i].v, vs[i].pos, vs[i].site);
+                        };
+                        if (!sotc_decomp::glv117On())
+                            return calls();
+                        quadRun117(g, sp, vs, 4, calls);
+                    };
+                    // Round 128 (imm128): each glBegin .. glEnd without the GIF packet (prim128), else as the calls.
+                    zone(0x2012u);
+                    {
+                        const Vert117 vs[4] = {{f20, m.f32(s6), m.f32(sp + 0xE4u), sp + 0xA0u, 0x010F4690u},
+                                               {f21, m.f32(sp + 0xF0u), m.f32(sp + 0xF4u), sp + 0xB0u, 0x010F46BCu},
+                                               {f20, m.f32(s6), m.f32(sp + 0xE4u), sp + 0x120u, 0x010F46E8u},
+                                               {f21, m.f32(sp + 0xF0u), m.f32(sp + 0xF4u), sp + 0x130u, 0x010F4714u}};
+                        prim128(g, sp, vs, 4, 5u, 0x010F4664u, 0x010F471Cu, true, [&] { four(vs); });
+                    }
+                    {
+                        const Vert117 vs[4] = {{f20, m.f32(s6), m.f32(sp + 0xE4u), sp + 0x120u, 0x010F4750u},
+                                               {f21, m.f32(sp + 0xF0u), m.f32(sp + 0xF4u), sp + 0x130u, 0x010F477Cu},
+                                               {FPU_MUL_S(f20, f28), m.f32(s6), m.f32(sp + 0xE4u), sp + 0x100u, 0x010F47A8u},
+                                               {FPU_MUL_S(f21, f28), m.f32(sp + 0xF0u), m.f32(sp + 0xF4u), sp + 0x110u, 0x010F47D4u}};
+                        prim128(g, sp, vs, 4, 5u, 0x010F4724u, 0x010F47DCu, true, [&] { four(vs); });
+                    }
                 }
                 (void)ax;
                 (void)ay;
@@ -2422,6 +3867,7 @@ namespace decomp_walk
             ctx->f[21] = f21;
             ctx->f[22] = f22;
         }
+        zone(0x2010u);
         ctx->f[12] = 1.0f;
         g.call(kGlZOffset, 0x010F4804u, sp);
         enable(kGlDisable, 0u, 0x010F480Cu);
@@ -2552,6 +3998,115 @@ namespace decomp_walk
         returnTo(ctx);
     }
 
+    // ---- Round 95 (join95): the particle geodisps held back by the group pass
+    // while the guest worker steps them, joined inside the light pass (after
+    // the layout objects' light callbacks: decomp_light calls late95 there
+    // through sotc_decomp::g_lightMid95), or here when the light pass is not
+    // reached. Each one as the group pass's geodisp branch would have done it
+    // (its clip, unless the job ran it; the shown test; the key), then
+    // straight into the second list, where the copy loop puts every geodisp
+    // (no layout class); the first list is left without them (its chains
+    // already relinked into the second: nothing reads it after the copy).
+    // `nodes` gets the sort nodes added, for their light callbacks. Their
+    // order among equal keys can differ (added last).
+    namespace late95
+    {
+        std::vector<uint32_t> g_deferred;
+        uint64_t g_walks = 0, g_inLight = 0, g_objects = 0, g_waitUs = 0, g_early = 0, g_forced = 0, g_atEnd = 0, g_inDraw = 0, g_earlyWalks = 0;
+        // draw95: each drawn particle geodisp's sort key in the walk before
+        // (the turn its draw is predicted to take in this one: the join is
+        // made no later than that bucket).
+        std::unordered_map<uint32_t, float> g_lastKey;
+        // The bucket AddSortObj (decomp_dl) puts a key in.
+        int32_t bucketOf(const Ram m, uint32_t list, float key)
+        {
+            const int32_t count = m.s32(list + 4u);
+            const int32_t word = FPU_CVT_W_S(FPU_MUL_S(key, m.f32(list + 8u)));
+            int32_t index = word < count ? (word < 0 ? 0 : word) : count - 1;
+            if (m.s32(list + 0xCu) == 1)
+                index = count - index - 1;
+            return index;
+        }
+        int32_t predictedFirst(const Ram m, uint32_t list)
+        {
+            int32_t first = 0x7FFFFFFF;
+            for (const uint32_t obj : g_deferred)
+                if (const auto it = g_lastKey.find(obj); it != g_lastKey.end())
+                    first = std::min(first, bucketOf(m, list, it->second));
+            return first;
+        }
+        void run(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t sp, std::vector<uint32_t> &nodes)
+        {
+            const Ram m{rdram};
+            const auto t0 = std::chrono::steady_clock::now();
+            sotc_worker::join(sotc_worker::kSiteWalk);
+            g_waitUs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count());
+            static const int invert79 = std::getenv("SOTC_PTCL79_INVERT") ? std::atoi(std::getenv("SOTC_PTCL79_INVERT")) : 0;
+            for (const uint32_t obj : g_deferred)
+            {
+                if (sotc_decomp::ptcl91Freed(obj))
+                    continue;
+                ++g_objects;
+                const uint32_t gdc = geoDispClass(m, obj);
+                if (gdc == 0u)
+                    continue;
+                if (const uint32_t update = m.u32(gdc + 0xD8u))
+                    if (!sotc_decomp::ptcl95Clipped(obj))
+                    {
+                        SET_GPR_S32(ctx, 4, static_cast<int32_t>(obj));
+                        sotc_decomp::callGuest(rdram, ctx, runtime, update, 0x010F55E0u, sp);
+                    }
+                const float f1 = m.f32(gdc + 0x20u);
+                if (!FPU_C_OLT_S(0.0f, f1))
+                    continue;
+                const float f0 = m.f32(gdc + 0x30u);
+                ctx->f[0] = f0;
+                const bool culled79 = sotc_decomp::ptcl79Culled(obj);
+                const bool draw79 = invert79 == 0 ? !culled79 : invert79 == 1 ? culled79 : false;
+                if (!(FPU_C_OLE_S(0.0f, f0) && draw79))
+                    continue;
+                m.putf(gdc + 4u, f1);
+                // Straight into the second list: the first one's chains were
+                // relinked into the second by its copy loop (adding to it now
+                // would walk the second list's links and could link the node
+                // twice: a cycle, the hang p1 met).
+                SET_GPR_S32(ctx, 5, static_cast<int32_t>(gdc));
+                SET_GPR_S32(ctx, 4, static_cast<int32_t>(m.u32(kSortList2)));
+                sotc_decomp::callGuest(rdram, ctx, runtime, kAddSortObj, 0x010F56B0u, sp);
+                nodes.push_back(gdc);
+                if (g_lastKey.size() > 4096u)
+                    g_lastKey.clear();
+                g_lastKey[obj] = f1;
+            }
+            g_deferred.clear();
+        }
+        std::vector<uint32_t> g_lightNodes; // SOTC_DRAW95_CHECK: the nodes lit inside the light pass
+        uint64_t g_checked = 0, g_differ = 0;
+        void inLight(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t sp, std::vector<uint32_t> &nodes)
+        {
+            ++g_inLight;
+            run(rdram, ctx, runtime, sp, nodes);
+            g_lightNodes = nodes;
+        }
+        bool checkOn()
+        {
+            static const bool on = ps2_diag::env("SOTC_DRAW95_CHECK") && std::atoi(ps2_diag::env("SOTC_DRAW95_CHECK")) != 0;
+            return on;
+        }
+        void report()
+        {
+            if (++g_walks % 600u != 0u)
+                return;
+            std::fprintf(stderr, "[early95] %llu walks: after an early hand-over %.0f%%\n", (unsigned long long)g_walks, 100.0 * g_earlyWalks / 600.0);
+            g_earlyWalks = 0;
+            std::fprintf(stderr, "[join95] %llu walks: joined in the light pass %.0f%%, in the draw loop %.0f%% (at its turn, not done: %.0f%%; at the loop's end %.0f%%), "
+                                 "%.1f particle geodisps a walk, %.2f drawn out of turn, join wait %.3f ms a walk\n",
+                         (unsigned long long)g_walks, 100.0 * g_inLight / 600.0, 100.0 * g_inDraw / 600.0, 100.0 * g_forced / 600.0, 100.0 * g_atEnd / 600.0,
+                         g_objects / 600.0, g_early / 600.0, g_waitUs / 600.0 / 1000.0);
+            g_inLight = g_objects = g_waitUs = g_early = g_forced = g_atEnd = g_inDraw = 0;
+        }
+    }
+
     // ---- DispDispObjGroupModel (0x10f52c8; a0 the camera object) -------------
     void dispDispObjGroupModel(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
@@ -2622,6 +4177,13 @@ namespace decomp_walk
         g.callRel(0x010F532Cu, sp); // isysGroupForFirst
         uint32_t s4 = g.v0(), s3 = 0u;
         set(20, s4);
+        // Round 140 (clip140): the group's layout objects' clips handed to the helper thread, ahead of the pass.
+        const bool c140 = clip140::post(m, s4, runtime);
+        int cursor140 = 0;
+        struct Finish140
+        {
+            ~Finish140() { clip140::finish(); }
+        } finish140;
         QuatProduct qp{};
         const bool walk83 = sotc_decomp::walk83On();
         bool s6Known = false;
@@ -2633,10 +4195,76 @@ namespace decomp_walk
             for (int i = 0; i < 4; ++i)
                 runner.step(m);
         }
+        // A geodisp object of the group (the walk's else branch: its class's
+        // update callback, the visible test, the sort list).
+        bool joined91 = false; // round 95: the job's results readable (after the walk's join)
+        auto geodispObject = [&](const uint32_t s3)
+        {
+            const uint32_t gdc = geoDispClass(m, s3);
+            set(16, gdc);
+            if (const uint32_t update = m.u32(gdc + 0xD8u); update != 0u && !(joined91 && sotc_decomp::ptcl95Clipped(s3)))
+            {
+                g.a(4, s3);
+                {
+                    const uint64_t t0_ = wprof::now();
+                    g.call(update, 0x010F55E0u, sp);
+                    if (wp) wprof::add('u', update, sotc_prof::ticks() - t0_);
+                }
+            }
+            const float f1 = m.f32(gdc + 0x20u);
+            if (FPU_C_OLT_S(0.0f, f1))
+            {
+                const float f0 = m.f32(gdc + 0x30u);
+                ctx->f[0] = f0;
+                // Round 79: a particle system wholly outside the view is not drawn.
+                // SOTC_PTCL79_INVERT=1 (checking): only those are drawn; =2: no particle system.
+                static const int invert79 = std::getenv("SOTC_PTCL79_INVERT") ? std::atoi(std::getenv("SOTC_PTCL79_INVERT")) : 0;
+                const bool culled79 = sotc_decomp::ptcl79Culled(s3);
+                const bool draw79 = invert79 == 0 ? !culled79 : invert79 == 1 ? culled79 : false;
+                if (FPU_C_OLE_S(0.0f, f0) && draw79)
+                {
+                    m.putf(gdc + 4u, f1);
+                    g.a(5, gdc);
+                    g.a(4, m.u32(kSortList));
+                    g.call(kAddSortObj, 0x010F5614u, sp);
+                    if (wp) ++wprof::g_cnt[3];
+                }
+            }
+        };
+        // Round 91 (ptcl91, sotc_worker.cpp): while the particle step runs on
+        // the guest worker, the particle geodisps (their class's update in the
+        // particle module: the clip from their particles) wait for the join
+        // after the group pass, then go through the same branch in the group's
+        // order; one the job's auto-end check freed is left out (the original
+        // freed it before the walk). Their sort keys put them where they would
+        // have gone (AddSortObj sorts by key; only equal keys can differ).
+        const bool defer91 = sotc_worker::busy();
+        static std::vector<uint32_t> deferred91;
+        deferred91.clear();
+        auto flush91 = [&]()
+        {
+            if (!defer91)
+                return;
+            sotc_worker::join(sotc_worker::kSiteWalk);
+            joined91 = true;
+            uint64_t saved[8];
+            for (int r = 0; r < 8; ++r)
+                saved[r] = GPR_U64(ctx, 16 + r);
+            for (const uint32_t obj : deferred91)
+                if (!sotc_decomp::ptcl91Freed(obj))
+                {
+                    set(19, obj);
+                    geodispObject(obj);
+                }
+            deferred91.clear();
+            for (int r = 0; r < 8; ++r)
+                SET_GPR_U64(ctx, 16 + r, saved[r]);
+        };
         while (s4 != 0u)
         {
             if (!Ram::ok(s4, 0x10u) || !Ram::ok(m.u32(s4), 0x10u))
             {
+                flush91();
                 set(19, Ram::ok(s4, 4u) ? m.u32(s4) : s3);
                 set(20, s4);
                 return resume(0x010F5348u);
@@ -2670,7 +4298,10 @@ namespace decomp_walk
                     s1 = layoutClass(g, s6, 0x010F5360u, sp);
                 set(17, s1);
                 if (!Ram::ok(s0, 0x1C0u) || !Ram::ok(s1, 0x160u) || !Ram::ok(m.u32(s0 + 0x140u), 0x40u) || !Ram::ok(m.u32(s0 + 0x144u), 0x268u))
+                {
+                    flush91();
                     return resume(0x010F5348u);
+                }
                 const uint32_t s2 = m.u32(s0 + 0x140u);
                 set(18, s2);
                 uint64_t s5 = 1u, s7 = 1u;
@@ -2784,7 +4415,24 @@ namespace decomp_walk
                         g.a(4, s3);
                         {
                             const uint64_t t0_ = wprof::now();
-                            g.call(update, 0x010F5504u, sp);
+                            const clip140::Result *r140 = c140 && update == kClip && !simple ? clip140::take(s3, cursor140) : nullptr;
+                            if (r140 && clip140::checkMode() == 0)
+                            {
+                                // ClipLayoutObjModel's writes and what its call leaves (callGuest's ra / sp, the
+                                // native's return: pc = ra, v0 the geometry class, f0).
+                                clip140::apply(rdram, *r140);
+                                SET_GPR_U32(ctx, 31, 0x010F550Cu);
+                                SET_GPR_U32(ctx, 29, sp);
+                                ctx->pc = 0x010F550Cu;
+                                ctx->f[0] = r140->f0;
+                                SET_GPR_S32(ctx, 2, static_cast<int32_t>(r140->geo));
+                            }
+                            else
+                            {
+                                g.call(update, 0x010F5504u, sp);
+                                if (r140)
+                                    clip140::check(rdram, ctx, *r140);
+                            }
                             if (wp) wprof::add('U', update, sotc_prof::ticks() - t0_);
                         }
                     }
@@ -2844,36 +4492,15 @@ namespace decomp_walk
             }
             else
             {
-                const uint32_t gdc = geoDispClass(m, s3);
-                set(16, gdc);
-                if (const uint32_t update = m.u32(gdc + 0xD8u))
+                const uint32_t gdc91 = geoDispClass(m, s3);
+                const uint32_t update91 = m.u32(gdc91 + 0xD8u);
+                if (defer91 && update91 >= 0x01139CA0u && update91 < 0x01147530u)
                 {
-                    g.a(4, s3);
-                    {
-                        const uint64_t t0_ = wprof::now();
-                        g.call(update, 0x010F55E0u, sp);
-                        if (wp) wprof::add('u', update, sotc_prof::ticks() - t0_);
-                    }
+                    set(16, gdc91);
+                    deferred91.push_back(s3);
                 }
-                const float f1 = m.f32(gdc + 0x20u);
-                if (FPU_C_OLT_S(0.0f, f1))
-                {
-                    const float f0 = m.f32(gdc + 0x30u);
-                    ctx->f[0] = f0;
-                    // Round 79: a particle system wholly outside the view is not drawn.
-                    // SOTC_PTCL79_INVERT=1 (checking): only those are drawn; =2: no particle system.
-                    static const int invert79 = std::getenv("SOTC_PTCL79_INVERT") ? std::atoi(std::getenv("SOTC_PTCL79_INVERT")) : 0;
-                    const bool culled79 = sotc_decomp::ptcl79Culled(s3);
-                    const bool draw79 = invert79 == 0 ? !culled79 : invert79 == 1 ? culled79 : false;
-                    if (FPU_C_OLE_S(0.0f, f0) && draw79)
-                    {
-                        m.putf(gdc + 4u, f1);
-                        g.a(5, gdc);
-                        g.a(4, m.u32(kSortList));
-                        g.call(kAddSortObj, 0x010F5614u, sp);
-                        if (wp) ++wprof::g_cnt[3];
-                    }
-                }
+                else
+                    geodispObject(s3);
             }
             uint32_t next;
             if (groupNext(m, s4, next))
@@ -2890,6 +4517,7 @@ namespace decomp_walk
             s4 = next;
             set(20, s4);
         }
+        clip140::finish();
         set(18, 0x01190000u);
         if (s3 != 0u)
         {
@@ -2897,6 +4525,24 @@ namespace decomp_walk
             SET_GPR_U64(ctx, 5, 0u);
             g.callRel(0x010F5640u, sp); // isysGroupForExit
         }
+        // Round 91: the particle step's join, the particle geodisps; round 95
+        // (join95): held until the light pass (late95 above).
+        // Not after an early hand-over (early95): the job started a camera before and is
+        // mostly done or waiting for its kept calls here; holding the geodisps longer only
+        // costs (p5: riding, join95 + draw95 on top of early95 1.4 ms slower than without).
+        const bool early95 = sotc_decomp::early95Kicked();
+        const bool late95 = defer91 && !deferred91.empty() && sotc_decomp::join95On() && !early95;
+        late95::g_earlyWalks += early95 ? 1u : 0u;
+        sotc_worker::noteWalk(); // round 95: a camera manager call after this in the frame makes no early hand-over
+        if (late95)
+        {
+            late95::g_deferred.assign(deferred91.begin(), deferred91.end());
+            deferred91.clear();
+        }
+        else
+            flush91();
+        if (defer91)
+            late95::report();
         if (wp) { const uint64_t t = sotc_prof::ticks(); wprof::g_phase[1] += t - wt0; wt0 = t; }
         // The second list: the first one without the objects with bit 4 of +0x260.
         clearSortList(m, m.u32(kSortList2));
@@ -2931,6 +4577,11 @@ namespace decomp_walk
             }
             s0 = s1;
         }
+        // Round 95: no light pass ahead (nothing in the second list): the held
+        // particle geodisps now, so the light pass below sees them as before.
+        std::vector<uint32_t> nodes95;
+        if (late95 && firstSortObj(m, m.u32(kSortList2)) == 0u)
+            late95::run(rdram, ctx, runtime, sp, nodes95);
         set(16, kSortList2);
         if (wp) { const uint64_t t = sotc_prof::ticks(); wprof::g_phase[2] += t - wt0; wt0 = t; }
         if (firstSortObj(m, m.u32(kSortList2)) != 0u)
@@ -2939,19 +4590,147 @@ namespace decomp_walk
             g.a(4, m.u32(kSortList2));
             g.a(6, m.u32(sp + 0x20u));
             g.a(5, s6);
+            // Round 95 (draw95): the held particle geodisps wait for the draw
+            // loop (below); otherwise (join95) the light pass joins them.
+            bool pending95 = !late95::g_deferred.empty() && sotc_decomp::draw95On();
+            if (!late95::g_deferred.empty() && !pending95)
+                sotc_decomp::g_lightMid95 = late95::inLight;
             g.call(kLightPass, 0x010F56E8u, sp);
+            // A particle geodisp's light callback (the light pass's geodisp branch).
+            auto light95 = [&](uint32_t node)
+            {
+                const uint32_t id = m.u32(node), cls = geoDispClass(m, id);
+                if (const uint32_t light = cls ? m.u32(cls + 0xE0u) : 0u)
+                {
+                    g.a(4, id);
+                    g.a(5, node);
+                    g.call(light, 0x010F5074u, sp);
+                }
+            };
+            // SOTC_DRAW95_CHECK=1 (with draw95 off): each particle geodisp lit
+            // inside the light pass lit again after it (as draw95 does), its
+            // class's bytes compared, then put back as the pass left them.
+            if (late95::checkOn() && !late95::g_lightNodes.empty() && sotc_decomp::g_lightMid95 == nullptr)
+            {
+                for (const uint32_t node : late95::g_lightNodes)
+                {
+                    const uint32_t id = m.u32(node);
+                    if (!Ram::ok(id, 0x140u))
+                        continue;
+                    uint8_t before[0x120], after[0x120];
+                    std::memcpy(before, rdram + id + 0x20u, sizeof(before));
+                    light95(node);
+                    std::memcpy(after, rdram + id + 0x20u, sizeof(after));
+                    ++late95::g_checked;
+                    if (std::memcmp(before, after, sizeof(before)) != 0)
+                    {
+                        if (++late95::g_differ <= 8u)
+                            for (uint32_t i = 0; i < sizeof(before); i += 4)
+                                if (std::memcmp(before + i, after + i, 4) != 0)
+                                {
+                                    uint32_t b, a2;
+                                    std::memcpy(&b, before + i, 4);
+                                    std::memcpy(&a2, after + i, 4);
+                                    std::fprintf(stderr, "[draw95chk] geodisp %08x class +%03x: in the pass %08x, after it %08x\n", id, i, b, a2);
+                                }
+                        std::memcpy(rdram + id + 0x20u, before, sizeof(before));
+                    }
+                }
+                late95::g_lightNodes.clear();
+                if (late95::g_checked % 2000u < 40u)
+                    std::fprintf(stderr, "[draw95chk] %llu lit again after the light pass, %llu differ\n", (unsigned long long)late95::g_checked, (unsigned long long)late95::g_differ);
+            }
+            if (!pending95 && (sotc_decomp::g_lightMid95 != nullptr || !late95::g_deferred.empty()))
+            {
+                // The light pass went to the recompiled code: the held ones
+                // after it, their light callbacks then.
+                sotc_decomp::g_lightMid95 = nullptr;
+                nodes95.clear();
+                late95::run(rdram, ctx, runtime, sp, nodes95);
+                for (const uint32_t node : nodes95)
+                    light95(node);
+            }
             if (wp) { const uint64_t t = sotc_prof::ticks(); wprof::g_phase[3] += t - wt0; wt0 = t; }
             const uint32_t list = m.u32(kSortList2);
             set(19, list);
             if (w67)
                 sortOrder(m, list, order);
             turn = 0;
+            // Round 95 (draw95): a held particle geodisp's draw (the draw loop's geodisp branch).
+            auto drawGeo95 = [&](uint32_t node)
+            {
+                const uint32_t obj = m.u32(node), cls = geoDispClass(m, obj);
+                set(16, obj);
+                set(17, cls);
+                if (obj != 0u)
+                {
+                    g.a(4, obj);
+                    g.callRel(0x010F577Cu, sp); // iosDlLockObj
+                }
+                g.a(5, obj);
+                g.a(4, s6);
+                g.call(m.u32(cls + 0xD0u), 0x010F578Cu, sp);
+            };
+            // The join, before the draw of `next` (0: the loop's end): the held
+            // ones into both lists (late95::run) and their light callbacks; those
+            // the loop will not reach from `next` any more (their bucket passed)
+            // drawn now, in the list's order; the rest in their turn.
+            // SOTC_DRAW95_ORDER=1: also join (waiting) when the loop reaches the
+            // first bucket the held geodisps' keys of the walk before predict, so
+            // they keep their turn; default 0: no wait in the loop (p3 measured
+            // the turn coming early: most of the wait stayed), those whose turn
+            // has passed are drawn when the job is done or at the loop's end.
+            static const bool order95 = std::getenv("SOTC_DRAW95_ORDER") && std::atoi(std::getenv("SOTC_DRAW95_ORDER")) != 0;
+            const int32_t first95 = pending95 && order95 ? late95::predictedFirst(m, list) : 0x7FFFFFFF;
+            auto insert95 = [&](uint32_t next)
+            {
+                pending95 = false;
+                ++late95::g_inDraw;
+                nodes95.clear();
+                late95::run(rdram, ctx, runtime, sp, nodes95);
+                for (const uint32_t node : nodes95)
+                    light95(node);
+                if (nodes95.empty())
+                    return;
+                const uint32_t index = m.u32(list + 16u);
+                static std::vector<uint32_t> reach, all;
+                reach.clear();
+                all.clear();
+                for (uint32_t x = next; x != 0u && reach.size() < 4096u; x = nextSortObj(m, list, x))
+                    reach.push_back(x);
+                for (uint32_t x = firstSortObj(m, list); x != 0u && all.size() < 4096u; x = nextSortObj(m, list, x))
+                    all.push_back(x);
+                m.put32(list + 16u, index);
+                for (const uint32_t x : all)
+                    if (std::find(nodes95.begin(), nodes95.end(), x) != nodes95.end() && std::find(reach.begin(), reach.end(), x) == reach.end())
+                    {
+                        drawGeo95(x);
+                        ++late95::g_early;
+                    }
+                set(18, next);
+            };
             uint32_t s2 = firstSortObj(m, list);
             set(18, s2);
             while (s2 != 0u)
             {
                 if (!Ram::ok(s2, 0x10u))
+                {
+                    if (pending95)
+                    {
+                        pending95 = false;
+                        nodes95.clear();
+                        late95::run(rdram, ctx, runtime, sp, nodes95);
+                        for (const uint32_t node : nodes95)
+                            light95(node);
+                        set(18, s2);
+                    }
                     return resume(0x010F5710u);
+                }
+                if (pending95 && (static_cast<int32_t>(m.u32(list + 16u)) >= first95 || sotc_worker::done()))
+                {
+                    late95::g_forced += sotc_worker::done() ? 0u : 1u;
+                    insert95(s2);
+                }
                 if (w67)
                 {
                     if (turn < order.size() && order[turn] == s2)
@@ -3016,6 +4795,11 @@ namespace decomp_walk
                 s2 = nextSortObj(m, list, s2);
                 set(18, s2);
             }
+            if (pending95)
+            {
+                ++late95::g_atEnd;
+                insert95(0u);
+            }
         }
         if (wp) { const uint64_t t = sotc_prof::ticks(); wprof::g_phase[4] += t - wt0; wprof::g_phase[0] += t - wstart; wprof::report(); }
         g.callRel(0x010F57ACu, sp); // isysObjSignalSema
@@ -3030,5 +4814,6 @@ SOTC_DECOMP_AB_FUNCTION(0x010F5920u, DispLayoutObjModel, decomp_walk::dispLayout
 SOTC_DECOMP_AB_FUNCTION(0x010F3A08u, solidDisp_010F3A08, decomp_walk::solidDisp);
 SOTC_DECOMP_FLOAT_FUNCTION(0x01098840u, modelClipSolid, decomp_walk::modelClipSolid);
 SOTC_DECOMP_AB_FUNCTION(0x010F3EB8u, hazeStrips_010F3EB8, decomp_walk::strips);
+SOTC_DECOMP_FUNCTION(0x01142350u, particleQuad_01142350, decomp_walk::quad1142350);
 SOTC_DECOMP_AB_FUNCTION(0x0108D730u, glVertexKick_0108D730, decomp_walk::glVertexKick);
 SOTC_DECOMP_AB_FUNCTION(0x0108EBC0u, glVertex3fv, decomp_walk::glVertex3fvEntry);

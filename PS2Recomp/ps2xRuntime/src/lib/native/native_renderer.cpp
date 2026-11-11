@@ -4,6 +4,7 @@
 // (GLES3, once native_renderer_gl.cpp grows the ES path there, r36s);
 // elsewhere none.
 #include "native_backend.h"
+#include "runtime/ps2_diag.h"
 #include "runtime/native_tuning.h"
 #include "runtime/native_recorder.h"
 #include "ThreadNaming.h"
@@ -59,12 +60,10 @@ namespace native_renderer
     Tuning defaultTuning()
     {
         Tuning d;
-        // The Mac: High (render scale 3); the Vita: Medium (the PS2's 512 x 448).
-#if defined(__APPLE__)
+        // Round 124: High on both (each platform's default look: the Mac's
+        // 3x, the Vita's 1x, the PS2's 512 x 448; the Vita's High also has
+        // round 36's particle sacrifice on, as its default had).
         applyPreset(d, kPresetHigh);
-#else
-        applyPreset(d, kPresetMedium);
-#endif
 #if defined(__vita__) || defined(__linux__)
         // Copies of the picture made mid-frame came out white in Vita3K when
         // the picture was taken up again after them: drawn again instead, so
@@ -94,19 +93,20 @@ namespace native_renderer
         // Round 37 had the body shadows off by default here until measured;
         // round 38 turns them on (Tuning::bodyShadows' default, a menu item).
         // Round 36: the particle sacrifice on by default (half the emitters'
-        // work in particle-heavy scenes); the coarser detail is a toggle only
-        // (no game-thread saving measured on the route).
-        d.sacParticles = true;
+        // work in particle-heavy scenes): the Vita's High preset has it.
 #endif
         return d;
     }
 
-    // The quality items' variables (over a preset).
-    static void qualityFromEnv(Tuning &d)
+    // Round 124: the variables of the preset items, each only when set (over
+    // a preset: at start after SOTC_PRESET, and after a saved preset is read).
+    static void presetEnv(Tuning &d)
     {
+        auto on = [](const char *name) { return std::getenv(name) != nullptr; };
         auto number = [](const char *name, float fallback) { return std::getenv(name) ? static_cast<float>(std::atof(std::getenv(name))) : fallback; };
+        auto flag = [](const char *name) { return std::atoi(std::getenv(name)) != 0; };
         d.renderScale = std::clamp(number("SOTC_RENDER_SCALE", d.renderScale), kMinRenderScale, kMaxRenderScale);
-        if (std::getenv("SOTC_MSAA")) // samples: 1/2/4/8
+        if (on("SOTC_MSAA")) // samples: 1/2/4/8
         {
             const int samples = std::atoi(std::getenv("SOTC_MSAA"));
             d.msaa = samples >= 8 ? 3.0f : samples >= 4 ? 2.0f : samples >= 2 ? 1.0f : 0.0f;
@@ -114,6 +114,52 @@ namespace native_renderer
         d.textureFilter = std::clamp(std::round(number("SOTC_TEXTURE_FILTER", d.textureFilter)), 0.0f, 6.0f);
         d.modelDetail = std::clamp(std::round(number("SOTC_MODEL_DETAIL", d.modelDetail)), 0.0f, 2.0f);
         d.effectDetail = std::clamp(std::round(number("SOTC_EFFECT_DETAIL", d.effectDetail)), 0.0f, 2.0f);
+        if (on("SOTC_BLOOM_SCALE"))
+        {
+            const float strength = number("SOTC_BLOOM_SCALE", d.bloomStrength);
+            d.bloom = strength > 0.0f;
+            if (d.bloom)
+                d.bloomStrength = strength;
+        }
+        d.bloomRounds = number("SOTC_BLOOM_ROUNDS", d.bloomRounds);
+        d.bloomSpread = number("SOTC_BLOOM_SPREAD", d.bloomSpread);
+        if (on("SOTC_NATIVE_NOVFOG"))
+            d.vertexFog = false;
+        d.vertexFogAmount = number("SOTC_FOG_AMOUNT", d.vertexFogAmount);
+        if (on("SOTC_NATIVE_ZFOG"))
+            d.zFog = flag("SOTC_NATIVE_ZFOG");
+        for (const auto &[name, field] : {std::pair<const char *, bool Tuning::*>{"SOTC_NATIVE_NOGLOW", &Tuning::glow}, {"SOTC_NATIVE_NODOF", &Tuning::depthOfField},
+                                          {"SOTC_NATIVE_NOSHADOWS", &Tuning::shadows}, {"SOTC_NATIVE_NOPTCL", &Tuning::particles}, {"SOTC_NATIVE_NOSBLUR", &Tuning::screenBlur},
+                                          {"SOTC_NATIVE_NOFEEDBACK", &Tuning::feedback}, {"SOTC_NATIVE_NOREFLECT", &Tuning::reflections},
+                                          {"SOTC_NATIVE_NOREFRACT", &Tuning::refraction}})
+            if (on(name))
+                d.*field = false;
+        if (on("SOTC_NATIVE_NOHAZE"))
+            d.heatHaze = !flag("SOTC_NATIVE_NOHAZE");
+        if (on("SOTC_BODY_SHADOWS"))
+            d.bodyShadows = flag("SOTC_BODY_SHADOWS");
+        if (on("SOTC_ALPHA_TEST"))
+            d.alphaTest = flag("SOTC_ALPHA_TEST");
+        if (on("SOTC_GLOW_VITA"))
+            d.glowVita = static_cast<float>(std::clamp(std::atoi(std::getenv("SOTC_GLOW_VITA")), 0, 2));
+        if (on("SOTC_SACRIFICES") && !flag("SOTC_SACRIFICES"))
+        {
+            d.sacParticles = false;
+            d.sacLod = false;
+            d.sacCamColl = d.sacFarChara = d.sacFxHalf = d.sacDrawDist = false;
+        }
+        if (on("SOTC_SAC_LOD"))
+            d.sacLod = flag("SOTC_SAC_LOD");
+        if (on("SOTC_SAC_PARTICLES"))
+            d.sacParticles = flag("SOTC_SAC_PARTICLES");
+        // Round 65: the Quality menu's cuts. SOTC_SAC_MAX=1 all four (the
+        // menu's "Max performance"), each one's own variable over it.
+        if (on("SOTC_SAC_MAX") && flag("SOTC_SAC_MAX"))
+            d.sacCamColl = d.sacFarChara = d.sacFxHalf = d.sacDrawDist = true;
+        for (const auto &[name, field] : {std::pair<const char *, bool Tuning::*>{"SOTC_SAC_CAMCOLL", &Tuning::sacCamColl}, {"SOTC_SAC_FARCHARA", &Tuning::sacFarChara},
+                                          {"SOTC_SAC_FX", &Tuning::sacFxHalf}, {"SOTC_SAC_DRAWDIST", &Tuning::sacDrawDist}})
+            if (on(name))
+                d.*field = flag(name);
     }
 
     Tuning *g_tuning = nullptr;
@@ -126,33 +172,11 @@ namespace native_renderer
             auto number = [](const char *name, float fallback) { return std::getenv(name) ? static_cast<float>(std::atof(std::getenv(name))) : fallback; };
             // The preset first; a variable for one of its items overrides it.
             if (on("SOTC_PRESET"))
-                applyPreset(d, std::clamp(std::atoi(std::getenv("SOTC_PRESET")), 0, static_cast<int>(kPresetUltra)));
-            qualityFromEnv(d);
-            const float strength = number("SOTC_BLOOM_SCALE", d.bloomStrength);
-            d.bloom = strength > 0.0f;
-            if (d.bloom)
-                d.bloomStrength = strength;
-            d.bloomRounds = number("SOTC_BLOOM_ROUNDS", d.bloomRounds);
-            d.bloomSpread = number("SOTC_BLOOM_SPREAD", 1.0f);
-            d.vertexFog = !on("SOTC_NATIVE_NOVFOG");
-            d.vertexFogAmount = number("SOTC_FOG_AMOUNT", d.vertexFogAmount);
-            d.zFog = !on("SOTC_NATIVE_ZFOG") || std::atoi(std::getenv("SOTC_NATIVE_ZFOG")) != 0;
-            d.glow = !on("SOTC_NATIVE_NOGLOW");
-            d.depthOfField = !on("SOTC_NATIVE_NODOF");
-            d.shadows = !on("SOTC_NATIVE_NOSHADOWS");
-            if (on("SOTC_BODY_SHADOWS"))
-                d.bodyShadows = std::atoi(std::getenv("SOTC_BODY_SHADOWS")) != 0;
+                applyPreset(d, std::clamp(std::atoi(std::getenv("SOTC_PRESET")), 0, static_cast<int>(kPresetMax)));
+            presetEnv(d);
             d.shadowAllSides = on("SOTC_SHADOW_ALLSIDES") && std::atoi(std::getenv("SOTC_SHADOW_ALLSIDES")) != 0;
             if (on("SOTC_BG_DEPTH"))
                 d.backgroundDepth = std::atoi(std::getenv("SOTC_BG_DEPTH")) != 0;
-            if (on("SOTC_ALPHA_TEST"))
-                d.alphaTest = std::atoi(std::getenv("SOTC_ALPHA_TEST")) != 0;
-            d.particles = !on("SOTC_NATIVE_NOPTCL");
-            d.screenBlur = !on("SOTC_NATIVE_NOSBLUR");
-            d.feedback = !on("SOTC_NATIVE_NOFEEDBACK");
-            d.reflections = !on("SOTC_NATIVE_NOREFLECT");
-            d.refraction = !on("SOTC_NATIVE_NOREFRACT");
-            d.additive = !on("SOTC_NATIVE_NOADDITIVE");
             d.mipmaps = !on("SOTC_NATIVE_NOMIPS");
             d.textureScroll = !on("SOTC_NATIVE_NOROW");
             d.rawMirror = on("SOTC_RAW_MIRROR");
@@ -162,13 +186,11 @@ namespace native_renderer
             d.frameLogAll = on("SOTC_FRAME_LOG_ALL");
             d.perfOverlay = on("SOTC_PERF_OVERLAY") && std::atoi(std::getenv("SOTC_PERF_OVERLAY")) != 0;
             d.audioLog = static_cast<float>(std::clamp(ps2x::iop::audio_stats::levelFromEnv(), 0, 2));
-            if (on("SOTC_GLOW_VITA"))
-                d.glowVita = static_cast<float>(std::clamp(std::atoi(std::getenv("SOTC_GLOW_VITA")), 0, 2));
             if (on("SOTC_BLOOM_SAMEFRAME"))
                 d.bloomSameFrame = std::atoi(std::getenv("SOTC_BLOOM_SAMEFRAME")) != 0;
             if (on("SOTC_HOLD_FRAMES"))
                 d.holdFrames = static_cast<float>(std::clamp(std::atoi(std::getenv("SOTC_HOLD_FRAMES")), 0, 8));
-            d.subsysProf = on("SOTC_SUBSYS_PROF") && std::atoi(std::getenv("SOTC_SUBSYS_PROF")) != 0;
+            d.subsysProf = on("SOTC_SUBSYS_PROF") && std::atoi(ps2_diag::env("SOTC_SUBSYS_PROF")) != 0;
             d.fastHooks = !on("SOTC_NATIVE_SLOWHOOKS");
             if (on("SOTC_PACKET_QUICK"))
                 d.packetQuickCheck = std::atoi(std::getenv("SOTC_PACKET_QUICK")) != 0;
@@ -176,26 +198,10 @@ namespace native_renderer
                 d.ps2Lists = std::atoi(std::getenv("SOTC_PS2_LISTS")) != 0;
             if (on("SOTC_GPU_SKIN"))
                 d.gpuSkinning = std::atoi(std::getenv("SOTC_GPU_SKIN")) != 0;
-            if (on("SOTC_SACRIFICES") && std::atoi(std::getenv("SOTC_SACRIFICES")) == 0)
-            {
-                d.sacParticles = false;
-                d.sacLod = false;
-                d.sacCamColl = d.sacFarChara = d.sacFxHalf = d.sacDrawDist = false;
-            }
-            if (on("SOTC_SAC_LOD"))
-                d.sacLod = std::atoi(std::getenv("SOTC_SAC_LOD")) != 0;
-            if (on("SOTC_SAC_PARTICLES"))
-                d.sacParticles = std::atoi(std::getenv("SOTC_SAC_PARTICLES")) != 0;
-            // Round 65: the Quality menu's cuts. SOTC_SAC_MAX=1 all four (the
-            // menu's "Max performance"), each one's own variable over it.
-            if (on("SOTC_SAC_MAX") && std::atoi(std::getenv("SOTC_SAC_MAX")) != 0)
-                d.sacCamColl = d.sacFarChara = d.sacFxHalf = d.sacDrawDist = true;
-            for (const auto &[name, flag] : {std::pair<const char *, bool Tuning::*>{"SOTC_SAC_CAMCOLL", &Tuning::sacCamColl}, {"SOTC_SAC_FARCHARA", &Tuning::sacFarChara},
-                                             {"SOTC_SAC_FX", &Tuning::sacFxHalf}, {"SOTC_SAC_DRAWDIST", &Tuning::sacDrawDist}})
-                if (on(name))
-                    d.*flag = std::atoi(std::getenv(name)) != 0;
             if (on("SOTC_CAP30"))
                 d.frameCap30 = std::atoi(std::getenv("SOTC_CAP30")) != 0;
+            if (on("SOTC_CAP20")) // round 107: Frame rate, Steady 20 (1) or Auto (0)
+                d.frameRate = std::atoi(std::getenv("SOTC_CAP20")) != 0 ? 1.0f : 0.0f;
             if (on("SOTC_RENDER_THREAD"))
                 d.renderThread = std::atoi(std::getenv("SOTC_RENDER_THREAD")) != 0;
             if (on("SOTC_GL_WARM"))
@@ -219,7 +225,8 @@ namespace native_renderer
                                          {"SOTC_GL_SOFT_CUT", &Tuning::glSoftCut}, {"SOTC_GL_FAR_GUARD", &Tuning::glFarGuard},
                                          {"SOTC_GL_PRESENT86", &Tuning::glPresent86},
                                          {"SOTC_GL_SORT87", &Tuning::glSort87}, {"SOTC_GL_VOL87", &Tuning::glVol87}, {"SOTC_GL_SHMASK87", &Tuning::glShmask87}, {"SOTC_GL_INFLIGHT87", &Tuning::glInflight87},
-                                         {"SOTC_GL_BGSMALL87", &Tuning::glBgSmall87}, {"SOTC_GL_OPAQUE88", &Tuning::glOpaque88}, {"SOTC_GL_MIRROR88", &Tuning::glMirror88}})
+                                         {"SOTC_GL_BGSMALL87", &Tuning::glBgSmall87}, {"SOTC_GL_OPAQUE88", &Tuning::glOpaque88}, {"SOTC_GL_MIRROR88", &Tuning::glMirror88},
+                                         {"SOTC_GL_DIAG92_PX", &Tuning::glDiag92Px}, {"SOTC_GL_DIAG92_TEX", &Tuning::glDiag92Tex}, {"SOTC_GL_DIAG92_HALF", &Tuning::glDiag92Half}, {"SOTC_GL_NOSCREEN92", &Tuning::glNoScreen92}, {"SOTC_GL_MIRROR93", &Tuning::glMirror93}, {"SOTC_GL_ATOP93", &Tuning::glAtOpaque93}, {"SOTC_GL_POST93", &Tuning::glPost93}, {"SOTC_GL_BLUR93", &Tuning::glBlur93}, {"SOTC_GL_GLOW93", &Tuning::glGlow93}, {"SOTC_GL_BGCOPY94", &Tuning::glBgCopy94}, {"SOTC_GL_GLOW94", &Tuning::glGlow94}, {"SOTC_GL_FX94", &Tuning::glFx94}, {"SOTC_GL_BLOOM94", &Tuning::glBloom94}, {"SOTC_GL_DIAG98", &Tuning::glDiag98}, {"SOTC_GL_AT98", &Tuning::glAt98}, {"SOTC_GL_UNTEX98", &Tuning::glUntex98}, {"SOTC_GL_GLOW98", &Tuning::glGlow98}, {"SOTC_GL_NOFOG98", &Tuning::glNoFog98}, {"SOTC_GL_LOD0_98", &Tuning::glLod0_98}, {"SOTC_GL_PSOFT98", &Tuning::glPlainSoft98}, {"SOTC_GL_INFLIGHT100", &Tuning::glInflight100}, {"SOTC_CD_AHEAD100", &Tuning::cdAhead100}, {"SOTC_PRIO100", &Tuning::prio100}, {"SOTC_GL_FAT116", &Tuning::glFat116}})
                 if (on(name))
                     d.*flag = std::atoi(std::getenv(name)) != 0;
             if (on("SOTC_GL_REDRAW"))
@@ -266,6 +273,8 @@ namespace native_renderer
             add("SOTC_BLOOM_SPREAD=" + number(t.bloomSpread));
         if (!t.vertexFog)
             add("SOTC_NATIVE_NOVFOG=1");
+        if (!t.heatHaze)
+            add("SOTC_NATIVE_NOHAZE=1");
         if (t.vertexFogAmount != d.vertexFogAmount)
             add("SOTC_FOG_AMOUNT=" + number(t.vertexFogAmount));
         if (!t.zFog)
@@ -286,6 +295,8 @@ namespace native_renderer
                 add(std::string(name) + "=" + (t.*flag ? "1" : "0"));
         if (t.frameCap30 != d.frameCap30)
             add(std::string("SOTC_CAP30=") + (t.frameCap30 ? "1" : "0"));
+        if (t.frameRate != d.frameRate)
+            add(std::string("SOTC_CAP20=") + (t.frameRate >= 0.5f ? "1" : "0"));
         if (t.midFrameRedraw != d.midFrameRedraw)
             add("SOTC_GL_REDRAW=" + number(t.midFrameRedraw));
         if (t.renderThread != d.renderThread)
@@ -303,7 +314,8 @@ namespace native_renderer
                                          {"SOTC_GL_SOFT_CUT", &Tuning::glSoftCut}, {"SOTC_GL_FAR_GUARD", &Tuning::glFarGuard},
                                          {"SOTC_GL_PRESENT86", &Tuning::glPresent86},
                                          {"SOTC_GL_SORT87", &Tuning::glSort87}, {"SOTC_GL_VOL87", &Tuning::glVol87}, {"SOTC_GL_SHMASK87", &Tuning::glShmask87}, {"SOTC_GL_INFLIGHT87", &Tuning::glInflight87},
-                                         {"SOTC_GL_BGSMALL87", &Tuning::glBgSmall87}, {"SOTC_GL_OPAQUE88", &Tuning::glOpaque88}, {"SOTC_GL_MIRROR88", &Tuning::glMirror88}})
+                                         {"SOTC_GL_BGSMALL87", &Tuning::glBgSmall87}, {"SOTC_GL_OPAQUE88", &Tuning::glOpaque88}, {"SOTC_GL_MIRROR88", &Tuning::glMirror88},
+                                         {"SOTC_GL_DIAG92_PX", &Tuning::glDiag92Px}, {"SOTC_GL_DIAG92_TEX", &Tuning::glDiag92Tex}, {"SOTC_GL_DIAG92_HALF", &Tuning::glDiag92Half}, {"SOTC_GL_NOSCREEN92", &Tuning::glNoScreen92}, {"SOTC_GL_MIRROR93", &Tuning::glMirror93}, {"SOTC_GL_ATOP93", &Tuning::glAtOpaque93}, {"SOTC_GL_POST93", &Tuning::glPost93}, {"SOTC_GL_BLUR93", &Tuning::glBlur93}, {"SOTC_GL_GLOW93", &Tuning::glGlow93}, {"SOTC_GL_BGCOPY94", &Tuning::glBgCopy94}, {"SOTC_GL_GLOW94", &Tuning::glGlow94}, {"SOTC_GL_FX94", &Tuning::glFx94}, {"SOTC_GL_BLOOM94", &Tuning::glBloom94}, {"SOTC_GL_DIAG98", &Tuning::glDiag98}, {"SOTC_GL_AT98", &Tuning::glAt98}, {"SOTC_GL_UNTEX98", &Tuning::glUntex98}, {"SOTC_GL_GLOW98", &Tuning::glGlow98}, {"SOTC_GL_NOFOG98", &Tuning::glNoFog98}, {"SOTC_GL_LOD0_98", &Tuning::glLod0_98}, {"SOTC_GL_PSOFT98", &Tuning::glPlainSoft98}, {"SOTC_GL_INFLIGHT100", &Tuning::glInflight100}, {"SOTC_CD_AHEAD100", &Tuning::cdAhead100}, {"SOTC_PRIO100", &Tuning::prio100}, {"SOTC_GL_FAT116", &Tuning::glFat116}})
             if (t.*flag != d.*flag)
                 add(std::string(name) + "=" + (t.*flag ? "1" : "0"));
         if (t.holdIncomplete != d.holdIncomplete)
@@ -350,25 +362,26 @@ namespace native_renderer
     }
 
 #if defined(__vita__)
-#define PS2X_VITA_SCALE_NOTE_EN " On the Vita the resolution goes up to 2x (High and Ultra draw at 2x there: more does not fit in its memory)."
-#define PS2X_VITA_SCALE_NOTE_PT " No Vita a resolução vai até 2x (Alto e Ultra desenham em 2x lá: mais que isso não cabe na memória dele)."
+#define PS2X_VITA_SCALE_NOTE_EN " On the Vita: Off 0.5x, Low 0.75x, Medium and High 1x (the PS2's 512 x 448), Max 1.5x (2x, the Resolution item's most, may not fit in its memory)."
+#define PS2X_VITA_SCALE_NOTE_PT " No Vita: Desligado 0,5x, Baixo 0,75x, Médio e Alto 1x (os 512 x 448 do PS2), Máximo 1,5x (2x, o máximo do item Resolução, pode não caber na memória dele)."
 #else
 #define PS2X_VITA_SCALE_NOTE_EN ""
 #define PS2X_VITA_SCALE_NOTE_PT ""
 #endif
+    bool isPresetField(const TuningItem &item); // (round 124, below)
     const std::vector<TuningItem> &tuningItems()
     {
         static const std::vector<TuningItem> items = []
         {
         std::vector<TuningItem> v = {
-            {"quality_preset", "Graphics preset", "Predefinição gráfica",
-             "Sets resolution, anti-aliasing, texture filtering, model detail and effect detail at once. Low: half resolution (faster). "
-             "Medium: the PS2's 512 x 448 (the Vita's default). High: 3x (the Mac's default). Ultra: 4x, 4x MSAA, 16x anisotropic, finest models, "
-             "high effect detail (Mac). Changing any of those makes it Custom." PS2X_VITA_SCALE_NOTE_EN,
-             "Ajusta resolução, anti-aliasing, filtro de texturas, detalhe dos modelos e dos efeitos de uma vez. Baixo: metade da resolução (mais rápido). "
-             "Médio: os 512 x 448 do PS2 (o padrão do Vita). Alto: 3x (o padrão do Mac). Ultra: 4x, MSAA 4x, anisotrópico 16x, modelos mais detalhados, "
-             "efeitos em alto detalhe (Mac). Mudar qualquer um deles vira Personalizado." PS2X_VITA_SCALE_NOTE_PT,
-             nullptr, &Tuning::preset, 0.0f, 4.0f, 1.0f, "SOTC_PRESET"},
+            {"gfx_preset", "Graphics preset", "Predefinição gráfica",
+             "Sets every graphics item below at once. Off: every optional effect off and the least resolution (the floor, to measure). "
+             "Low and Medium: progressively cheaper. High: the default look. Max: everything at its best (the most resolution, the finest models, "
+             "every particle). Gameplay is the same in all of them. Changing any item below makes it Custom." PS2X_VITA_SCALE_NOTE_EN,
+             "Ajusta todos os itens gráficos abaixo de uma vez. Desligado: todo efeito opcional desligado e a menor resolução (o piso, pra medir). "
+             "Baixo e Médio: cada vez mais leves. Alto: o visual padrão. Máximo: tudo no melhor (mais resolução, modelos mais detalhados, "
+             "todas as partículas). A jogabilidade é a mesma em todos. Mudar qualquer item abaixo vira Personalizado." PS2X_VITA_SCALE_NOTE_PT,
+             nullptr, &Tuning::preset, 0.0f, 5.0f, 1.0f, "SOTC_PRESET"},
             {"render_scale", "Resolution", "Resolução",
 #if defined(__vita__)
              "The picture is drawn at 512 x 448 times this: 0.5 is faster, 1 is the PS2's, 1.5 and 2 are sharper. At most 2 on the Vita (more does not fit in its memory).",
@@ -377,7 +390,7 @@ namespace native_renderer
              "The picture is drawn at 512 x 448 times this: 0.5 is faster, 1 is the PS2's, 2 to 4 are sharper.",
              "A imagem é desenhada em 512 x 448 vezes este valor: 0,5 é mais rápido, 1 é a do PS2, 2 a 4 ficam mais nítidas.",
 #endif
-             nullptr, &Tuning::renderScale, kMinRenderScale, kMaxRenderScale, 0.5f, "SOTC_RENDER_SCALE"},
+             nullptr, &Tuning::renderScale, kMinRenderScale, kMaxRenderScale, 0.25f, "SOTC_RENDER_SCALE"},
             {"msaa", "Anti-aliasing (MSAA)", "Anti-aliasing (MSAA)",
              "Metal (Mac) only: smooths the edges of the 3D models with 2, 4 or 8 samples a pixel (as many as the GPU has). Costs GPU memory and time, more at a high resolution. "
              "OpenGL / Vita: not available.",
@@ -443,10 +456,27 @@ namespace native_renderer
              &Tuning::reflections, nullptr, 0, 1, 1, "SOTC_NATIVE_NOREFLECT"},
             {"refraction", "Water refraction", "Refração da água", "The scene seen through water.", "O cenário visto através da água.",
              &Tuning::refraction, nullptr, 0, 1, 1, "SOTC_NATIVE_NOREFRACT"},
+            {"heat_haze", "Heat haze", "Distorção de calor", "The shimmering air the screen copy makes (behind the bird colossus, some fights). The underwater ripple stays.",
+             "O ar tremulando feito com a cópia da tela (atrás do colosso pássaro, algumas lutas). A ondulação embaixo d'água continua.",
+             &Tuning::heatHaze, nullptr, 0, 1, 1, "SOTC_NATIVE_NOHAZE"},
             // (Round 62: a menu item on the Vita again, as the user asked; round
             // 64: off by default (the user's choice), a saved value honoured,
             // SOTC_CAP30 over both. On, it caps only the heavy frames: above 150
             // draws, never loading / black ones.)
+            // Round 107: Auto (the default, as before) or Steady 20: the
+            // picture changes every third refresh exactly, the game's own
+            // time step 50 ms to match (speed, animation and sound as in
+            // Auto). SOTC_CAP20=0/1 over the saved value.
+            {"frame_rate", "Frame rate", "Taxa de quadros",
+             "Auto: each picture is shown as soon as it is ready (the frame rate moves between about 15 and 30, so motion can look uneven). "
+             "Steady 20: in the game's scenes every picture stays on screen for exactly three refreshes (20 fps) and the game moves the world by the same "
+             "step each time, so motion is even; game speed, animation and sound are the same. A picture that is late shows at the next refresh "
+             "and the even rhythm goes on from there. Loading screens and menus are not held. Over the 30 fps cap when both are on.",
+             "Auto: cada imagem aparece assim que fica pronta (a taxa varia entre uns 15 e 30, então o movimento pode parecer irregular). "
+             "20 estável: nas cenas do jogo cada imagem fica na tela exatamente três atualizações (20 fps) e o jogo avança o mundo no mesmo passo "
+             "a cada vez, então o movimento fica uniforme; velocidade do jogo, animação e som não mudam. Uma imagem atrasada aparece na atualização "
+             "seguinte e o ritmo uniforme continua dali. Telas de carregamento e menus não são segurados. Vale sobre o limite de 30 fps quando os dois estão ligados.",
+             nullptr, &Tuning::frameRate, 0.0f, 1.0f, 1.0f, "SOTC_CAP20"},
             {"cap30", "30 fps cap", "Limite 30 fps",
              "The picture changes at most every other screen refresh in heavy scenes: steady 30 fps instead of a mix of 30 and 60 (or 20 and 30). Off: shown as soon as it is ready.",
              "A imagem muda no máximo a cada duas atualizações da tela nas cenas pesadas: 30 fps estáveis em vez de uma mistura de 30 e 60 (ou 20 e 30). Desligado: mostrada assim que fica pronta.",
@@ -722,11 +752,75 @@ namespace native_renderer
             v.push_back(item);
         }
         // The groups, and where each item changes anything.
+        // Round 124: the Graphics page's groups, and each item's cost (said
+        // after its help).
+        struct GroupOf
+        {
+            const char *key;
+            uint8_t group;
+            const char *cost, *costPt;
+        };
+        static const GroupOf kGroups[] = {
+            {"gfx_preset", 1, nullptr, nullptr},
+            {"render_scale", 2, "Cost: GPU (pixels: 0.5x draws a quarter of 1x's, 2x four times) and GPU memory.",
+             "Custo: GPU (pixels: 0,5x desenha um quarto dos de 1x, 2x quatro vezes) e memória da GPU."},
+            {"texture_filter", 2, "Cost: GPU, small (texture reads).", "Custo: GPU, pequeno (leitura de texturas)."},
+            {"msaa", 2, nullptr, nullptr},
+            {"effect_detail", 2, nullptr, nullptr},
+            {"bloom", 3, "Cost: GPU (the bloom chain's small passes and a full-screen composite).", "Custo: GPU (as passadas pequenas do bloom e uma composição na tela inteira)."},
+            {"bloom_strength", 3, "Cost: none.", "Custo: nenhum."},
+            {"bloom_rounds", 3, nullptr, nullptr},
+            {"bloom_spread", 3, nullptr, nullptr},
+            {"glow", 3, "Cost: GPU, only in scenes with the glow layer.", "Custo: GPU, só nas cenas com a camada de brilho."},
+            {"dbg_glow_vita", 3, "Cost: GPU; Plain is the cheapest.", "Custo: GPU; Simples é o mais leve."},
+            {"dof", 3, "Cost: GPU (a 256 x 256 copy, its blur and a full-screen pass), in the scenes that use it.",
+             "Custo: GPU (uma cópia 256 x 256, o borrão dela e uma passada na tela inteira), nas cenas que usam."},
+            {"screen_blur", 3, "Cost: GPU (a copy of the picture and a full-screen pass) while it is on screen.",
+             "Custo: GPU (uma cópia da imagem e uma passada na tela inteira) enquanto aparece."},
+            {"feedback", 3, "Cost: GPU, only in the scenes that use it.", "Custo: GPU, só nas cenas que usam."},
+            {"shadows", 4, "Cost: GPU (the shadow mask: reduction, blur, darkening) and the model worker.",
+             "Custo: GPU (a máscara de sombra: redução, borrão, escurecimento) e a thread dos modelos."},
+            {"body_shadows", 4, "Cost: GPU (stencil volumes) and the model worker (volumes built each frame).",
+             "Custo: GPU (volumes de stencil) e a thread dos modelos (volumes montados a cada quadro)."},
+            {"vertex_fog", 5, "Cost: GPU (fogged pixels read the sky image).", "Custo: GPU (pixels com névoa leem a imagem do céu)."},
+            {"fog_amount", 5, "Cost: none.", "Custo: nenhum."},
+            {"zfog", 5, "Cost: GPU (a full-screen pass) where there is depth fog.", "Custo: GPU (uma passada na tela inteira) onde há névoa de profundidade."},
+            {"particles", 6, "Cost: render thread and GPU (drawing only; the game still moves them).",
+             "Custo: thread de render e GPU (só o desenho; o jogo continua movendo elas)."},
+            {"sac_particles", 6, nullptr, nullptr},
+            {"sac_fx", 6, nullptr, nullptr},
+            {"reflections", 6, "Cost: GPU and render thread (the scene drawn again mirrored) where water or polished floors are in view.",
+             "Custo: GPU e thread de render (o cenário desenhado de novo espelhado) onde há água ou chão polido à vista."},
+            {"refraction", 6, "Cost: GPU (a copy of the picture) where water is in view.", "Custo: GPU (uma cópia da imagem) onde há água à vista."},
+            {"heat_haze", 6, "Cost: GPU (a copy of the picture), only where there is haze.", "Custo: GPU (uma cópia da imagem), só onde há distorção."},
+            {"alpha_test", 6, "Cost: GPU (a second pass for cut-out edges).", "Custo: GPU (uma segunda passada nas bordas recortadas)."},
+            {"model_detail", 7, "Cost: GPU and render thread (more vertices).", "Custo: GPU e thread de render (mais vértices)."},
+            {"sac_lod", 7, nullptr, nullptr},
+            {"sac_drawdist", 7, nullptr, nullptr},
+            {"sac_camcoll", 8, nullptr, nullptr},
+            {"sac_farchara", 8, nullptr, nullptr},
+            {"sac_max", 8, nullptr, nullptr},
+        };
+        static std::deque<std::string> helps; // (stable addresses)
+        for (TuningItem &item : v)
+            for (const GroupOf &g : kGroups)
+                if (!std::strcmp(item.key, g.key))
+                {
+                    item.group = g.group;
+                    item.quality = true;
+                    item.debug = false;
+                    if (g.cost)
+                    {
+                        helps.push_back(std::string(item.help) + " " + g.cost);
+                        item.help = helps.back().c_str();
+                        helps.push_back(std::string(item.helpPt) + " " + g.costPt);
+                        item.helpPt = helps.back().c_str();
+                    }
+                }
         for (TuningItem &item : v)
         {
             const std::string key = item.key;
-            item.quality = key == "quality_preset" || key == "render_scale" || key == "msaa" || key == "texture_filter" || key == "model_detail" ||
-                           key == "effect_detail" || key == "sac_camcoll" || key == "sac_farchara" || key == "sac_fx" || key == "sac_drawdist" || key == "sac_max";
+            item.inPreset = isPresetField(item);
             if (key == "msaa" || key == "effect_detail")
                 item.backends = 1;
             if (key == "bloom_rounds" || key == "bloom_spread" || key == "dbg_haze_source" || key == "dbg_water_source" || key == "dbg_redraw_mode0" || key == "dbg_glow_vita" || key == "dbg_bloom_sameframe" ||
@@ -739,22 +833,80 @@ namespace native_renderer
         return items;
     }
 
-    // The presets' values: render scale, MSAA, texture filter, model
-    // detail, effect detail. Medium is the Vita's old default, High the
-    // Mac's (nothing changes until another is picked).
+    // Round 124: the presets' items and values. Every item of the Graphics
+    // page a preset sets, in the [gfx124] line's order (its name there).
     namespace
     {
-        struct PresetValues
+        struct PresetField
         {
-            float renderScale, msaa, textureFilter, modelDetail, effectDetail;
+            const char *name;
+            bool Tuning::*toggle;
+            float Tuning::*number;
         };
-        constexpr PresetValues kPresets[4] = {
-            {0.5f, 0.0f, 1.0f, 0.0f, 0.0f}, // Low: half the PS2's resolution, bilinear
-            {1.0f, 0.0f, 2.0f, 0.0f, 0.0f}, // Medium: the PS2's 512 x 448
-            {3.0f, 0.0f, 2.0f, 0.0f, 0.0f}, // High: 3x
-            {4.0f, 2.0f, 6.0f, 2.0f, 1.0f}, // Ultra: 4x, 4x MSAA, 16x anisotropic, the finest models, high effect detail
+        constexpr PresetField kPresetFields[] = {
+            {"render_scale", nullptr, &Tuning::renderScale}, {"msaa", nullptr, &Tuning::msaa}, {"texture_filter", nullptr, &Tuning::textureFilter},
+            {"model_detail", nullptr, &Tuning::modelDetail}, {"effect_detail", nullptr, &Tuning::effectDetail}, {"bloom", &Tuning::bloom, nullptr},
+            {"bloom_strength", nullptr, &Tuning::bloomStrength}, {"bloom_rounds", nullptr, &Tuning::bloomRounds}, {"bloom_spread", nullptr, &Tuning::bloomSpread},
+            {"glow", &Tuning::glow, nullptr}, {"glow_vita", nullptr, &Tuning::glowVita}, {"dof", &Tuning::depthOfField, nullptr},
+            {"screen_blur", &Tuning::screenBlur, nullptr}, {"feedback", &Tuning::feedback, nullptr}, {"shadows", &Tuning::shadows, nullptr},
+            {"body_shadows", &Tuning::bodyShadows, nullptr}, {"vertex_fog", &Tuning::vertexFog, nullptr}, {"fog_amount", nullptr, &Tuning::vertexFogAmount},
+            {"zfog", &Tuning::zFog, nullptr}, {"particles", &Tuning::particles, nullptr}, {"sac_particles", &Tuning::sacParticles, nullptr},
+            {"sac_fx", &Tuning::sacFxHalf, nullptr}, {"reflections", &Tuning::reflections, nullptr}, {"refraction", &Tuning::refraction, nullptr},
+            {"heat_haze", &Tuning::heatHaze, nullptr}, {"alpha_test", &Tuning::alphaTest, nullptr}, {"sac_lod", &Tuning::sacLod, nullptr},
+            {"sac_drawdist", &Tuning::sacDrawDist, nullptr},
         };
+        constexpr int kPresetFieldCount = static_cast<int>(sizeof(kPresetFields) / sizeof(kPresetFields[0]));
+        // Columns as kPresetFields: scale, msaa, filter, model, effect | bloom, strength, rounds, spread | glow, glow (Vita), dof,
+        // screen blur, trail | shadows, body shadows | vertex fog, amount, depth fog | particles, fewer particles, effects at
+        // half rate, reflections, refraction, heat haze, alpha test | coarser detail, shorter draw distance.
+        // Effects at half rate (sac_fx) is in none: Vita3K's in-run A/B had Low, which had it, slower on the game thread than
+        // Medium and High (shrine +1.8 ms, route 6 +7 ms p50); it stays an item of its own.
+        // High is each platform's default look (the Mac: 3x; the Vita: 1x and fewer particles, round 36's default there).
+        // The Vita's Max draws at 1.5x: at 2x the picture's targets took GPU memory to 109.5 of Vita3K's 112 MB at the shrine
+        // (1x: 62.5), past the console's 96 (its r119 log: 64.9 of 96 at 1x); 2x stays a choice of the Resolution item.
+        constexpr float kPresetValues[kPresetCustom][kPresetFieldCount] = {
+#if defined(__vita__) || defined(__linux__)
+            {0.5f, 0, 0, 0, 0, /**/ 0, 1, 1, 1, /**/ 0, 0, 0, 0, 0, /**/ 0, 0, /**/ 0, 1, 0, /**/ 0, 1, 0, 0, 0, 0, 0, /**/ 1, 1},  // Off
+            {0.75f, 0, 1, 0, 0, /**/ 0, 1, 1, 1, /**/ 1, 0, 0, 0, 0, /**/ 1, 0, /**/ 1, 1, 1, /**/ 1, 1, 0, 0, 0, 0, 1, /**/ 1, 1}, // Low
+            {1.0f, 0, 2, 0, 0, /**/ 1, 1, 1, 1, /**/ 1, 0, 0, 1, 1, /**/ 1, 1, /**/ 1, 1, 1, /**/ 1, 1, 0, 1, 0, 0, 1, /**/ 1, 0},  // Medium
+            {1.0f, 0, 2, 0, 0, /**/ 1, 1, 1, 1, /**/ 1, 1, 1, 1, 1, /**/ 1, 1, /**/ 1, 1, 1, /**/ 1, 1, 0, 1, 1, 1, 1, /**/ 0, 0},  // High
+            {1.5f, 0, 2, 2, 0, /**/ 1, 1, 1, 1, /**/ 1, 1, 1, 1, 1, /**/ 1, 1, /**/ 1, 1, 1, /**/ 1, 0, 0, 1, 1, 1, 1, /**/ 0, 0},  // Max
+#else
+            {0.5f, 0, 0, 0, 0, /**/ 0, 1, 1, 1, /**/ 0, 0, 0, 0, 0, /**/ 0, 0, /**/ 0, 1, 0, /**/ 0, 1, 0, 0, 0, 0, 0, /**/ 1, 1}, // Off
+            {1.0f, 0, 1, 0, 0, /**/ 0, 1, 1, 1, /**/ 1, 0, 0, 0, 0, /**/ 1, 0, /**/ 1, 1, 1, /**/ 1, 1, 0, 0, 0, 0, 1, /**/ 1, 1}, // Low
+            {2.0f, 0, 2, 0, 0, /**/ 1, 1, 1, 1, /**/ 1, 0, 0, 1, 1, /**/ 1, 1, /**/ 1, 1, 1, /**/ 1, 1, 0, 1, 0, 0, 1, /**/ 1, 0}, // Medium
+            {3.0f, 0, 2, 0, 0, /**/ 1, 1, 1, 1, /**/ 1, 1, 1, 1, 1, /**/ 1, 1, /**/ 1, 1, 1, /**/ 1, 0, 0, 1, 1, 1, 1, /**/ 0, 0}, // High
+            {4.0f, 2, 6, 2, 2, /**/ 1, 1, 1, 1, /**/ 1, 1, 1, 1, 1, /**/ 1, 1, /**/ 1, 1, 1, /**/ 1, 0, 0, 1, 1, 1, 1, /**/ 0, 0}, // Max
+#endif
+        };
+        float presetValue(int preset, int field)
+        {
+            const float v = kPresetValues[preset][field];
+            return kPresetFields[field].number == &Tuning::renderScale ? std::clamp(v, kMinRenderScale, kMaxRenderScale) : v;
+        }
+        float fieldValue(const Tuning &t, int field)
+        {
+            const PresetField &f = kPresetFields[field];
+            return f.toggle ? (t.*f.toggle ? 1.0f : 0.0f) : t.*f.number;
+        }
+    }
 
+    bool isPresetField(const TuningItem &item)
+    {
+        for (const PresetField &f : kPresetFields)
+            if ((f.toggle && f.toggle == item.toggle) || (f.number && f.number == item.number))
+                return true;
+        return false;
+    }
+
+    const char *presetName(int preset)
+    {
+        static const char *names[] = {"Off", "Low", "Medium", "High", "Max", "Custom"};
+        return names[std::clamp(preset, 0, static_cast<int>(kPresetCustom))];
+    }
+
+    namespace
+    {
         // Named values: count, English, Portuguese.
         struct Choices
         {
@@ -763,8 +915,8 @@ namespace native_renderer
         };
         Choices choicesOf(const TuningItem &item)
         {
-            static const char *presetEn[] = {"Low", "Medium", "High", "Ultra", "Custom"};
-            static const char *presetPt[] = {"Baixo", "Médio", "Alto", "Ultra", "Personalizado"};
+            static const char *presetEn[] = {"Off", "Low", "Medium", "High", "Max", "Custom"};
+            static const char *presetPt[] = {"Desligado", "Baixo", "Médio", "Alto", "Máximo", "Personalizado"};
             static const char *msaaEn[] = {"Off", "2x", "4x", "8x"};
             static const char *msaaPt[] = {"Desligado", "2x", "4x", "8x"};
             static const char *filterEn[] = {"Nearest", "Bilinear", "Trilinear", "Anisotropic 2x", "Anisotropic 4x", "Anisotropic 8x", "Anisotropic 16x"};
@@ -777,10 +929,14 @@ namespace native_renderer
             static const char *glowPt[] = {"Simples", "Auto", "Sempre"};
             static const char *audioEn[] = {"Off", "Summary", "Summary + events"};
             static const char *audioPt[] = {"Desligado", "Resumo", "Resumo + eventos"};
+            static const char *rateEn[] = {"Auto", "Steady 20"};
+            static const char *ratePt[] = {"Auto", "20 estável"};
             static const char *sourceEn[] = {"small copy", "full copy", "last frame"};
             static const char *sourcePt[] = {"cópia pequena", "cópia inteira", "quadro anterior"};
+            if (item.number == &Tuning::frameRate)
+                return {2, rateEn, ratePt};
             if (item.number == &Tuning::preset)
-                return {5, presetEn, presetPt};
+                return {6, presetEn, presetPt};
             if (item.number == &Tuning::msaa)
                 return {4, msaaEn, msaaPt};
             if (item.number == &Tuning::textureFilter)
@@ -803,20 +959,24 @@ namespace native_renderer
     {
         if (preset < 0 || preset >= kPresetCustom)
             return;
-        const PresetValues &p = kPresets[preset];
-        t.renderScale = std::clamp(p.renderScale, kMinRenderScale, kMaxRenderScale); // the Vita: at most 2x (kMaxRenderScale)
-        t.msaa = p.msaa;
-        t.textureFilter = p.textureFilter;
-        t.modelDetail = p.modelDetail;
-        t.effectDetail = p.effectDetail;
+        for (int i = 0; i < kPresetFieldCount; ++i)
+        {
+            const PresetField &f = kPresetFields[i];
+            const float v = presetValue(preset, i);
+            if (f.toggle)
+                t.*f.toggle = v != 0.0f;
+            else
+                t.*f.number = v;
+        }
         t.preset = static_cast<float>(preset);
     }
 
-    static bool presetMatches(const Tuning &t, int i)
+    static bool presetMatches(const Tuning &t, int preset)
     {
-        const PresetValues &p = kPresets[i];
-        return t.renderScale == std::clamp(p.renderScale, kMinRenderScale, kMaxRenderScale) && t.msaa == p.msaa && t.textureFilter == p.textureFilter &&
-               t.modelDetail == p.modelDetail && t.effectDetail == p.effectDetail;
+        for (int i = 0; i < kPresetFieldCount; ++i)
+            if (fieldValue(t, i) != presetValue(preset, i))
+                return false;
+        return true;
     }
     int matchingPreset(const Tuning &t)
     {
@@ -829,6 +989,48 @@ namespace native_renderer
             if (presetMatches(t, i))
                 return i;
         return kPresetCustom;
+    }
+
+    std::string gfxLine(const Tuning &t)
+    {
+        std::string out = std::string("preset ") + presetName(matchingPreset(t));
+        char b[48];
+        for (int i = 0; i < kPresetFieldCount; ++i)
+        {
+            std::snprintf(b, sizeof(b), " %s=%g", kPresetFields[i].name, static_cast<double>(fieldValue(t, i)));
+            out += b;
+        }
+        return out;
+    }
+
+    void gfxLogIfChanged(unsigned long long frame)
+    {
+        static float last[kPresetFieldCount];
+        static bool logged = false;
+        const Tuning &t = tuning();
+        bool same = logged;
+        for (int i = 0; i < kPresetFieldCount; ++i)
+        {
+            const float v = fieldValue(t, i);
+            same = same && v == last[i];
+            last[i] = v;
+        }
+        if (same)
+            return;
+        const int preset = matchingPreset(t);
+        g_gfxPresetNow.store(preset, std::memory_order_relaxed);
+        std::fprintf(stderr, "[gfx124] frame %llu %s%s\n", frame, logged ? "" : "(start) ", gfxLine(t).c_str());
+        std::fflush(stderr);
+        logged = true;
+    }
+
+    bool tuningFromEnv(const TuningItem &item)
+    {
+        if (item.env && std::getenv(item.env))
+            return true;
+        if (item.inPreset && std::getenv("SOTC_PRESET"))
+            return true;
+        return !std::strncmp(item.key, "sac_", 4) && std::getenv("SOTC_SACRIFICES"); // (round 36: all of them set at start)
     }
 
     int tuningChoices(const TuningItem &item) { return choicesOf(item).count; }
@@ -892,6 +1094,7 @@ namespace native_renderer
         if (item.toggle)
         {
             t.*item.toggle = !(t.*item.toggle);
+            t.preset = static_cast<float>(matchingPreset(t)); // (round 124: saved as the preset shown)
             return;
         }
         if (item.mask)
@@ -901,10 +1104,16 @@ namespace native_renderer
         }
         if (item.number == &Tuning::preset)
         {
-            // Low .. Ultra, round; from Custom to the platform's own.
+            // Off .. Max, round; from Custom to High (the default look).
             int p = matchingPreset(t);
-            p = p == kPresetCustom ? static_cast<int>(defaultTuning().preset) : (p + (dir > 0 ? 1 : kPresetCustom - 1)) % kPresetCustom;
+            p = p == kPresetCustom ? static_cast<int>(kPresetHigh) : (p + (dir > 0 ? 1 : kPresetCustom - 1)) % kPresetCustom;
             applyPreset(t, p);
+            return;
+        }
+        if (item.number == &Tuning::frameRate)
+        {
+            // Round 107: two choices, X flips between them (as a switch).
+            t.frameRate = t.frameRate >= 0.5f ? 0.0f : 1.0f;
             return;
         }
         float &v = t.*item.number;
@@ -951,9 +1160,7 @@ namespace native_renderer
                 continue;
             if (item.action)
                 return true; // (never saved)
-            if (item.env && std::getenv(item.env))
-                return false;
-            if (!std::strncmp(key, "sac_", 4) && std::getenv("SOTC_SACRIFICES")) // (round 36: all of them set at start)
+            if (tuningFromEnv(item))
                 return false;
             if (item.toggle)
                 tuning().*item.toggle = value != 0.0f;
@@ -964,7 +1171,7 @@ namespace native_renderer
             if (item.number == &Tuning::preset)
             {
                 tuningChanged(item); // the preset (saved first) applies; the items saved after it override,
-                qualityFromEnv(tuning()); // and so do the variables set at start
+                presetEnv(tuning());      // and so do the variables set at start
             }
             tuning().preset = static_cast<float>(matchingPreset(tuning()));
             return true;
@@ -1155,13 +1362,14 @@ namespace native_renderer
                 uint64_t clocks = 0;
                 uint32_t preempts = 0, moves = 0;
                 bool seen = false;
+                int placed = 0; // round 100: the priority place() left it at (setKindPriority's 0)
             };
             Slot g_slots[kSlots];
             std::atomic<int> g_slotCount{0};
             std::mutex g_slotMutex;
             uint64_t g_cpuUs[kKinds] = {}, g_preempts[kKinds] = {}, g_moves[kKinds] = {};
             uint64_t g_lastCpuUs[kKinds] = {}, g_lastPreempts[kKinds] = {}, g_lastMoves[kKinds] = {}; // the last sample's alone
-            const char *const kNames[kKinds] = {"game", "worker", "render", "build", "audio", "main", "loader", "recorder", "log", "dma", "lane", "offload"};
+            const char *const kNames[kKinds] = {"game", "worker", "render", "build", "audio", "main", "loader", "recorder", "log", "dma", "lane", "offload", "guest"};
         }
         void place(Kind kind)
         {
@@ -1208,6 +1416,13 @@ namespace native_renderer
                 // (a walk of 1-2 ms a frame, off the game thread's core).
                 mask = SCE_KERNEL_CPU_MASK_USER_1 | SCE_KERNEL_CPU_MASK_USER_2;
                 break;
+            case kGuest:
+                // Round 91: the guest worker (sotc_worker.cpp), cores 1-2, above
+                // the render thread and the hook worker (its job is on the game
+                // thread's path: the display walk joins it); SOTC_THREAD_PRIO=guest:<n>.
+                mask = SCE_KERNEL_CPU_MASK_USER_1 | SCE_KERNEL_CPU_MASK_USER_2;
+                prio = 140;
+                break;
             case kLog:
                 // The default priority (the pthreads' own; it only has to
                 // keep up over seconds).
@@ -1249,13 +1464,40 @@ namespace native_renderer
             const int prioResult = prio >= 64 && prio <= 191 ? sceKernelChangeThreadPriority(self, prio) : 0;
             SceKernelThreadInfo info{};
             info.size = sizeof(info);
-            if (sceKernelGetThreadInfo(self, &info) >= 0)
+            const bool haveInfo = sceKernelGetThreadInfo(self, &info) >= 0;
+            if (haveInfo)
+            {
+                std::lock_guard<std::mutex> lock(g_slotMutex);
+                for (int i = 0; i < g_slotCount.load(std::memory_order_relaxed); ++i)
+                    if (g_slots[i].id == self)
+                        g_slots[i].placed = info.currentPriority;
+            }
+            if (haveInfo)
                 std::fprintf(stderr, "[threads] %s (%s, layout %d): cores 0x%x%s, priority %d%s\n", kNames[kind], info.name, layout() ? 1 : 0,
                              static_cast<unsigned>(info.currentCpuAffinityMask), maskResult < 0 ? " (refused)" : "", info.currentPriority,
                              prioResult < 0 ? " (refused)" : "");
         }
+        // Round 100: every noted thread of a kind at priority `prio` (0: the
+        // one place() left it at); threads placed later keep place()'s.
+        void setKindPriority(Kind kind, int prio)
+        {
+            std::lock_guard<std::mutex> lock(g_slotMutex);
+            for (int i = 0; i < g_slotCount.load(std::memory_order_relaxed); ++i)
+            {
+                const Slot &t = g_slots[i];
+                if (t.kind != kind)
+                    continue;
+                const int want = prio > 0 ? prio : t.placed;
+                if (want >= 64 && want <= 191)
+                    sceKernelChangeThreadPriority(t.id, want);
+            }
+        }
+        // Round 130: sample / line / lastFrame from the frame log's thread (log76) or, with log76 off, the game
+        // thread; an A/B of log76 changes hands between windows.
+        std::mutex g_sampleMutex;
         void sample()
         {
+            std::lock_guard<std::mutex> sampleLock(g_sampleMutex);
             const int n = g_slotCount.load(std::memory_order_acquire);
             for (int k = 0; k < kKinds; ++k)
                 g_lastCpuUs[k] = g_lastPreempts[k] = g_lastMoves[k] = 0;
@@ -1282,6 +1524,7 @@ namespace native_renderer
         }
         int line(char *out, size_t room, double frames, bool reset, bool lastFrame)
         {
+            std::lock_guard<std::mutex> sampleLock(g_sampleMutex);
             const uint64_t *cpu = lastFrame ? g_lastCpuUs : g_cpuUs, *pre = lastFrame ? g_lastPreempts : g_preempts, *mov = lastFrame ? g_lastMoves : g_moves;
             if (lastFrame)
                 frames = 1.0;
@@ -1321,6 +1564,7 @@ namespace native_renderer
         // Round 76: line(..., lastFrame = true)'s numbers, and its text from them.
         void lastFrame(Snapshot &s)
         {
+            std::lock_guard<std::mutex> sampleLock(g_sampleMutex);
             s.kinds = 0;
             for (int k = 0; k < kKinds; ++k)
             {
@@ -1346,8 +1590,12 @@ namespace native_renderer
             {
                 if (!(s.kinds & (1u << k)))
                     continue;
-                at += std::snprintf(out + at, room - at, "%s %s %.1f (%.0fp %.0fm)", any ? "," : " | cpu", kNames[k], s.cpu[k] / 1.0 / 1000.0,
-                                    s.pre[k] / 1.0, s.mov[k] / 1.0);
+                if (g_log105) // round 105: the same text without newlib's dtoa
+                    at += fmt105(out + at, room - at, "%s %s %.1f (%.0fp %.0fm)", any ? "," : " | cpu", kNames[k], s.cpu[k] / 1.0 / 1000.0,
+                                 s.pre[k] / 1.0, s.mov[k] / 1.0);
+                else
+                    at += std::snprintf(out + at, room - at, "%s %s %.1f (%.0fp %.0fm)", any ? "," : " | cpu", kNames[k], s.cpu[k] / 1.0 / 1000.0,
+                                        s.pre[k] / 1.0, s.mov[k] / 1.0);
                 any = true;
             }
             return at;
@@ -1358,7 +1606,7 @@ namespace native_renderer
 #if defined(__linux__)
             if (layout() == 0)
                 return;
-            static const char *const kNames[kKinds] = {"game", "worker", "render", "build", "audio", "main", "loader", "recorder", "log", "dma", "lane", "offload"};
+            static const char *const kNames[kKinds] = {"game", "worker", "render", "build", "audio", "main", "loader", "recorder", "log", "dma", "lane", "offload", "guest"};
             cpu_set_t cpuset;
             CPU_ZERO(&cpuset);
             switch (kind)
@@ -1370,7 +1618,8 @@ namespace native_renderer
             case kWorker:
             case kLane:
             case kOffload:
-                // Fast parallel scene/mesh/texture lanes on Cores 1 & 2
+            case kGuest:
+                // Fast parallel scene/mesh/texture/guest-worker lanes on Cores 1 & 2
                 CPU_SET(1, &cpuset);
                 CPU_SET(2, &cpuset);
                 break;
@@ -1398,6 +1647,7 @@ namespace native_renderer
             (void)kind;
 #endif
         }
+        void setKindPriority(Kind, int) {}
         void sample() {}
         int line(char *out, size_t room, double, bool, bool)
         {
@@ -1500,6 +1750,252 @@ namespace native_renderer
             }();
             return on;
         }
+    }
+    bool g_build105 = true;
+    bool g_log105 = true;
+    bool g_render105 = true;
+    namespace
+    {
+        // Round 105: fmt105's text, like snprintf's (the count is the whole
+        // text's; what fits is written, then the 0).
+        struct Out105
+        {
+            char *p;
+            size_t room, n = 0;
+            void put(char c)
+            {
+                if (n + 1u < room)
+                    p[n] = c;
+                ++n;
+            }
+            void put(const char *s, size_t len)
+            {
+                for (size_t i = 0; i < len; ++i)
+                    put(s[i]);
+            }
+            void putU32(uint32_t v, int minDigits = 1)
+            {
+                char d[12];
+                int k = 0;
+                do
+                {
+                    d[k++] = static_cast<char>('0' + v % 10u);
+                    v /= 10u;
+                } while (v);
+                while (k < minDigits)
+                    d[k++] = '0';
+                while (k)
+                    put(d[--k]);
+            }
+            void putU64(unsigned long long v)
+            {
+                if (v <= 0xFFFFFFFFull)
+                {
+                    putU32(static_cast<uint32_t>(v));
+                    return;
+                }
+                char d[24];
+                const int k = std::snprintf(d, sizeof(d), "%llu", v);
+                put(d, static_cast<size_t>(k));
+            }
+            void putI64(long long v)
+            {
+                if (v < 0)
+                {
+                    put('-');
+                    putU64(0ull - static_cast<unsigned long long>(v));
+                }
+                else
+                    putU64(static_cast<unsigned long long>(v));
+            }
+            // %.<prec>f: v * 10^prec rounded to an integer as printf would
+            // (the exact value's nearest, ties to even): where the product
+            // lies within ~1e-6 of a half (it may have rounded across it),
+            // too large, -0, NaN or inf: snprintf for this number.
+            void putF(double v, int prec)
+            {
+                static const double kScale[4] = {1.0, 10.0, 100.0, 1000.0};
+                static const uint32_t kScaleU[4] = {1u, 10u, 100u, 1000u};
+                const bool neg = std::signbit(v);
+                const double a = std::fabs(v);
+                const double s = a * kScale[prec];
+                bool slow = !(s < 4.0e9) || (neg && a == 0.0);
+                uint32_t r = 0;
+                if (!slow)
+                {
+                    const double whole = std::floor(s);
+                    const double frac = s - whole;
+                    if (std::fabs(frac - 0.5) < 1e-6)
+                        slow = true;
+                    else
+                    {
+                        r = static_cast<uint32_t>(whole) + (frac > 0.5 ? 1u : 0u);
+                        if (r < static_cast<uint32_t>(whole)) // (wrapped)
+                            slow = true;
+                    }
+                }
+                if (slow)
+                {
+                    char d[64];
+                    static const char *const kFormat[4] = {"%.0f", "%.1f", "%.2f", "%.3f"};
+                    const int k = std::snprintf(d, sizeof(d), kFormat[prec], v);
+                    if (k > 0)
+                        put(d, std::min(static_cast<size_t>(k), sizeof(d) - 1u));
+                    return;
+                }
+                if (neg)
+                    put('-');
+                putU32(r / kScaleU[prec]);
+                if (prec)
+                {
+                    put('.');
+                    putU32(r % kScaleU[prec], prec);
+                }
+            }
+        };
+        int vfmt105(char *out, size_t room, const char *format, va_list args)
+        {
+            va_list whole;
+            va_copy(whole, args);
+            Out105 o{out, room};
+            for (const char *f = format; *f; ++f)
+            {
+                if (*f != '%')
+                {
+                    o.put(*f);
+                    continue;
+                }
+                const char *spec = f + 1;
+                if (*spec == '%')
+                {
+                    o.put('%');
+                    f = spec;
+                    continue;
+                }
+                int prec = -1;
+                if (*spec == '.' && spec[1] >= '0' && spec[1] <= '3' && spec[2] == 'f')
+                {
+                    prec = spec[1] - '0';
+                    spec += 2;
+                }
+                int longs = 0;
+                bool size = false;
+                while (*spec == 'l')
+                    ++longs, ++spec;
+                if (*spec == 'z')
+                    size = true, ++spec;
+                const char c = *spec;
+                bool ok = true;
+                if (prec >= 0)
+                    o.putF(va_arg(args, double), prec);
+                else if (c == 's' && !longs && !size)
+                {
+                    const char *s = va_arg(args, const char *);
+                    o.put(s ? s : "(null)", std::strlen(s ? s : "(null)"));
+                }
+                else if (c == 'c' && !longs && !size)
+                    o.put(static_cast<char>(va_arg(args, int)));
+                else if ((c == 'd' || c == 'i') && !size)
+                    o.putI64(longs >= 2 ? va_arg(args, long long) : longs ? va_arg(args, long) : va_arg(args, int));
+                else if (c == 'u' || c == 'x')
+                {
+                    const unsigned long long v = size ? va_arg(args, size_t) : longs >= 2 ? va_arg(args, unsigned long long) : longs ? va_arg(args, unsigned long) : va_arg(args, unsigned);
+                    if (c == 'u')
+                        o.putU64(v);
+                    else
+                    {
+                        char d[24];
+                        const int k = std::snprintf(d, sizeof(d), "%llx", v);
+                        o.put(d, static_cast<size_t>(k));
+                    }
+                }
+                else
+                    ok = false;
+                if (!ok)
+                {
+                    // Another conversion (a width, a flag ...): all of it as vsnprintf would.
+                    const int n = std::vsnprintf(out, room, format, whole);
+                    va_end(whole);
+                    return n;
+                }
+                f = spec;
+            }
+            va_end(whole);
+            if (room)
+                out[std::min(o.n, room - 1u)] = 0;
+            return static_cast<int>(o.n);
+        }
+    }
+    // SOTC_LOG105_CHECK=1 (checking): every fmt105 / logf105 text against
+    // vsnprintf's ([log105c] every 20 000 texts: compared, differ).
+    std::atomic<uint64_t> g_log105Checks{0}, g_log105Differ{0};
+    void check105(const char *mine, int n, size_t room, const char *format, va_list args)
+    {
+        char ref[2048];
+        const int m = std::vsnprintf(ref, std::min(room, sizeof(ref)), format, args);
+        const uint64_t k = g_log105Checks.fetch_add(1, std::memory_order_relaxed) + 1u;
+        if (m != n || std::strcmp(ref, mine) != 0)
+        {
+            const uint64_t d = g_log105Differ.fetch_add(1, std::memory_order_relaxed);
+            if (d < 10u)
+            {
+                char line[4300];
+                std::snprintf(line, sizeof(line), "[log105c] DIFFERS (%d / %d):\n  fmt105 %s\n  printf %s\n", n, m, mine, ref);
+                logBytes(line, std::strlen(line));
+            }
+        }
+        if (k % 20000u == 0u)
+        {
+            char line[128];
+            std::snprintf(line, sizeof(line), "[log105c] %llu texts compared, %llu differ\n", (unsigned long long)k,
+                          (unsigned long long)g_log105Differ.load(std::memory_order_relaxed));
+            logBytes(line, std::strlen(line));
+        }
+    }
+    bool check105On()
+    {
+        static const bool on = ps2_diag::env("SOTC_LOG105_CHECK") && std::atoi(ps2_diag::env("SOTC_LOG105_CHECK")) != 0;
+        return on;
+    }
+    int fmt105(char *out, size_t room, const char *format, ...)
+    {
+        va_list args;
+        va_start(args, format);
+        va_list again;
+        va_copy(again, args);
+        const int n = vfmt105(out, room, format, args);
+        va_end(args);
+        if (check105On() && room && room <= 2048u)
+            check105(out, n, room, format, again);
+        va_end(again);
+        return n;
+    }
+    void logf105(const char *format, ...)
+    {
+        char line[2048];
+        va_list args;
+        va_start(args, format);
+        if (!logAsync())
+        {
+            std::vfprintf(stderr, format, args);
+            va_end(args);
+            return;
+        }
+        va_list again;
+        va_copy(again, args);
+        int n = vfmt105(line, sizeof(line), format, args);
+        va_end(args);
+        if (check105On())
+            check105(line, n, sizeof(line), format, again);
+        va_end(again);
+        if (n <= 0)
+            return;
+        if (static_cast<size_t>(n) >= sizeof(line))
+        {
+            n = static_cast<int>(sizeof(line) - 1u);
+            line[n - 1] = '\n'; // cut, still a line
+        }
+        logBytes(line, static_cast<size_t>(n));
     }
     void logf(const char *format, ...)
     {
@@ -1631,13 +2127,21 @@ namespace native_renderer
         {
             if (staged.empty())
                 return;
+            bool sleeper = false;
             {
                 std::lock_guard<std::mutex> lock(mutex);
                 for (Job &job : staged)
                     todo.push_back(std::move(job));
+                sleeper = sleeping;
             }
             staged.clear();
             wake.notify_one();
+#if defined(__vita__)
+            if (sleeper && sema >= 0)
+                sceKernelSignalSema(sema, 1);
+#else
+            (void)sleeper;
+#endif
         }
         std::vector<Job> finished;            // the game thread's (kept for its capacity)
 
@@ -1653,7 +2157,29 @@ namespace native_renderer
                 {
                     std::unique_lock<std::mutex> lock(mutex);
                     while (todo.empty())
+                    {
+#if defined(__vita__)
+                        // Round 105 (build105): idle on a kernel semaphore
+                        // (flush signals it when this side said it sleeps,
+                        // both under the mutex: no wake-up lost; a count, so
+                        // a signal before the wait is kept), 20 ms timeout as
+                        // the hook worker's. It looked every 2 ms (the
+                        // console: ~25 timed waits a frame for nothing, the
+                        // thread's ~2.5 ms of CPU a frame on cores 1-2 with
+                        // no builds).
+                        if (sema >= 0 && g_build105)
+                        {
+                            sleeping = true;
+                            lock.unlock();
+                            SceUInt timeout = 20000;
+                            sceKernelWaitSema(sema, 1, &timeout);
+                            lock.lock();
+                            sleeping = false;
+                            continue;
+                        }
+#endif
                         wake.wait_for(lock, std::chrono::milliseconds(2));
+                    }
                     job = std::move(todo.front());
                     todo.pop_front();
                 }
@@ -1663,12 +2189,15 @@ namespace native_renderer
                 done.push_back(std::move(job));
             }
         }
+        bool sleeping = false; // the worker waits on the semaphore (under the mutex)
+        int sema = -1;         // round 105: the idle worker's wake-up (the Vita)
         void start()
         {
             if (started)
                 return;
             started = true;
 #if defined(__vita__)
+            sema = sceKernelCreateSema("BuildWake", 0, 0, 1, nullptr);
             const unsigned int stackDefault = _pthread_stack_default_user;
             _pthread_stack_default_user = 256u * 1024u;
 #endif
@@ -1845,7 +2374,7 @@ namespace native_renderer
     std::atomic<const void *> g_raceHolderThread{nullptr};
     bool raceCheckOn()
     {
-        static const bool on = std::getenv("SOTC_RACE_CHECK") != nullptr; // (first use is after the Vita's env.txt)
+        static const bool on = ps2_diag::env("SOTC_RACE_CHECK") != nullptr; // (first use is after the Vita's env.txt)
         return on;
     }
     thread_local int t_raceNest = 0; // this thread's own nesting (beginFrame -> uploads, drawMulti -> draw)
@@ -1907,7 +2436,7 @@ namespace native_renderer
     // ones, the ids with a top bit set; textures), every 60 frames.
     struct UploadStats
     {
-        bool on = std::getenv("SOTC_NATIVE_LOG_UPLOADS") != nullptr;
+        bool on = ps2_diag::env("SOTC_NATIVE_LOG_UPLOADS") != nullptr;
         uint64_t frames = 0, staticMeshes = 0, staticBytes = 0, frameMeshes = 0, frameBytes = 0, textures = 0, textureBytes = 0, draws = 0;
     } g_uploads;
     std::vector<uint64_t> *g_drawTap = nullptr;
@@ -1922,7 +2451,7 @@ namespace native_renderer
     // palettes too (some are made once a frame: only the first leg has them).
     bool tapMeshes()
     {
-        static const bool on = std::getenv("SOTC_DIFFTEST_DRAWS") && std::atoi(std::getenv("SOTC_DIFFTEST_DRAWS")) >= 2;
+        static const bool on = ps2_diag::env("SOTC_DIFFTEST_DRAWS") && std::atoi(ps2_diag::env("SOTC_DIFFTEST_DRAWS")) >= 2;
         return on;
     }
     uint64_t tapHash(uint64_t h, const void *p, size_t n)
@@ -2139,7 +2668,7 @@ namespace native_renderer
         g_drawTap->push_back(h);
         // SOTC_DIFFTEST_DRAWS_LOG=1: the first draws of each leg, readable (debugging the tap).
         // =<n>: the draws from the n-th on.
-        static const long logFrom = std::getenv("SOTC_DIFFTEST_DRAWS_LOG") ? std::atol(std::getenv("SOTC_DIFFTEST_DRAWS_LOG")) : -1;
+        static const long logFrom = ps2_diag::env("SOTC_DIFFTEST_DRAWS_LOG") ? std::atol(ps2_diag::env("SOTC_DIFFTEST_DRAWS_LOG")) : -1;
         if (logFrom >= 0 && g_drawTap->size() >= static_cast<size_t>(logFrom) && g_drawTap->size() < static_cast<size_t>(logFrom) + 4u)
         {
             uint64_t ch = tapHash(0xcbf29ce484222325ull, clip, 64), lh = tapHash(0xcbf29ce484222325ull, s.light, sizeof(s.light));
@@ -2202,6 +2731,7 @@ namespace native_renderer
         // The menus' Debug group: what is drawn at all.
         const Tuning &t = tuning();
         if (((t.hiddenLayers >> (state.order & 31u)) & 1u) || (state.screen ? !t.draw2D : !t.drawWorld) || (state.overlay && !t.overlays) ||
+            (state.screenCopy && state.order != 19u && !t.heatHaze) || // round 124: the heat haze (layer 19: the underwater ripple, kept)
             (state.blend == Blend::Additive && !t.additive) || (state.blend == Blend::Subtract && !t.subtract))
         {
             if (native_recorder::active())
@@ -2289,6 +2819,7 @@ namespace native_renderer
         }
         const Tuning &t = tuning();
         if (((t.hiddenLayers >> (state.order & 31u)) & 1u) || (state.screen ? !t.draw2D : !t.drawWorld) || (state.overlay && !t.overlays) ||
+            (state.screenCopy && state.order != 19u && !t.heatHaze) || // round 124: the heat haze (layer 19: the underwater ripple, kept)
             (state.blend == Blend::Additive && !t.additive) || (state.blend == Blend::Subtract && !t.subtract))
         {
             if (native_recorder::active())
@@ -2366,10 +2897,10 @@ namespace native_renderer
             static int next = 0;
             if (frames++ % static_cast<uint64_t>(cycle) == 0u)
             {
-                static const char *names[] = {"high", "medium", "low", "ultra", "high+msaa8", "high+aniso16", "high+finest", "high+nearest", "high+effects2"};
+                static const char *names[] = {"high", "medium", "low", "max", "high+msaa8", "high+aniso16", "high+finest", "high+nearest", "high+effects2"};
                 Tuning &t = tuning();
                 const int i = next++ % 9;
-                applyPreset(t, i == 1 ? kPresetMedium : (i == 2 ? kPresetLow : (i == 3 ? kPresetUltra : kPresetHigh)));
+                applyPreset(t, i == 1 ? kPresetMedium : (i == 2 ? kPresetLow : (i == 3 ? kPresetMax : kPresetHigh)));
                 if (i == 4)
                     t.msaa = 3.0f;
                 else if (i == 5)

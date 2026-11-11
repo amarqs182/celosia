@@ -59,6 +59,7 @@
 // <file>.shot<tick>.ppm, which only the console fills). At the recording's
 // end "[replay] end"; SOTC_REPLAY_EXIT=1 leaves there.
 #include "sotc_replay.h"
+#include "runtime/ps2_diag.h"
 
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
@@ -468,7 +469,7 @@ namespace sotc_replay
                 if (t < g_counts.size() && count != g_counts[t])
                     std::fprintf(stderr, "[replay] tick %llu: count %llx, the recording's %llx\n", (unsigned long long)t, (unsigned long long)count,
                                  (unsigned long long)g_counts[t]);
-                static const bool trace = std::getenv("SOTC_REPLAY_TRACE") != nullptr;
+                static const bool trace = ps2_diag::env("SOTC_REPLAY_TRACE") != nullptr;
                 if (trace)
                     std::fprintf(stderr, "[rtick] %llu %llx %llu %llu %u %llu L%x%s\n", (unsigned long long)t, (unsigned long long)count, vb, gf, u32(kVIntrCount), cd,
                                  u32(kLoopFrames), watchText().c_str());
@@ -945,6 +946,8 @@ namespace sotc_replay
         }
     }
 
+    unsigned horseObject() { return g_horse; }
+
     void install(PS2Runtime &runtime)
     {
         const char *record = std::getenv("SOTC_INPUT_RECORD");
@@ -959,7 +962,16 @@ namespace sotc_replay
             startRecording(record);
         }
         if (g_mode == kOff)
+        {
+            // Round 135: SOTC_POS_LOG alone: only Agro's step wrapped (its object noted, nothing else changes).
+            const char *pos = ps2_diag::env("SOTC_POS_LOG");
+            if (pos && std::atoi(pos) > 0 && runtime.hasFunction(kHorseStep))
+            {
+                g_horseOriginal = runtime.lookupFunction(kHorseStep);
+                runtime.registerFunction(kHorseStep, horseHook);
+            }
             return;
+        }
         g_runtime = &runtime;
         if (!runtime.hasFunction(kTick) || !runtime.hasFunction(kFlush))
         {

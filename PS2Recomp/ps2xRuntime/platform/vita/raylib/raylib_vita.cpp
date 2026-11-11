@@ -6,6 +6,8 @@
 #include <SDL2/SDL.h>
 #include <vitaGL.h>
 #include <psp2/ctrl.h>
+#include <psp2/display.h>
+#include <psp2/kernel/threadmgr.h>
 #include <psp2/appmgr.h>
 #include <psp2/io/dirent.h>
 #include <psp2/io/fcntl.h>
@@ -24,6 +26,572 @@
 #include <map>
 #include <mutex>
 #include <vector>
+
+// Round 107: how long each picture stayed on screen, in display refreshes.
+// vitaGL's display queue calls this as it hands a picture to the display
+// (sceDisplaySetFrameBuf, shown from the next vblank), one at a time, after
+// the previous one's vsync wait: the vblank count between two calls is the
+// earlier picture's time on screen. Counted 1..7 (7: 7 or more); read and
+// reset by ps2x_vita_present_hist (the [cap20] line, sotc_overrides.cpp).
+namespace
+{
+    std::atomic<uint32_t> g_shownHist[8];
+    std::atomic<uint32_t> g_swaps{0}, g_shown{0}; // pictures handed to vitaGL / to the display
+}
+
+// Round 110 (SOTC_PACE110): each picture shown on the refresh its game time
+// asks for. The game's frame release (sotc_overrides.cpp cap20) is counted and
+// timed here (ps2x_vita_pace_release); the native renderer's hand-over tags the
+// frame's picture with that count, the render thread passes it on with the
+// present (ps2x_vita_pace_tag; EndDrawing puts it in a queue beside vitaGL's
+// display queue: one entry a swap, in order), and vitaGL's display callback
+// (on the display queue's thread, before sceDisplaySetFrameBuf) takes it back.
+// On: the picture is set on the refresh before its slot, T = the previous
+// picture's slot + its frame's release interval (the game's step, in VBlanks;
+// at least the display's minimum hold: 3 in Steady 20, 2 with the 30 fps cap),
+// so it stays on screen as long as the game's time moved. A picture that comes
+// after its slot is shown at the next refresh and the slots go on from it (one
+// interval longer, none shorter after it). Latency: the slots aim at the floor
+// A = the least arrival latency (swap + 2 refreshes - release) of the last 64
+// pictures. After a hitch (a release gap or 12+ refreshes on screen, or a
+// picture 6+ refreshes late) the pictures queued behind it are shown a refresh
+// apart (at least) until the latency is back at A ("catch-up": the hitch is the
+// glitch, nothing after it); otherwise, when 6 pictures in a row were already
+// queued as the one before went on screen and the latency is above A + 1, one
+// slot comes a refresh earlier ("pull": the 60.00 Hz game against the 59.94 Hz
+// display adds a refresh every ~17 s). vitaGL's own vsync wait is then 1 (the
+// slot is held here). Off: as before (vitaGL's interval), the same statistics.
+// [pace110] every 600 pictures (on / off apart): refreshes each picture stayed,
+// shown against the release interval and against the game's dt, latency
+// release -> on screen, late pictures, pulls, and the same for the quiet
+// pictures (20+ after a hitch).
+namespace pace110
+{
+    constexpr double kRefreshUs = 1000000.0 / 59.94; // the display's refresh
+    constexpr double kVBlankUs = 1000000.0 / 60.0;   // the game's VBlank (EeScheduler)
+    std::atomic<uint64_t> g_vcLast{0};
+    // sceDisplayGetVcount unwrapped to 64 bits (Vita3K gives 16), one count for every thread.
+    uint64_t vc64()
+    {
+        const uint64_t raw = static_cast<uint64_t>(static_cast<uint32_t>(sceDisplayGetVcount()) & 0xFFFFu);
+        uint64_t base = g_vcLast.load(std::memory_order_relaxed);
+        if (base == 0u)
+        {
+            uint64_t zero = 0u;
+            g_vcLast.compare_exchange_strong(zero, 0x100000u + raw, std::memory_order_relaxed);
+            base = g_vcLast.load(std::memory_order_relaxed);
+        }
+        int64_t d = static_cast<int64_t>((raw - (base & 0xFFFFu)) & 0xFFFFu);
+        if (d >= 0x8000)
+            d -= 0x10000;
+        const uint64_t v = base + d;
+        while (v > base && !g_vcLast.compare_exchange_weak(base, v, std::memory_order_relaxed))
+        {
+        }
+        return v;
+    }
+    uint64_t nowUs() { return sceKernelGetProcessTimeWide(); }
+
+    struct Release
+    {
+        std::atomic<uint32_t> seq{0}, dtSeq{0};
+        uint64_t us = 0, vc = 0;
+        uint32_t dtUs = 0; // the game's dt of this release's frame (given at the next release)
+    };
+    Release g_rel[128];
+
+    struct Tag
+    {
+        uint32_t seq = 0;
+        uint64_t swapVc = 0, swapUs = 0;
+    };
+    Tag g_fifo[32];
+    std::atomic<uint32_t> g_fifoHead{0}, g_fifoTail{0};
+    thread_local uint32_t t_tag = 0;
+
+    std::atomic<int> g_minHold{1}; // SetTargetFPS: 1, 2 (30 fps cap), 3 (Steady 20)
+    std::atomic<int> g_ab{1};      // SOTC_AB_FLAG pace110: off in its windows
+    // Round 132 (SOTC_PACE132, default on; A/B `pace132`): a slot held here
+    // while the game thread waits for the render thread (its hand-over) and
+    // the render thread waits in vglSwapBuffers (vitaGL's display queue full)
+    // is the game held by the display: the slot comes one refresh earlier
+    // (once a picture, not below the minimum hold). Without it the hold fed
+    // itself: the game's frame took as long as the display held the picture
+    // three back, its release interval grew to match, and the next slots with
+    // it (the r130 console: 'sync end' ~17 ms a frame on the game thread,
+    // latency 9-12 refreshes, prof129's wrap<12> = modelDisp's hook).
+    std::atomic<int> g_ab132{1};      // SOTC_AB_FLAG pace132: off in its windows
+    std::atomic<int> g_gameWaits{0};  // the game thread in the hand-over's wait (ps2x_vita_render_wait)
+    std::atomic<int> g_inSwap{0};     // the render thread in vglSwapBuffers (EndDrawing)
+    // Round 143 (SOTC_PACE143, default on; A/B `pace143`): pace132 pulled a held slot only once the
+    // game thread was already waiting. The swap blocks earlier: vitaGL's display queue is short
+    // (gxm_display_buffer_count 3, maxPendingCount 2), so a picture swapped while the one held here
+    // still holds its place waits in sceGxmDisplayQueueAddEntry, and the render thread cannot start
+    // the frame handed over behind it. The r135 console log: in the windows where
+    // 'present' is 20-35 ms a frame (the swap blocked), the game thread's hand-over wait is 2.7 ms
+    // a frame against 0.75 elsewhere, and pace110's latency 9-11 refreshes against a floor of 4
+    // (late pictures move the chain later for good; pulls take it back one refresh at a time).
+    // On: a slot held while the render thread waits in the swap behind it (swapBlocked) comes one
+    // refresh earlier (once a picture, with pace132's pull: one of the two; not
+    // below the previous slot + the minimum hold). No picture is shown later than without it.
+    std::atomic<int> g_ab143{1}; // SOTC_AB_FLAG pace143: off in its windows
+    // Round 143: swaps over 2 ms by the pictures not yet taken by the display at their start (0, 1, 2, 3+),
+    // all swaps likewise; written by the presenting thread, printed by it (printPending).
+    uint32_t g_swapLong[4] = {}, g_swapAll[4] = {};
+    int envInt(const char *name, int def)
+    {
+        const char *e = std::getenv(name);
+        return e ? std::atoi(e) : def;
+    }
+    // Read once before the display callback is set (it takes no static-init guard: no lock there).
+    int g_setting = 1, g_calmNeed = 6, g_traceMax = 0, g_traced = 0, g_setting132 = 1, g_setting143 = 1, g_test143 = 0;
+    uint32_t g_test143Count = 0;
+    void init()
+    {
+        g_setting = envInt("SOTC_PACE110", 1);
+        g_setting132 = envInt("SOTC_PACE132", 1);
+        g_setting143 = envInt("SOTC_PACE143", 1);
+        g_test143 = envInt("SOTC_PACE143_TEST", 0);
+        // A pull: after this many pictures in a row that were already queued when the one before
+        // them went on screen (ready a whole interval early: the slots run later than needed).
+        g_calmNeed = envInt("SOTC_PACE110_CALM", 6);
+        g_traceMax = envInt("SOTC_PACE110_TRACE", 0);
+    }
+    int setting() { return g_setting; } // SOTC_PACE110 (0 / 1)
+    bool on() { return setting() != 0 && g_ab.load(std::memory_order_relaxed) != 0; }
+    bool on132() { return g_setting132 != 0 && g_ab132.load(std::memory_order_relaxed) != 0; }
+    bool gameHeld() { return g_gameWaits.load(std::memory_order_relaxed) != 0 && g_inSwap.load(std::memory_order_relaxed) != 0; }
+    bool on143() { return g_setting143 != 0 && g_ab143.load(std::memory_order_relaxed) != 0; }
+    // Round 143: the render thread waits in the swap behind the picture held here: a picture swapped
+    // after it that the display has not taken, its swap begun over 1 ms ago (a swap that does not wait
+    // takes ~0.6 ms on the console). Measured ([pace143] lines): a swap that begins while one picture
+    // waits for the display takes over 2 ms nearly always; one that begins with none, when the picture
+    // in the display callback is held for its slot.
+    std::atomic<uint64_t> g_swapStartUs{0};
+    bool swapBlocked()
+    {
+        if (g_inSwap.load(std::memory_order_relaxed) == 0 ||
+            g_swaps.load(std::memory_order_relaxed) - g_shown.load(std::memory_order_relaxed) < 1u)
+            return false;
+        return sceKernelGetProcessTimeWide() > g_swapStartUs.load(std::memory_order_relaxed) + 1000u;
+    }
+
+    void push(uint32_t seq) // EndDrawing, before the swap (under the GL lock: one producer at a time)
+    {
+        const uint32_t head = g_fifoHead.load(std::memory_order_relaxed);
+        if (head - g_fifoTail.load(std::memory_order_acquire) >= 32u)
+            return; // (cannot happen: vitaGL holds at most 2 pending)
+        Tag &t = g_fifo[head & 31u];
+        t.seq = seq;
+        t.swapVc = vc64();
+        t.swapUs = nowUs();
+        g_fifoHead.store(head + 1u, std::memory_order_release);
+    }
+    bool pop(Tag &out)
+    {
+        const uint32_t tail = g_fifoTail.load(std::memory_order_relaxed);
+        if (tail == g_fifoHead.load(std::memory_order_acquire))
+            return false;
+        out = g_fifo[tail & 31u];
+        g_fifoTail.store(tail + 1u, std::memory_order_release);
+        return true;
+    }
+
+    struct Window
+    {
+        uint32_t pics = 0, untagged = 0, late = 0, lateRefreshes = 0, pulls = 0, resets = 0;
+        uint32_t held132 = 0, pulls132 = 0; // round 132: holds that found the game waiting on the display; slots pulled for it
+        uint32_t blocked143 = 0, pulls143 = 0; // round 143: holds that found the render thread waiting in the swap; slots pulled for it
+        uint32_t shown[8] = {};  // refreshes between this picture and the previous one
+        uint32_t errRel[5] = {}; // shown - the release interval (refreshes): <=-2, -1, 0, +1, >=+2
+        uint32_t errDt[5] = {};  // shown - the game's dt, rounded to refreshes
+        double absErrDtMs = 0, shownMs = 0, gameMs = 0;
+        uint32_t dtN = 0;
+        double latSum = 0;
+        uint32_t latN = 0, latMin = ~0u, latMax = 0, latHist[8] = {}; // release -> on screen (refreshes)
+        double waitSum = 0;                                            // refreshes waited here for the slot
+        // Quiet: pictures 20 or more after a hitch (a picture 6+ refreshes late, a chain reset; in
+        // Vita3K its ~1 s host stalls every few seconds).
+        uint32_t quiet = 0, shownQ[8] = {}, errRelQ[5] = {}, catchUps = 0, hitches = 0;
+    };
+    Window g_win[2];
+    int g_winHold = -1;
+
+    struct State
+    {
+        bool haveS = false, chain = false;
+        uint64_t S = 0, T = 0, relUs = 0;
+        uint32_t seq = 0;
+        int calm = 0;
+        int applied = -1; // vitaGL's interval as set from here
+        // The pictures' arrival latency (swap + 2 refreshes - release), the last 64: their minimum is
+        // the latency the slots aim at (A); pulls stop at A + 1.
+        uint32_t arr[64] = {};
+        uint32_t arrN = 0;
+        bool catchUp = false;
+        uint32_t sinceHitch = 0;
+        // The game's dt of a frame is known at the next release: a picture shown sooner is
+        // compared with it at the next picture.
+        uint32_t dtSeq = 0;
+        int64_t dtShown = 0;
+        uint32_t floor() const
+        {
+            uint32_t m = ~0u;
+            for (uint32_t i = 0; i < std::min<uint32_t>(arrN, 64u); ++i)
+                m = std::min(m, arr[i]);
+            return arrN ? m : 0u;
+        }
+    } g_st;
+
+    // The display callback must not block on a kernel lock (no stdio there: in Vita3K a guest
+    // callback waiting on a lock while the display queue waits for it ends in a host
+    // condition_variable error): the windows and the trace are handed to the presenting
+    // thread, which prints them after its swap (printPending, EndDrawing).
+    Window g_done[2];
+    int g_doneHold[2] = {};
+    std::atomic<int> g_doneReady[2] = {};
+    void summary(int which, int hold)
+    {
+        if (g_doneReady[which].load(std::memory_order_acquire) == 0)
+        {
+            g_done[which] = g_win[which];
+            g_doneHold[which] = hold;
+            g_doneReady[which].store(1, std::memory_order_release);
+        }
+        g_win[which] = Window{};
+    }
+    struct TraceRec
+    {
+        uint32_t seq;
+        bool tagged, pace, late, pulled, reset, caught;
+        uint64_t entry, slot, shown, relVc, swapVc;
+        int64_t since;
+        int interval;
+        double dtMs, swapRelMs;
+        uint64_t waited;
+    };
+    TraceRec g_trace[256];
+    std::atomic<uint32_t> g_traceHead{0}, g_traceTail{0};
+    void printPending()
+    {
+        for (int which = 0; which < 2; ++which)
+        {
+            if (g_doneReady[which].load(std::memory_order_acquire) == 0)
+                continue;
+            const Window &w = g_done[which];
+            const int hold = g_doneHold[which];
+            const char *mode = hold >= 3 ? "steady20" : hold == 2 ? "cap30" : "auto";
+            std::fprintf(stderr,
+                         "[pace110] %s pace %s %u pictures: shown (refreshes) 1:%u 2:%u 3:%u 4:%u 5:%u 6:%u 7+:%u | vs release interval -2:%u -1:%u 0:%u +1:%u +2:%u"
+                         " | vs game dt -2:%u -1:%u 0:%u +1:%u +2:%u (n %u, mean |err| %.2f ms, display/game %.4f) | latency (refreshes) min %u mean %.2f max %u"
+                         " [<=3:%u 4:%u 5:%u 6:%u 7:%u 8:%u 9+:%u] | late %u (+%u refreshes), pulls %u, resets %u, untagged %u, waited %.2f refreshes/picture"
+                         " | quiet %u: shown 1:%u 2:%u 3:%u 4:%u 5:%u 6:%u 7+:%u vs release -2:%u -1:%u 0:%u +1:%u +2:%u | hitches %u, catch-up pictures %u | r132: game held %u, pulled %u (%s) | r143: swap blocked %u, pulled %u (%s)\n",
+                         mode, which ? "on" : "off", w.pics, w.shown[1], w.shown[2], w.shown[3], w.shown[4], w.shown[5], w.shown[6], w.shown[7], w.errRel[0], w.errRel[1],
+                         w.errRel[2], w.errRel[3], w.errRel[4], w.errDt[0], w.errDt[1], w.errDt[2], w.errDt[3], w.errDt[4], w.dtN, w.dtN ? w.absErrDtMs / w.dtN : 0.0,
+                         w.gameMs > 0 ? w.shownMs / w.gameMs : 0.0, w.latN ? w.latMin : 0u, w.latN ? w.latSum / w.latN : 0.0, w.latMax, w.latHist[1], w.latHist[2],
+                         w.latHist[3], w.latHist[4], w.latHist[5], w.latHist[6], w.latHist[7], w.late, w.lateRefreshes, w.pulls, w.resets, w.untagged,
+                         w.pics ? w.waitSum / w.pics : 0.0, w.quiet, w.shownQ[1], w.shownQ[2], w.shownQ[3], w.shownQ[4], w.shownQ[5], w.shownQ[6], w.shownQ[7],
+                         w.errRelQ[0], w.errRelQ[1], w.errRelQ[2], w.errRelQ[3], w.errRelQ[4], w.hitches, w.catchUps, w.held132, w.pulls132,
+                         g_setting132 ? "pace132 on" : "pace132 off", w.blocked143, w.pulls143, g_setting143 ? "pace143 on" : "pace143 off");
+            g_doneReady[which].store(0, std::memory_order_release);
+            if (which == 1)
+            {
+                std::fprintf(stderr, "[pace143] swaps by pictures queued at their start 0:%u 1:%u 2:%u 3+:%u; of them over 2 ms 0:%u 1:%u 2:%u 3+:%u\n", g_swapAll[0],
+                             g_swapAll[1], g_swapAll[2], g_swapAll[3], g_swapLong[0], g_swapLong[1], g_swapLong[2], g_swapLong[3]);
+                for (int k = 0; k < 4; ++k)
+                    g_swapAll[k] = g_swapLong[k] = 0;
+            }
+        }
+        uint32_t tail = g_traceTail.load(std::memory_order_relaxed);
+        const uint32_t head = g_traceHead.load(std::memory_order_acquire);
+        if (head - tail > 256u)
+            tail = head - 256u; // (overrun: the oldest lost)
+        for (; tail != head; ++tail)
+        {
+            const TraceRec &t = g_trace[tail & 255u];
+            std::fprintf(stderr,
+                         "[pace110t] seq %u%s entry %llu slot %llu shown %llu (+%lld) | release vc %llu (latency %lld), interval %d, dt %.2f ms | swap vc %llu, swap-release %.1f ms | %s%s%s%s waited %llu\n",
+                         t.seq, t.tagged ? "" : " (untagged)", (unsigned long long)t.entry, (unsigned long long)t.slot, (unsigned long long)t.shown, (long long)t.since,
+                         (unsigned long long)t.relVc, (long long)(t.shown - t.relVc), t.interval, t.dtMs, (unsigned long long)t.swapVc, t.swapRelMs, t.pace ? "on" : "off",
+                         t.late ? " late" : "", t.pulled ? " pull" : "", t.reset ? (t.caught ? " reset catch-up" : " reset") : (t.caught ? " catch-up" : ""), (unsigned long long)t.waited);
+        }
+        g_traceTail.store(tail, std::memory_order_release);
+    }
+
+    // vitaGL's display callback: the picture is set (shown from the next refresh) when this returns.
+    void show(void *)
+    {
+        g_shown.fetch_add(1u, std::memory_order_relaxed);
+        const int calmNeed = g_calmNeed;
+        State &st = g_st;
+        const uint64_t entry = vc64();
+        const int hold = std::clamp(g_minHold.load(std::memory_order_relaxed), 1, 4);
+        const bool pace = on();
+        const int want = pace ? 1 : hold;
+        if (want != st.applied)
+        {
+            st.applied = want;
+            eglSwapInterval(nullptr, want);
+        }
+        if (hold != g_winHold)
+        {
+            if (g_winHold >= 0) // windows of one display mode only
+                g_win[0] = g_win[1] = Window{};
+            g_winHold = hold;
+        }
+        Window &w = g_win[pace ? 1 : 0];
+        Tag tag;
+        const bool popped = pop(tag);
+        const Release &rel = g_rel[tag.seq & 127u];
+        const bool tagged = popped && tag.seq != 0u && rel.seq.load(std::memory_order_acquire) == tag.seq;
+        const uint64_t relUs = tagged ? rel.us : 0u, relVc = tagged ? rel.vc : 0u;
+        int nRel = 0;
+        if (tagged && st.chain && tag.seq > st.seq && relUs > st.relUs)
+            nRel = static_cast<int>(static_cast<double>(relUs - st.relUs) / kVBlankUs + 0.5);
+        uint64_t T = 0;
+        bool reset = false, pulled = false, late = false;
+        if (nRel >= 1 && nRel <= 8)
+            T = st.T + static_cast<uint64_t>(std::max(nRel, hold));
+        else
+        {
+            T = std::max(entry + 1u, st.haveS ? st.S + static_cast<uint64_t>(hold) : 0u);
+            reset = tagged;
+        }
+        // After a hitch the queued pictures are shown a refresh apart (at least) until the latency is
+        // back at the floor: the catch-up rides on the hitch, not spread over later pictures as pulls.
+        bool caught = false;
+        const uint32_t A = st.floor();
+        if (pace && tagged && A)
+        {
+            if (reset && nRel != 0)
+                st.catchUp = true; // (a reset after a long gap: a hitch; nRel 0: the chain was broken)
+            if (st.catchUp)
+            {
+                const uint64_t want = std::max({entry + 1u, st.haveS ? st.S + 1u : 0u, relVc + A});
+                if (want < T)
+                    T = want, caught = true;
+                if (T <= relVc + A + 1u)
+                    st.catchUp = false;
+            }
+            else if (!reset && st.calm >= calmNeed && T > relVc + A + 1u && T - 1u >= st.S + 1u && T - 1u > tag.swapVc + 1u)
+            {
+                --T;
+                pulled = true;
+                st.calm = 0;
+            }
+        }
+        // Round 143, testing (SOTC_PACE143_TEST=<n>): every 300th tagged picture's slot n refreshes
+        // later (the chain with it), as a run of late pictures moves it on the console: Vita3K's render
+        // thread is rarely late enough to fill the display queue by itself.
+        if (g_test143 > 0 && pace && tagged && ++g_test143Count % 300u == 0u)
+            T += static_cast<uint64_t>(g_test143);
+        uint64_t nominal = T;
+        uint64_t waited = 0;
+        bool held132 = false, pulled132 = false, blocked143 = false, pulled143 = false;
+        if (pace)
+        {
+            if (T < entry + 1u)
+                T = entry + 1u;
+            const bool p132 = on132(), p143 = on143();
+            const uint64_t floor132 = st.haveS ? st.S + static_cast<uint64_t>(hold) : 0u;
+            for (uint64_t v = vc64(); v + 1u < T; v = vc64())
+            {
+                const bool pulledHere = pulled132 || pulled143; // one pull a picture
+                // Round 132: the game held by this slot: one refresh earlier (once).
+                if (!pulledHere && gameHeld())
+                {
+                    held132 = true;
+                    if (p132 && T - 1u >= floor132 && nominal > 0u)
+                    {
+                        --T;
+                        --nominal;
+                        pulled132 = true;
+                        continue;
+                    }
+                }
+                // Round 143: the render thread waits in the swap behind this slot: one refresh
+                // earlier (once), before the game thread comes to wait for it.
+                if (!pulledHere && swapBlocked())
+                {
+                    blocked143 = true;
+                    if (p143 && T - 1u >= floor132 && nominal > 0u)
+                    {
+                        --T;
+                        --nominal;
+                        pulled143 = true;
+                        continue;
+                    }
+                }
+                if ((p132 || p143) && !pulledHere)
+                {
+                    // On: looked at every ms (the game reaches its wait during the hold); the slot's
+                    // refresh is still found within ~1 ms of its start.
+                    sceKernelDelayThread(1000);
+                    waited += vc64() - v;
+                    continue;
+                }
+                sceDisplayWaitVblankStart();
+                ++waited;
+            }
+        }
+        const uint64_t S = vc64() + 1u; // shown from the next refresh
+        late = pace && S > nominal;
+        // A hitch (the same rule on and off: the release gap or the time on screen 12+ refreshes).
+        const bool hitch = tagged && ((reset && nRel != 0) || (st.haveS && S >= st.S + 12u));
+        if (hitch)
+            st.sinceHitch = 0;
+        if (pace && tagged && (hitch || (late && S >= nominal + 6u)))
+            st.catchUp = true;
+        // Statistics (on and off alike).
+        if (st.haveS)
+            g_shownHist[std::min<uint64_t>(S - st.S, 7u)].fetch_add(1u, std::memory_order_relaxed); // the [cap20] line's
+        if (tagged)
+        {
+            ++w.pics;
+            int64_t thisShown = -1;
+            if (st.haveS && nRel > 0)
+            {
+                const int64_t shownN = static_cast<int64_t>(S - st.S);
+                ++w.shown[std::min<int64_t>(shownN, 7)];
+                ++w.errRel[std::clamp<int64_t>(shownN - nRel, -2, 2) + 2];
+                if (st.sinceHitch >= 20u)
+                {
+                    ++w.quiet;
+                    ++w.shownQ[std::min<int64_t>(shownN, 7)];
+                    ++w.errRelQ[std::clamp<int64_t>(shownN - nRel, -2, 2) + 2];
+                }
+                thisShown = shownN;
+            }
+            for (int pass = 0; pass < 2; ++pass) // the pending one first, then this one
+            {
+                if (pass == 1 && thisShown >= 0)
+                    st.dtSeq = tag.seq, st.dtShown = thisShown;
+                if (st.dtSeq == 0u)
+                    continue;
+                const Release &dr = g_rel[st.dtSeq & 127u];
+                const int64_t shownN = st.dtShown;
+                if (dr.dtSeq.load(std::memory_order_acquire) == st.dtSeq && dr.dtUs)
+                {
+                    st.dtSeq = 0u;
+                    const double ms = shownN * kRefreshUs / 1000.0, dtMs = dr.dtUs / 1000.0;
+                    const double err = ms - dtMs;
+                    ++w.errDt[std::clamp(static_cast<int>(std::lround(err * 1000.0 / kRefreshUs)), -2, 2) + 2];
+                    w.absErrDtMs += std::fabs(err);
+                    w.shownMs += ms;
+                    w.gameMs += dtMs;
+                    ++w.dtN;
+                }
+                else if (pass == 0 && thisShown >= 0)
+                    st.dtSeq = 0u; // (its dt never came: given up)
+            }
+            const uint32_t lat = static_cast<uint32_t>(S - relVc);
+            w.latSum += lat;
+            ++w.latN;
+            w.latMin = std::min(w.latMin, lat);
+            w.latMax = std::max(w.latMax, lat);
+            ++w.latHist[lat <= 3u ? 1u : std::min(lat - 2u, 7u)];
+            if (late)
+                ++w.late, w.lateRefreshes += static_cast<uint32_t>(S - nominal);
+            if (pulled)
+                ++w.pulls;
+            w.held132 += held132;
+            w.pulls132 += pulled132;
+            w.blocked143 += blocked143;
+            w.pulls143 += pulled143;
+            if (reset)
+                ++w.resets;
+            if (hitch)
+                ++w.hitches;
+            if (caught)
+                ++w.catchUps;
+            w.waitSum += static_cast<double>(waited);
+        }
+        else
+            ++w.untagged;
+        if (g_traced < g_traceMax)
+        {
+            ++g_traced;
+            const uint32_t head = g_traceHead.load(std::memory_order_relaxed);
+            TraceRec &t = g_trace[head & 255u];
+            t.seq = tag.seq;
+            t.tagged = tagged;
+            t.pace = pace;
+            t.late = late;
+            t.pulled = pulled;
+            t.reset = reset;
+            t.caught = caught;
+            t.entry = entry;
+            t.slot = nominal;
+            t.shown = S;
+            t.relVc = relVc;
+            t.swapVc = tag.swapVc;
+            t.since = st.haveS ? static_cast<int64_t>(S - st.S) : 0;
+            t.interval = nRel;
+            t.dtMs = rel.dtSeq.load(std::memory_order_relaxed) == tag.seq ? rel.dtUs / 1000.0 : -1.0;
+            t.swapRelMs = tagged ? (static_cast<double>(tag.swapUs) - static_cast<double>(relUs)) / 1000.0 : 0.0;
+            t.waited = waited;
+            g_traceHead.store(head + 1u, std::memory_order_release);
+        }
+        // The chain goes on from this picture's slot (a late one: where it showed).
+        if (tagged)
+        {
+            st.chain = true;
+            st.seq = tag.seq;
+            st.relUs = relUs;
+            const bool queued = st.haveS && entry <= st.S && nRel >= 2 && !late && !pulled && !pulled132 && !pulled143;
+            st.calm = queued ? st.calm + 1 : 0;
+            if (tag.swapVc >= relVc)
+                st.arr[st.arrN++ & 63u] = static_cast<uint32_t>(tag.swapVc + 2u - relVc);
+            ++st.sinceHitch;
+        }
+        else
+            st.chain = false;
+        st.T = pace ? std::max(nominal, S) : S;
+        st.S = S;
+        st.haveS = true;
+        for (int k = 0; k < 2; ++k)
+            if (g_win[k].pics >= 600u)
+                summary(k, hold);
+    }
+}
+
+// Pictures swapped that the display has not taken yet (waiting for the GPU or
+// for the previous picture's vsync wait).
+extern "C" int ps2x_vita_display_pending(void)
+{
+    return static_cast<int>(g_swaps.load(std::memory_order_relaxed) - g_shown.load(std::memory_order_relaxed));
+}
+extern "C" unsigned int ps2x_vita_vcount(void) { return static_cast<unsigned int>(sceDisplayGetVcount()); }
+// Round 110: a frame release (sotc_overrides.cpp cap20): its time, and the
+// game's dt of the frame before it (that frame's step).
+extern "C" void ps2x_vita_pace_release(uint32_t seq, uint32_t prevDtUs)
+{
+    pace110::Release &r = pace110::g_rel[seq & 127u];
+    r.us = pace110::nowUs();
+    r.vc = pace110::vc64();
+    r.seq.store(seq, std::memory_order_release);
+    if (prevDtUs && seq > 1u)
+    {
+        pace110::Release &p = pace110::g_rel[(seq - 1u) & 127u];
+        p.dtUs = prevDtUs;
+        p.dtSeq.store(seq - 1u, std::memory_order_release);
+    }
+}
+// The next swap on this thread shows the frame of release `seq` (the native renderer's present).
+extern "C" void ps2x_vita_pace_tag(uint32_t seq) { pace110::t_tag = seq; }
+// SOTC_AB_FLAG pace110 (sotc_native.cpp): off in its windows.
+extern "C" void ps2x_vita_pace_ab(int on) { pace110::g_ab.store(on ? 1 : 0, std::memory_order_relaxed); }
+// Round 132: SOTC_AB_FLAG pace132 (sotc_native.cpp); the game thread's hand-over wait (native_renderer_gl.cpp).
+extern "C" void ps2x_vita_pace132_ab(int on) { pace110::g_ab132.store(on ? 1 : 0, std::memory_order_relaxed); }
+extern "C" void ps2x_vita_render_wait(int on) { pace110::g_gameWaits.store(on, std::memory_order_relaxed); }
+// Round 143: SOTC_AB_FLAG pace143 (sotc_native.cpp).
+extern "C" void ps2x_vita_pace143_ab(int on) { pace110::g_ab143.store(on ? 1 : 0, std::memory_order_relaxed); }
+extern "C" void ps2x_vita_present_hist(uint32_t *out8)
+{
+    for (int i = 0; i < 8; ++i)
+        out8[i] = g_shownHist[i].exchange(0u, std::memory_order_relaxed);
+}
+
 
 extern "C" void vglCeloSetUniformPoolSize(uint32_t size); // celosia.patch (round 65c)
 
@@ -318,9 +886,34 @@ void InitWindow(int, int, const char *)
     // SOTC_VGL_UNIFORM_KB: its size (default 2048, as vitaGL).
     const int uniformKb = kb("SOTC_VGL_UNIFORM_KB", 2048);
     vglCeloSetUniformPoolSize(static_cast<uint32_t>(uniformKb) * 1024u);
-    std::fprintf(stderr, "[vita] vitaGL uniform pool %d KB\n", uniformKb);
+    // 2026-11-07 (the 5th colossus): the pool came round onto uniforms the
+    // GPU had not read. The console keeps ~3 frames of scenes queued
+    // ([gpu86] backlog ~80 scenes) and Avion's frames reserve 0.75-0.8 MB:
+    // 2 MB held fewer frames than were queued, and queued draws took later
+    // draws' UV offsets, texture LOD, textured flag, tints (surfaces grey or
+    // in other draws' colours, Wander speckled). celosia.patch's guard: the
+    // pool, watched by quarter against the scenes the GPU has finished,
+    // grows (twice, up to SOTC_VGL_UNIFORM_MAX_KB, default 8192) before it
+    // would write over unread uniforms; at the largest size the render
+    // thread waits for the GPU. SOTC_VGL_UNIFORM_GUARD=0: counted only
+    // ([gl:unif] "came round onto unread"), as before.
+    const int uniformMaxKb = kb("SOTC_VGL_UNIFORM_MAX_KB", 8192);
+    const char *guardEnv = std::getenv("SOTC_VGL_UNIFORM_GUARD");
+    const bool uniformGuard = !guardEnv || std::atoi(guardEnv) != 0;
+    vglCeloUniformGuard(uniformGuard ? 1 : 0, static_cast<uint32_t>(std::max(uniformMaxKb, uniformKb)) * 1024u);
+    std::fprintf(stderr, "[vita] vitaGL uniform pool %d KB, guard %s (up to %d KB)\n", uniformKb, uniformGuard ? "on" : "off", std::max(uniformMaxKb, uniformKb));
     vglSetCircularPoolSize(static_cast<uint32_t>(circularKb) * 1024u);
     std::fprintf(stderr, "[vita] vitaGL circular pool %d KB, immediate pool %d KB\n", circularKb, immediateKb);
+    // Round 92 (a console experiment, off by default): vitaGL's depth /
+    // stencil surfaces in GXM's tiled layout instead of linear (the same
+    // depth tests; the ~9 MB a frame of depth / stencil the picture's
+    // scenes load and store moved in whole tiles). Set before vglInit (the
+    // display's depth is made there). SOTC_VGL_DEPTH_TILED=0/1.
+    if (const char *e = std::getenv("SOTC_VGL_DEPTH_TILED"))
+    {
+        vglCeloDepthTiled(std::atoi(e) != 0 ? 1 : 0);
+        std::fprintf(stderr, "[vita] vitaGL depth / stencil surfaces %s (SOTC_VGL_DEPTH_TILED=%s)\n", std::atoi(e) != 0 ? "tiled" : "linear", e);
+    }
     const char *pools = std::getenv("SOTC_VGL_POOLS");
     if (pools && std::strcmp(pools, "console") == 0)
     {
@@ -331,6 +924,9 @@ void InitWindow(int, int, const char *)
         vglInitWithCustomThreshold(immediateKb * 1024, width, height, 96 * 1024 * 1024, 0, 0, 0x8C6000 /* the common dialog share, as vglInitExtended */,
                                    SCE_GXM_MULTISAMPLE_NONE);
     bootMark("window: vitaGL up");
+    pace110::init();
+    vglSetDisplayCallback(pace110::show); // round 107: the shown pictures' intervals ([cap20]); round 110: the pacing
+    std::fprintf(stderr, "[pace110] per-picture display timing %s (SOTC_PACE110)\n", pace110::setting() ? "on" : "off");
     if (!std::getenv("SOTC_SHADER_FAST") || std::atoi(std::getenv("SOTC_SHADER_FAST")) != 0)
         seedShaderCache(); // vitaGL made the cache's folders (the seed holds the fast binaries)
     bootMark("window: shader cache seeded");
@@ -364,8 +960,11 @@ bool WindowShouldClose(void) { return g_quit; }
 bool IsWindowReady(void) { return g_glReady; }
 void SetConfigFlags(unsigned int) {}
 // Presentation follows the display's vsync: 30 or less shows each picture
-// for at least two vblanks (interval 2), else every vblank.
-void SetTargetFPS(int fps) { eglSwapInterval(nullptr, fps > 0 && fps <= 30 ? 2 : 1); }
+// for at least two vblanks (interval 2), 20 or less three (round 107's
+// Steady 20), else every vblank.
+// Round 110: the display callback (pace110::show) sets vitaGL's interval: 1
+// with the pacing on (the slots are held there), else this minimum.
+void SetTargetFPS(int fps) { pace110::g_minHold.store(fps > 0 && fps <= 20 ? 3 : fps > 0 && fps <= 30 ? 2 : 1, std::memory_order_relaxed); }
 int GetFPS(void) { return g_fps; }
 
 double GetTime(void)
@@ -408,15 +1007,28 @@ extern "C" void vglCeloMemStats(size_t *used, size_t *spillBytes, size_t *spillC
 // Round 86: the time spent in vglSwapBuffers (its display queue waits while
 // two frames are still on the GPU), summed; read by the renderer's [gpu86].
 extern "C" volatile unsigned long long ps2x_vita_swap_us = 0;
+extern "C" void ps2x_vita_heap_tick(double now, size_t heapUsed); // ps2_vita_runtime.cpp
 
 void EndDrawing(void)
 {
     if (g_glReady)
     {
         const uint64_t swapStart = sceKernelGetProcessTimeWide();
+        const uint32_t queued143 = std::min<uint32_t>(g_swaps.load(std::memory_order_relaxed) - g_shown.load(std::memory_order_relaxed), 3u); // round 143
+        g_swaps.fetch_add(1u, std::memory_order_relaxed); // (before: the display may take it at once)
+        pace110::push(pace110::t_tag); // round 110: this swap's display entry, in order
+        pace110::t_tag = 0u;
+        pace110::g_swapStartUs.store(swapStart, std::memory_order_relaxed); // round 143
+        pace110::g_inSwap.store(1, std::memory_order_relaxed); // round 132
         vglSwapBuffers(GL_FALSE);
-        ps2x_vita_swap_us += sceKernelGetProcessTimeWide() - swapStart;
+        pace110::g_inSwap.store(0, std::memory_order_relaxed);
+        const uint64_t swapTook = sceKernelGetProcessTimeWide() - swapStart;
+        ps2x_vita_swap_us += swapTook;
+        ++pace110::g_swapAll[queued143];
+        if (swapTook > 2000u)
+            ++pace110::g_swapLong[queued143];
     }
+    const bool pacePrint = g_glReady;
     static bool firstShown = false;
     if (!firstShown)
     {
@@ -424,6 +1036,8 @@ void EndDrawing(void)
         bootMark("first picture on screen");
     }
     ps2xVitaGlMutex().unlock();
+    if (pacePrint)
+        pace110::printPending(); // round 110: the display callback's [pace110] lines (it must not print)
     // Logs go to files on ux0: keep them current in case the app is killed.
     std::fflush(stdout);
     std::fflush(stderr);
@@ -452,6 +1066,7 @@ void EndDrawing(void)
                      vglMemTotal(VGL_MEM_VRAM) / MB, used[VGL_MEM_RAM] / MB, vglMemTotal(VGL_MEM_RAM) / MB, used[VGL_MEM_PHYCONT] / MB,
                      vglMemTotal(VGL_MEM_PHYCONT) / MB, used[VGL_MEM_BUDGET] / MB, vglMemTotal(VGL_MEM_BUDGET) / MB, static_cast<unsigned>(spills), spill / MB,
                      spillPeak / MB, spillTotal / MB);
+        ps2x_vita_heap_tick(now, mi.uordblks); // round mem99: the emergency reserve, SOTC_HEAP_PROF's [heap] lines
         // Round 35, SOTC_VGL_MEMDUMP=<seconds> (0: off): what vitaGL's pools
         // hold by the code that asked for it, the circular pool's peak and
         // the render targets ([vgl:dump] lines; sites resolve against the ELF

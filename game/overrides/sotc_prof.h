@@ -10,6 +10,8 @@
 #pragma once
 
 #include <cstdint>
+#include "runtime/ps2_diag.h"
+
 
 class PS2Runtime;
 struct R5900Context;
@@ -54,7 +56,7 @@ namespace sotc_prof
         uint32_t serial = 0;
         explicit Scope(int hook)
         {
-            if (g_on && !t_offGameThread)
+            if (!ps2_diag::kRelease && g_on && !t_offGameThread) // (round 130: none in the release build)
                 serial = enter(hook, ticks());
         }
         ~Scope()
@@ -79,6 +81,13 @@ namespace sotc_prof
     void noteLean(bool lean);
     // SOTC_AB's state (sotc_decomp.cpp), for the report like SOTC_LEAN=2's.
     void noteAb(bool on);
+}
+
+// Round 129: the console's sampling profiler of the game thread
+// (SOTC_PROF129=1; sotc_prof129.cpp, read by r129/prof129.py).
+namespace prof129
+{
+    void install(PS2Runtime &runtime);
 }
 
 #define SOTC_PROF_SCOPE(hook) const ::sotc_prof::Scope sotc_prof_scope_##hook{::sotc_prof::hook}

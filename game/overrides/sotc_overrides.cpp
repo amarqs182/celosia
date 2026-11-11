@@ -1,4 +1,5 @@
 #include <cstring>
+#include "runtime/ps2_diag.h"
 // Shadow of the Colossus (SCUS-97472) runtime overrides.
 #include <cstdio>
 #include <utility>
@@ -13,6 +14,7 @@
 #include "runtime/ee_scheduler.h"
 #include "ps2x/iop/iop_subsystem.h"
 #include "runtime/ps2_stats.h"
+#include "runtime/native_tuning.h"
 
 #include <array>
 #include <atomic>
@@ -27,6 +29,12 @@ void installSotcNativeLate(PS2Runtime &runtime);
 #include "sotc_prof.h"
 #include "sotc_replay.h"
 
+#if defined(__vita__)
+extern "C" void ps2x_vita_present_hist(uint32_t *out8); // raylib_vita.cpp (round 107)
+extern "C" int ps2x_vita_display_pending(void);
+extern "C" void ps2x_vita_pace_release(uint32_t seq, uint32_t prevDtUs); // raylib_vita.cpp (round 110)
+#endif
+#include <chrono>
 namespace
 {
     bool g_gamecoreEntered = false;
@@ -241,7 +249,7 @@ namespace
 
     void installCensus(PS2Runtime &runtime)
     {
-        if (!std::getenv("SOTC_CENSUS"))
+        if (!ps2_diag::env("SOTC_CENSUS"))
             return;
         static const auto hooks = makeCensus(std::make_integer_sequence<int, kCensusCount>{});
         for (int i = 0; i < kCensusCount; ++i)
@@ -274,7 +282,7 @@ namespace
 
     void modelDispDumpHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        static const uint64_t at = std::strtoull(std::getenv("SOTC_MODEL_DUMP"), nullptr, 10);
+        static const uint64_t at = std::strtoull(ps2_diag::env("SOTC_MODEL_DUMP"), nullptr, 10);
         const uint64_t frame = ps2_stats::vif1Chains.load(std::memory_order_relaxed);
         auto word = [rdram](uint32_t addr) { uint32_t v = 0; std::memcpy(&v, rdram + (addr & 0x1FFFFFCu), 4); return v; };
         auto floats = [rdram](uint32_t addr, int n)
@@ -331,7 +339,7 @@ namespace
         (*Original)(rdram, ctx, runtime);
         if (runtime->transferPending())
             return;
-        static const uint64_t at = std::strtoull(std::getenv("SOTC_MODEL_DUMP"), nullptr, 10);
+        static const uint64_t at = std::strtoull(ps2_diag::env("SOTC_MODEL_DUMP"), nullptr, 10);
         if (g_modelDumpState == 1 && ps2_stats::vif1Chains.load(std::memory_order_relaxed) == at + 1u)
         {
             char line[96];
@@ -558,14 +566,267 @@ namespace
     constexpr uint32_t kGpReleaseFrame = 0x001C8078u;
     PS2Runtime::RecompiledFunction g_gpReleaseFrame = nullptr;
 
+    // Round 107, the player menu's Frame rate "Steady 20" (Tuning::frameRate,
+    // SOTC_CAP20): in frames with a scene (the host loop's round-36 rule: 150
+    // draws or more on, under 40 off; loading screens, logos and menus over
+    // black run as before) the next frame starts only 3 VBlanks (50 ms) after
+    // the previous one did. The game's step comes from the EE clock between
+    // frame starts (round 10), so it is 50 ms, the time each picture is shown
+    // (the display holds it 3 refreshes: ps2_runtime.cpp, vsync interval 3);
+    // speed, animation and sound stay as they are. The frame waits in its own
+    // frame wait (the box's sender list): the other guest threads and the
+    // VBlanks run on. Input is read at the frame's start as before.
+    //
+    // A frame still running at its third VBlank is released at the first
+    // VBlank after it ends, on the VBlank grid: the guest's VBlanks that came
+    // due while the frame ran (the EE clock catches up with the host's when
+    // the game thread parks) are polled at once at the frame's end, off the
+    // grid; such a poll waits for the next VBlank (once: then it goes), so the
+    // long frame's step is 4 VBlanks (66.7 ms), as long as the display shows
+    // it (the next refresh), and the cadence counts from there (no short
+    // frame after a long one).
+    //
+    // Latency: the display's queue (vitaGL, 2 pictures) must not fill up (the
+    // game's 60.00 Hz VBlanks against the display's 59.94, or a picture the
+    // render thread finished late): with SOTC_CAP20_QUEUE (default 2) or more
+    // pictures still waiting for the display at a release, the release waits
+    // one VBlank (counted, "latency holds"; 0: never).
+    namespace cap20
+    {
+        constexpr uint32_t kFrameBoxSenders = 0x0026D9A8u + 0x18u; // the game thread waits here (sotc_replay.cpp)
+        constexpr uint32_t kGameDt = 0x014657D0u;                  // the frame's step, s (the frame log's dt)
+        constexpr double kVBlank = 0.016667;                        // the guest's VBlank period (EeScheduler kVBlankPeriod)
+        constexpr double kOnTime = 0.004;                           // a poll within this of a VBlank's time is on the grid
+        bool g_scene = false, g_active = false, g_haveRelease = false, g_lateHeld = false, g_queueHeld = false;
+        // Round 110 (SOTC_PACE110_HYST, Auto only): a floor for the frame's
+        // length in VBlanks with hysteresis, so Auto's cadence does not flip
+        // between 2 / 3 / 4 VBlanks frame to frame. Each frame's own length
+        // (the first poll that finds the game thread waiting) goes into a ring;
+        // the floor goes up one when 5 of the last 15 frames needed more than
+        // it, down one when at most 3 of the last 30 needed more than one less
+        // (1..3; 1 = no hold). Releases are held to the floor as Steady 20
+        // holds them to 3 (the same grid rules), so the game's step is the
+        // time each picture is shown; scenes only (the round-36 rule).
+        namespace hyst
+        {
+            uint8_t g_ring[32] = {};
+            uint32_t g_count = 0;
+            int g_floor = 1;
+            bool g_seen = false; // this frame's own length taken
+            uint32_t g_floorHist[4] = {}, g_switches = 0;
+            int floorNow() { return g_floor; }
+            void frameLength(int n) // at the first poll with the game thread waiting
+            {
+                g_ring[g_count++ & 31u] = static_cast<uint8_t>(std::clamp(n, 1, 7));
+                auto over = [&](int k, int limit)
+                {
+                    int c = 0;
+                    for (uint32_t i = 0; i < static_cast<uint32_t>(k) && i < g_count; ++i)
+                        c += g_ring[(g_count - 1u - i) & 31u] > limit ? 1 : 0;
+                    return c;
+                };
+                if (g_floor < 3 && g_count >= 15u && over(15, g_floor) >= 5)
+                {
+                    ++g_floor;
+                    ++g_switches;
+                    g_count = 0; // a fresh look at the new floor
+                }
+                else if (g_floor > 1 && g_count >= 30u && over(30, g_floor - 1) <= 3)
+                {
+                    --g_floor;
+                    ++g_switches;
+                    g_count = 0;
+                }
+            }
+        }
+        uint64_t g_lastRelease = 0;
+        double g_releaseTime = 0;
+        // The [cap20] line (every 600 frames released while on, or with the
+        // frame log in Auto): the wall time between releases in VBlanks, the
+        // game's step, game time against wall time, and on the Vita the
+        // pictures' time on screen in display refreshes (vitaGL's display queue).
+        struct Window
+        {
+            uint32_t frames = 0, held = 0, lateHeld = 0, queueHeld = 0;
+            uint32_t release[8] = {}; // wall time between releases in VBlanks, rounded (7: 7 or more)
+            uint32_t dt[8] = {};      // the step in VBlanks, rounded
+            uint32_t dtExact = 0;     // within 1 ms of 3 VBlanks
+            double dtSum = 0, dtMin = 1e9, dtMax = 0;
+            double wallStart = -1;
+        } g_w;
+        double wallNow()
+        {
+            return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        }
+        int pending()
+        {
+#if defined(__vita__)
+            return ps2x_vita_display_pending();
+#else
+            return 0;
+#endif
+        }
+        void summary(bool active)
+        {
+            Window &w = g_w;
+            const double wall = wallNow() - w.wallStart;
+            char shown[160] = "";
+#if defined(__vita__)
+            uint32_t h[8];
+            ps2x_vita_present_hist(h);
+            std::snprintf(shown, sizeof(shown), " | shown (refreshes) 1:%u 2:%u 3:%u 4:%u 5:%u 6:%u 7+:%u", h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
+#endif
+            std::fprintf(stderr,
+                         "[cap20] %s %u frames: released after (VBlanks) 1:%u 2:%u 3:%u 4:%u 5:%u 6:%u 7+:%u, held %u polls (late %u, latency %u) | step (VBlanks) 1:%u 2:%u 3:%u 4:%u 5:%u 6:%u 7+:%u,"
+                         " within 1 ms of 50: %u, mean %.2f ms min %.1f max %.1f | game time / wall %.3f (%.1f s / %.1f s)%s | auto floor (round 110) 1:%u 2:%u 3:%u, %u switches\n",
+                         active ? "steady20" : "auto", w.frames, w.release[1], w.release[2], w.release[3], w.release[4], w.release[5], w.release[6], w.release[7], w.held,
+                         w.lateHeld, w.queueHeld, w.dt[1], w.dt[2], w.dt[3], w.dt[4], w.dt[5], w.dt[6], w.dt[7], w.dtExact, w.frames ? w.dtSum / w.frames * 1000.0 : 0.0,
+                         w.dtMin * 1000.0, w.dtMax * 1000.0, wall > 0 ? w.dtSum / wall : 0.0, w.dtSum, wall, shown, hyst::g_floorHist[1], hyst::g_floorHist[2],
+                         hyst::g_floorHist[3], hyst::g_switches);
+            hyst::g_floorHist[1] = hyst::g_floorHist[2] = hyst::g_floorHist[3] = 0;
+            hyst::g_switches = 0;
+            w = Window{};
+            w.wallStart = wallNow();
+        }
+        void released(uint8_t *rdram, double since, bool active)
+        {
+            static const bool logOn = [] { const char *e = ps2_diag::env("SOTC_CAP20_LOG"); return e ? std::atoi(e) != 0 : true; }();
+            Window &w = g_w;
+            if (w.wallStart < 0)
+            {
+                w.wallStart = wallNow();
+#if defined(__vita__)
+                uint32_t h[8];
+                ps2x_vita_present_hist(h); // (from here)
+#endif
+                return; // the first release starts the window
+            }
+            float dt = 0.0f;
+            std::memcpy(&dt, rdram + kGameDt, 4);
+            ++w.frames;
+            ++w.release[std::clamp(static_cast<int>(since / kVBlank + 0.5), 0, 7)];
+            ++w.dt[std::clamp(static_cast<int>(dt / kVBlank + 0.5), 0, 7)];
+            if (std::fabs(dt - 3.0 * kVBlank) < 0.001)
+                ++w.dtExact;
+            w.dtSum += dt;
+            w.dtMin = std::min<double>(w.dtMin, dt);
+            w.dtMax = std::max<double>(w.dtMax, dt);
+            if (w.frames >= 600u)
+            {
+                if (logOn && (active || native_renderer::tuning().frameLog))
+                    summary(active);
+                else
+                    w = Window{}, w.wallStart = wallNow();
+            }
+        }
+    }
+
     void gpReleaseFrameHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        static const uint64_t interval = std::strtoull(std::getenv("SOTC_FRAME_INTERVAL"), nullptr, 10);
-        static uint64_t lastRelease = 0;
         const uint64_t tick = runtime->eeScheduler().currentVSyncTick();
-        if (tick < lastRelease + interval)
-            return; // the GP thread calls again at the next VBlank
-        lastRelease = tick;
+        static const char *fixed = std::getenv("SOTC_FRAME_INTERVAL");
+        if (fixed)
+        {
+            static const uint64_t interval = std::strtoull(fixed, nullptr, 10);
+            static uint64_t lastRelease = 0;
+            if (tick < lastRelease + interval)
+                return; // the GP thread calls again at the next VBlank
+            lastRelease = tick;
+            g_gpReleaseFrame(rdram, ctx, runtime);
+            return;
+        }
+        using namespace cap20;
+        const uint32_t draws = native_renderer::g_lastFrameDraws.load(std::memory_order_relaxed);
+        g_scene = draws >= 150u ? true : (draws < 40u ? false : g_scene);
+        const bool active = native_renderer::tuning().frameRate >= 0.5f && g_scene;
+        if (active != g_active)
+        {
+            g_active = active;
+            native_renderer::g_cap20Active.store(active, std::memory_order_relaxed);
+            std::fprintf(stderr, "[cap20] steady 20 %s at vblank %llu (%u draws)\n", active ? "on" : "off", (unsigned long long)tick, draws);
+            g_w = Window{}; // a window of one mode only
+        }
+        uint32_t senders = 0;
+        std::memcpy(&senders, rdram + kFrameBoxSenders, 4);
+        if (senders == 0u)
+            return g_gpReleaseFrame(rdram, ctx, runtime); // the frame still runs: the poll finds nobody (as without the hook)
+        const double now = wallNow();
+        const double since = g_haveRelease ? now - g_releaseTime : 0.0;
+        // Round 110: Auto's floor with hysteresis (SOTC_PACE110_HYST, scenes only).
+        static const bool hystOn = [] { const char *e = std::getenv("SOTC_PACE110_HYST"); return e ? std::atoi(e) != 0 : false; }();
+        uint32_t need = active ? 3u : 0u;
+        if (!active && hystOn && g_scene && g_haveRelease)
+        {
+            if (!hyst::g_seen)
+            {
+                hyst::g_seen = true;
+                hyst::frameLength(static_cast<int>(since / kVBlank + 0.5));
+            }
+            need = hyst::floorNow() >= 2 ? static_cast<uint32_t>(hyst::floorNow()) : 0u;
+        }
+        if (need >= 2u && g_haveRelease)
+        {
+            if (tick < g_lastRelease + need)
+            {
+                ++g_w.held;
+                return; // held: the GP thread polls again at the next VBlank
+            }
+            // On the grid: within kOnTime of a whole number of VBlanks since the
+            // last release (late polls come in a burst as the frame ends).
+            const int n = static_cast<int>(since / kVBlank + 0.5);
+            const double off = since - n * kVBlank;
+            if (since < (need - 0.5) * kVBlank)
+            {
+                ++g_w.held;
+                return; // early on the wall clock (a burst of VBlanks): a later one
+            }
+            if ((off > kOnTime || off < -kOnTime) && !g_lateHeld)
+            {
+                g_lateHeld = true;
+                ++g_w.held;
+                ++g_w.lateHeld;
+                return; // off the grid (late in a burst): the next VBlank, once
+            }
+            static const int queueMax = [] { const char *e = std::getenv("SOTC_CAP20_QUEUE"); return e ? std::atoi(e) : 2; }();
+            if (queueMax > 0 && pending() >= queueMax && !g_queueHeld)
+            {
+                g_queueHeld = true;
+                ++g_w.held;
+                ++g_w.queueHeld;
+                return; // the display is behind: one VBlank later
+            }
+        }
+        // SOTC_CAP20_TRACE=<n>: the first n releases, one line each.
+        static const int traceMax = [] { const char *e = ps2_diag::env("SOTC_CAP20_TRACE"); return e ? std::atoi(e) : 0; }();
+        static int traced = 0;
+        if (traced < traceMax)
+        {
+            ++traced;
+            float dt = 0.0f;
+            std::memcpy(&dt, rdram + kGameDt, 4);
+            std::fprintf(stderr, "[cap20t] tick %llu +%llu since %.2f ms (%.2f VBlanks) dt %.2f pending %d late %d queue %d %s\n", (unsigned long long)tick,
+                         (unsigned long long)(tick - g_lastRelease), since * 1000.0, since / kVBlank, dt * 1000.0, pending(), g_lateHeld ? 1 : 0,
+                         g_queueHeld ? 1 : 0, active ? "on" : "off");
+        }
+        g_lastRelease = tick;
+        g_releaseTime = now;
+        g_haveRelease = true;
+        g_lateHeld = g_queueHeld = false;
+        hyst::g_seen = false;
+        ++hyst::g_floorHist[std::clamp(need, 1u, 3u)];
+        released(rdram, since, active);
+        {
+            // Round 110: the release counted (native_renderer::g_paceSeq: the hand-over tags the
+            // frame's picture with it); on the Vita its time and the step of the frame that ends
+            // here (the game's dt, as the frame used it) go to the display's pacing.
+            const uint32_t seq = native_renderer::g_paceSeq.load(std::memory_order_relaxed) + 1u;
+#if defined(__vita__)
+            float dt = 0.0f;
+            std::memcpy(&dt, rdram + kGameDt, 4);
+            ps2x_vita_pace_release(seq, dt > 0.0f && dt < 4.0f ? static_cast<uint32_t>(dt * 1e6f + 0.5f) : 0u);
+#endif
+            native_renderer::g_paceSeq.store(seq, std::memory_order_release);
+        }
         g_gpReleaseFrame(rdram, ctx, runtime);
     }
 
@@ -773,7 +1034,7 @@ namespace
             {
                 const uint32_t chunks = (qwc + 0x3FFu) / 0x400u, last = (qwc - (chunks - 1u) * 0x400u) * 16u;
                 // SOTC_SPR_COPY_CHECK=1 (checking): the chunks on a copy of the range and the scratchpad, compared.
-                static const bool check = std::getenv("SOTC_SPR_COPY_CHECK") != nullptr;
+                static const bool check = ps2_diag::env("SOTC_SPR_COPY_CHECK") != nullptr;
                 const uint32_t lo = std::min(srcOff, dstOff), hi = std::max(srcOff, dstOff) + total;
                 std::vector<uint8_t> ram, pad;
                 if (check)
@@ -989,7 +1250,9 @@ namespace
             g_sg2RemoteTick = runtime.lookupFunction(0x001D21E8u);
             runtime.registerFunction(0x001D21E8u, sg2RemoteTickHook);
         }
-        if (std::getenv("SOTC_FRAME_INTERVAL") && runtime.hasFunction(kGpReleaseFrame))
+        // (Round 107: always, for the Frame rate menu item; Auto passes every
+        // release through.)
+        if (runtime.hasFunction(kGpReleaseFrame))
         {
             g_gpReleaseFrame = runtime.lookupFunction(kGpReleaseFrame);
             runtime.registerFunction(kGpReleaseFrame, gpReleaseFrameHook);
@@ -1029,7 +1292,7 @@ namespace
         sysnative::install(runtime);
         sotc_decomp::install(runtime);
         installSotcNativeLate(runtime);
-        if (std::getenv("SOTC_MATH_CHECK") && runtime.hasFunction(0x010816C0u))
+        if (ps2_diag::env("SOTC_MATH_CHECK") && runtime.hasFunction(0x010816C0u))
         {
             g_yawPitch = runtime.lookupFunction(0x010816C0u);
             runtime.registerFunction(0x010816C0u, yawPitchHook);
@@ -1038,7 +1301,7 @@ namespace
             g_yawPitchEnd = runtime.lookupFunction(kYawPitchEnd);
             runtime.registerFunction(kYawPitchEnd, yawPitchEndHook);
         }
-        if (std::getenv("SOTC_MODEL_DUMP") && runtime.hasFunction(kModelDisp) && runtime.hasFunction(kGetCameraContext))
+        if (ps2_diag::env("SOTC_MODEL_DUMP") && runtime.hasFunction(kModelDisp) && runtime.hasFunction(kGetCameraContext))
         {
             g_modelDispOriginal = runtime.lookupFunction(kModelDisp);
             runtime.registerFunction(kModelDisp, modelDispDumpHook);

@@ -15,6 +15,7 @@
 // PS2X_VU1_NATIVE=verify compares this with the interpreter.
 
 #include "runtime/ps2_stats.h"
+#include "runtime/ps2_diag.h"
 #include "ps2_runtime.h"
 #include "runtime/ps2_vu1.h"
 #include "runtime/ps2_vu1_native.h"
@@ -203,7 +204,7 @@ namespace
 
     bool directEnabled()
     {
-#if defined(__vita__)
+#if defined(__vita__) || defined(__linux__)
         return true; // no environment there; the GPU path is the point of the port
 #else
         // 2: every other game frame only, to compare the two paths frame to
@@ -226,7 +227,7 @@ namespace
     {
         for (int col = 0; col < 4; ++col)
             plane[col] = S.vf[5 + col][2] + S.vf[5 + col][3];
-#if defined(__vita__)
+#if defined(__vita__) || defined(__linux__)
         for (size_t i = 0; i < count; ++i)
             if (plane[0] * v[i].x + plane[1] * v[i].y + plane[2] * v[i].z + plane[3] < 0.0f)
                 return false;
@@ -394,7 +395,7 @@ namespace
     // the world loop runs with in the logged frames, and how many batches.
     void logClipMatrix(const VU1State &S)
     {
-        static const bool on = std::getenv("SOTC_BLOOM_LOG") != nullptr;
+        static const bool on = ps2_diag::env("SOTC_BLOOM_LOG") != nullptr;
         if (!on)
             return;
         static uint64_t frame = ~0ull;

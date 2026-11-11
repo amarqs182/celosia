@@ -19,18 +19,44 @@
 // statements on locals (lifted from build/runner). Pointers outside main
 // RAM go to the recompiled code before anything is written.
 #include "sotc_decomp.h"
+#include "runtime/ps2_diag.h"
+#include "sotc_worker.h"
 
 #include "ps2_runtime_macros.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/native_tuning.h"
 
+#include <chrono>
+#include <cmath>
+#if defined(__vita__)
+#include <psp2/kernel/processmgr.h>
+#endif
 #include <cstring>
 
 namespace decomp_particles
 {
     void particleUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    bool update123(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t p, uint32_t list, uint32_t a2, uint32_t kind, uint32_t params,
+                   uint32_t t1, uint32_t sp0, float &f0out, bool guestRandom = false);
+    bool damageWanted(const uint8_t *rdram, uint32_t a2);
+    extern uint64_t g_damageCalls, g_damageSkipped;
+}
+namespace decomp_hot47e
+{
+    void blend(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
 }
 
+namespace coll115t
+{
+    inline uint64_t nowUs()
+    {
+#if defined(__vita__)
+        return sceKernelGetProcessTimeWide();
+#else
+        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+#endif
+    }
+}
 namespace decomp_ptclupdate
 {
     constexpr uint32_t kGeodisp = 0x0113F500u, kList = 0x0113AAE0u, kEmitter = 0x0113B610u, kStep = 0x0113B928u, kUpdate = 0x0113CA58u;
@@ -50,8 +76,9 @@ namespace decomp_ptclupdate
     // SOTC_PTCL_STATS=1 (debugging): which paths ran, every 600 calls of the list.
     struct Stats
     {
-        bool on = std::getenv("SOTC_PTCL_STATS") != nullptr;
-        uint64_t lists = 0, emitters = 0, steps = 0, matrix = 0, unit = 0, plain = 0, done = 0, spawned = 0, dead = 0, fallbacks = 0;
+        bool on = ps2_diag::env("SOTC_PTCL_STATS") != nullptr;
+        uint64_t lists = 0, emitters = 0, steps = 0, matrix = 0, unit = 0, plain = 0, done = 0, spawned = 0, dead = 0, fallbacks = 0, h123 = 0, o123 = 0;
+        uint64_t us123[2] = {}, n123[2] = {}; // the particle loops' host time by ptcl123's state, and their particles
     };
     Stats *g_stats = nullptr;
     inline Stats &stats()
@@ -137,6 +164,252 @@ namespace decomp_ptclupdate
         }
     }
 
+    // ---- Round 117 (SOTC_LEAF117, default on; A/B `leaf117`, `r117all`) ----
+    // The emitter frame's remaining leaf calls (0113B610 / 0113B928) as host
+    // code called straight, each the recompiled code's operations in its
+    // order (the FPU_* / VU0 macros it uses), the memory it writes, f0 - f2,
+    // the condition bit and the VU0 registers as it leaves them. The paths
+    // that call further down (a node-attached emitter's geometry in
+    // 0113AEF8, 01141230's world matrix, 01141400's two kinds) stay guest
+    // calls: each function says whether it did the work. Not as the
+    // original: the scratch GPRs it leaves (dead at its callers, which set
+    // every argument before their next call and read only f0 / f1) and the
+    // stores of its own frame below sp.
+    namespace leaf117
+    {
+        inline void setC(R5900Context *ctx, bool c) { ctx->fcr31 = c ? (ctx->fcr31 | 0x800000u) : (ctx->fcr31 & ~0x800000u); }
+
+        // 0113AEF8 (a0 E, a1 the record, a2 0): the position / orientation /
+        // direction qwords (+0x10 .. +0x3f) kept as last frame's (+0x40 ..);
+        // with E+0xc4 == 1 (follows a node) the rest reads the node: false.
+        inline bool keepFrame(const Mem &m, R5900Context *ctx, uint32_t E)
+        {
+            if (m.u32(E + 0xC4u) == 1u)
+                return false;
+            const __m128i a = m.q128(E + 0x10u), b = m.q128(E + 0x20u), c = m.q128(E + 0x30u);
+            m.put128(E + 0x40u, a);
+            m.put128(E + 0x50u, b);
+            m.put128(E + 0x60u, c);
+            SET_GPR_U64(ctx, 2, 1u);
+            return true;
+        }
+
+        // 011410D0 (a0 E, a1 the record): the distance fade +0x13c from the
+        // distance +0x130 against the record's +0x28 / +0x2c / +0x30, then
+        // +0x140 = +0x138 x +0x13c.
+        inline void distanceFade(const Mem &m, R5900Context *ctx, uint32_t E, uint32_t Mr)
+        {
+            float f0 = m.f32(Mr + 0x28u), f1 = ctx->f[1];
+            const float f2 = m.f32(E + 0x130u);
+            ctx->f[2] = f2;
+            bool c = FPU_C_OLT_S(f2, f0);
+            setC(ctx, c);
+            if (c)
+            {
+                f0 = ps2FpuDivide(ctx->fcr31, f2, f0);
+                m.putf(E + 0x13Cu, f0);
+            }
+            else
+            {
+                f1 = m.f32(Mr + 0x2Cu);
+                c = FPU_C_OLT_S(f2, f1);
+                setC(ctx, c);
+                if (!c)
+                {
+                    f0 = m.f32(Mr + 0x30u);
+                    c = FPU_C_OLT_S(f2, f0);
+                    setC(ctx, c);
+                    if (!c)
+                        m.put32(E + 0x13Cu, 0u);
+                    else
+                    {
+                        f1 = FPU_SUB_S(f0, f1);
+                        f0 = FPU_SUB_S(f0, f2);
+                        f0 = ps2FpuDivide(ctx->fcr31, f0, f1);
+                        m.putf(E + 0x13Cu, f0);
+                    }
+                }
+                else
+                {
+                    f0 = bits(0x3F800000u);
+                    m.putf(E + 0x13Cu, f0);
+                }
+            }
+            f0 = m.f32(E + 0x138u);
+            f1 = m.f32(E + 0x13Cu);
+            f0 = FPU_MUL_S(f0, f1);
+            m.putf(E + 0x140u, f0);
+            ctx->f[0] = f0;
+            ctx->f[1] = f1;
+        }
+
+        // 01141150 (a0 E, a1 the record): the LOD index +0x118 from the
+        // emitter's screen radius (get_particle_lod_base_size: the current
+        // camera context's GetScreenRadiusParticle(+0x130, 1)) against the
+        // record's thresholds (+8 the mode). False when the camera context
+        // is not plain RAM (then the guest call).
+        inline bool lodIndex(const Mem &m, R5900Context *ctx, uint32_t E, uint32_t Mr)
+        {
+            if (m.u32(Mr + 8u) == 0u)
+            {
+                m.put32(E + 0x118u, 0u);
+                return true;
+            }
+            uint32_t cc = 0u, v1 = 0u;
+            if (!ptcl89::camera(m, cc, v1) || !inRam(cc + 0xC0u, 0x40u))
+                return false;
+            // GetScreenRadiusParticle (0x1160e08; a0 the context, f12 +0x130, f13 1.0).
+            float f0;
+            {
+                const float f12 = m.f32(E + 0x130u), f13 = bits(0x3F800000u);
+                __m128 *vf = ctx->vu0_vf;
+                vf[8] = _mm_setr_ps(f13, 0.0f, f12, bits(0x3F800000u));
+                const uint32_t M = cc + 0xC0u;
+                vf[14] = m.q(M);
+                vf[15] = m.q(M + 0x10u);
+                vf[16] = m.q(M + 0x20u);
+                vf[17] = m.q(M + 0x30u);
+                __m128 acc = PS2_VMUL(vf[14], _mm_shuffle_ps(vf[8], vf[8], _MM_SHUFFLE(0, 0, 0, 0)));
+                acc = PS2_VADD_K(1, 1, acc, PS2_VMUL(vf[15], _mm_shuffle_ps(vf[8], vf[8], _MM_SHUFFLE(1, 1, 1, 1))));
+                acc = PS2_VADD_K(1, 1, acc, PS2_VMUL(vf[16], _mm_shuffle_ps(vf[8], vf[8], _MM_SHUFFLE(2, 2, 2, 2))));
+                ctx->vu0_acc = acc;
+                vf[10] = PS2_VADD_K(1, 1, acc, PS2_VMUL(vf[17], _mm_shuffle_ps(vf[8], vf[8], _MM_SHUFFLE(3, 3, 3, 3))));
+                const float x = _mm_cvtss_f32(vf[10]), w = _mm_cvtss_f32(_mm_shuffle_ps(vf[10], vf[10], _MM_SHUFFLE(3, 3, 3, 3)));
+                const float f2 = bits(0x45000000u);
+                f0 = ps2FpuDivide(ctx->fcr31, x, w);
+                f0 = FPU_SUB_SF(f0, f2);
+                ctx->f[2] = f2;
+                ctx->f[12] = f12;
+                ctx->f[13] = f13;
+            }
+            const uint32_t old = m.u32(E + 0x118u);
+            const float f1 = FPU_MOV_S(f0);
+            ctx->f[1] = f1;
+            auto lt = [&](uint32_t at) -> bool
+            {
+                f0 = m.f32(Mr + at);
+                const bool c = FPU_C_OLT_S(f1, f0);
+                setC(ctx, c);
+                return c;
+            };
+            uint32_t idx;
+            if (m.u32(Mr + 8u) == 1u)
+                idx = lt(0x14u) ? 1u : lt(0x18u) ? old : 0u;
+            else
+                idx = lt(0x0Cu) ? 2u : lt(0x10u) ? old : lt(0x14u) ? 1u : lt(0x18u) ? old : 0u;
+            m.put32(E + 0x118u, idx);
+            ctx->f[0] = f0;
+            return true;
+        }
+
+        // 01141230 (a0 E, a1 the record, a2 the LOD record): only an LOD
+        // record with +0x164 == 2 does anything (the direction to the camera
+        // through get_world_matrixSR): true when there is nothing to do.
+        inline bool aimIdle(const Mem &m, uint32_t R) { return m.u32(R + 0x164u) != 2u; }
+
+        // 01141400 (a0 E, a1 the kind): kinds +0x104 == 1 / 2 call further
+        // down: true when there is nothing to do.
+        inline bool kindIdle(const Mem &m, uint32_t K) { return m.u32(K + 0x104u) - 1u > 1u; }
+
+        // SOTC_LEAF117_CHECK=<n>: every n-th emitter frame each native leaf
+        // is run, its result kept, the state put back, the guest call run
+        // from the same state, and the two compared (the emitter's 0x200
+        // bytes or the blend's 0x160-byte block, f0 - f7, the condition bit,
+        // vf8 / vf10 / vf14 - vf17 / ACC); the guest's result goes on.
+        // [leaf117c] every 2000 checks and at each difference (first 20).
+        struct Snap
+        {
+            uint8_t block[0x200];
+            uint32_t at = 0, len = 0, fcr = 0;
+            float f[8];
+            __m128 vf[6], acc;
+            void take(const Mem &m, const R5900Context *ctx, uint32_t a, uint32_t n)
+            {
+                at = a;
+                len = n;
+                std::memcpy(block, m.p(a), n);
+                std::memcpy(f, ctx->f, sizeof f);
+                fcr = ctx->fcr31 & 0x800000u;
+                const int idx[6] = {8, 10, 14, 15, 16, 17};
+                for (int i = 0; i < 6; ++i)
+                    vf[i] = ctx->vu0_vf[idx[i]];
+                acc = ctx->vu0_acc;
+            }
+            void put(const Mem &m, R5900Context *ctx) const
+            {
+                std::memcpy(m.p(at), block, len);
+                std::memcpy(ctx->f, f, sizeof f);
+                ctx->fcr31 = (ctx->fcr31 & ~0x800000u) | fcr;
+                const int idx[6] = {8, 10, 14, 15, 16, 17};
+                for (int i = 0; i < 6; ++i)
+                    ctx->vu0_vf[idx[i]] = vf[i];
+                ctx->vu0_acc = acc;
+            }
+        };
+        struct Check
+        {
+            int every = -1;
+            uint64_t frames = 0, checks = 0, differ = 0;
+            uint64_t perLeaf[5] = {}, perDiffer[5] = {};
+        };
+        inline Check &check()
+        {
+            static Check c;
+            if (c.every < 0)
+                c.every = ps2_diag::env("SOTC_LEAF117_CHECK") ? std::atoi(ps2_diag::env("SOTC_LEAF117_CHECK")) : 0;
+            return c;
+        }
+        inline bool due()
+        {
+            Check &c = check();
+            return c.every > 0 && ++c.frames % static_cast<uint64_t>(c.every) == 0u;
+        }
+        // native: runs the leaf natively (false: it did not, nothing to compare); guest: the guest call.
+        template <class N, class Gc>
+        inline void compare(int leaf, const Mem &m, R5900Context *ctx, uint32_t at, uint32_t len, bool vu, N native, Gc guest)
+        {
+            static const char *const names[5] = {"keepFrame", "distanceFade", "lodIndex", "blend", "-"};
+            static Snap before, a, b; // (static: no 16-aligned objects on the stack)
+            before.take(m, ctx, at, len);
+            const bool did = native();
+            a.take(m, ctx, at, len);
+            before.put(m, ctx);
+            guest();
+            if (!did)
+                return;
+            b.take(m, ctx, at, len);
+            Check &c = check();
+            ++c.checks;
+            ++c.perLeaf[leaf];
+            bool same = std::memcmp(a.block, b.block, len) == 0 && std::memcmp(a.f, b.f, sizeof a.f) == 0 && a.fcr == b.fcr;
+            if (vu)
+                same = same && std::memcmp(a.vf, b.vf, sizeof a.vf) == 0 && std::memcmp(&a.acc, &b.acc, sizeof a.acc) == 0;
+            if (!same)
+            {
+                ++c.perDiffer[leaf];
+                if (c.differ++ < 20u)
+                {
+                    uint32_t first = len;
+                    for (uint32_t i = 0; i < len; ++i)
+                        if (a.block[i] != b.block[i])
+                        {
+                            first = i;
+                            break;
+                        }
+                    std::fprintf(stderr, "[leaf117c] DIFFERS %s at %08x: first byte +%x, f %d, c %d, vu %d (f0 %08x / %08x f1 %08x / %08x)\n", names[leaf], at, first,
+                                 std::memcmp(a.f, b.f, sizeof a.f) == 0 ? 0 : 1, a.fcr == b.fcr ? 0 : 1,
+                                 vu && (std::memcmp(a.vf, b.vf, sizeof a.vf) != 0 || std::memcmp(&a.acc, &b.acc, sizeof a.acc) != 0) ? 1 : 0, fbits(a.f[0]),
+                                 fbits(b.f[0]), fbits(a.f[1]), fbits(b.f[1]));
+                }
+            }
+            if (c.checks % 2000u == 0u)
+                std::fprintf(stderr, "[leaf117c] %llu checks, %llu differ (keepFrame %llu/%llu, distanceFade %llu/%llu, lodIndex %llu/%llu, blend %llu/%llu)\n",
+                             (unsigned long long)c.checks, (unsigned long long)c.differ, (unsigned long long)c.perLeaf[0], (unsigned long long)c.perDiffer[0],
+                             (unsigned long long)c.perLeaf[1], (unsigned long long)c.perDiffer[1], (unsigned long long)c.perLeaf[2],
+                             (unsigned long long)c.perDiffer[2], (unsigned long long)c.perLeaf[3], (unsigned long long)c.perDiffer[3]);
+        }
+    }
+
     // Runs recompiled code until it returns to ra with sp: what
     // sotc_decomp::callGuest does, from any pc (a function entered at a label).
     void runToReturn(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, PS2Runtime::RecompiledFunction fn, uint32_t ra, uint32_t sp)
@@ -184,10 +457,262 @@ namespace decomp_ptclupdate
         }
     };
 
+    namespace leaf117
+    {
+        // 0113AEF8's six direction blocks (the recompiled statements; generated from build/runner by r117/gen_aef8.py).
+        inline void dirBlock(const Mem &m, R5900Context *ctx, uint32_t E, int which)
+        {
+            switch (which)
+            {
+            case 0:
+            {
+                ctx->vu0_vf[4] = _mm_castsi128_ps(m.q128(E + 0x20u));
+                { __m128 res = PS2_VMUL(ctx->vu0_vf[4], ctx->vu0_vf[4]); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[5] = PS2_VBLEND(ctx->vu0_vf[5], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = _mm_shuffle_ps(ctx->vu0_vf[4], ctx->vu0_vf[4], _MM_SHUFFLE(0,3,2,1)); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VMUL(ctx->vu0_vf[6], ctx->vu0_vf[4]); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[7] = PS2_VBLEND(ctx->vu0_vf[7], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = _mm_shuffle_ps(ctx->vu0_vf[6], ctx->vu0_vf[6], _MM_SHUFFLE(0,3,2,1)); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VMUL(ctx->vu0_vf[6], ctx->vu0_vf[4]); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[8] = PS2_VBLEND(ctx->vu0_vf[8], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VSUB_K(1, 1, ctx->vu0_vf[0], _mm_shuffle_ps(ctx->vu0_vf[5], ctx->vu0_vf[5], _MM_SHUFFLE(0,0,0,0))); __m128i mask = _mm_set_epi32(0, -1, 0, 0); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VSUB_K(1, 1, ctx->vu0_vf[6], _mm_shuffle_ps(ctx->vu0_vf[5], ctx->vu0_vf[5], _MM_SHUFFLE(1,1,1,1))); __m128i mask = _mm_set_epi32(0, -1, 0, 0); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VADD_K(1, 1, ctx->vu0_vf[7], _mm_shuffle_ps(ctx->vu0_vf[7], ctx->vu0_vf[7], _MM_SHUFFLE(3,3,3,3))); __m128i mask = _mm_set_epi32(0, 0, -1, 0); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VSUB_K(1, 1, ctx->vu0_vf[8], _mm_shuffle_ps(ctx->vu0_vf[8], ctx->vu0_vf[8], _MM_SHUFFLE(1,1,1,1))); __m128i mask = _mm_set_epi32(0, 0, 0, -1); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VSUB_K(1, 1, ctx->vu0_vf[0], ctx->vu0_vf[0]); __m128i mask = _mm_set_epi32(-1, 0, 0, 0); ctx->vu0_vf[6] = PS2_VBLEND(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VADD_K(1, 1, ctx->vu0_vf[0], ctx->vu0_vf[0]); __m128i mask = _mm_set_epi32(-1, 0, 0, 0); ctx->vu0_vf[5] = PS2_VBLEND(ctx->vu0_vf[5], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VMUL_K(1, 1, ctx->vu0_vf[6], _mm_shuffle_ps(ctx->vu0_vf[5], ctx->vu0_vf[5], _MM_SHUFFLE(3,3,3,3))); __m128i mask = _mm_set_epi32(0, -1, -1, -1); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VADD_K(1, 1, ctx->vu0_vf[6], _mm_shuffle_ps(ctx->vu0_vf[0], ctx->vu0_vf[0], _MM_SHUFFLE(3,3,3,3))); __m128i mask = _mm_set_epi32(0, -1, 0, 0); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                m.put128(E + 0x30u, _mm_castps_si128(ctx->vu0_vf[6]));
+                break;
+            }
+            case 1:
+            {
+                ctx->vu0_vf[4] = _mm_castsi128_ps(m.q128(E + 0x20u));
+                { __m128 res = PS2_VMUL(ctx->vu0_vf[4], ctx->vu0_vf[4]); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[5] = PS2_VBLEND(ctx->vu0_vf[5], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = _mm_shuffle_ps(ctx->vu0_vf[4], ctx->vu0_vf[4], _MM_SHUFFLE(0,3,2,1)); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VMUL(ctx->vu0_vf[6], ctx->vu0_vf[4]); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[7] = PS2_VBLEND(ctx->vu0_vf[7], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VADD_K(1, 1, ctx->vu0_vf[0], _mm_shuffle_ps(ctx->vu0_vf[7], ctx->vu0_vf[7], _MM_SHUFFLE(1,1,1,1))); __m128i mask = _mm_set_epi32(0, -1, 0, 0); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VSUB_K(1, 1, ctx->vu0_vf[6], _mm_shuffle_ps(ctx->vu0_vf[7], ctx->vu0_vf[7], _MM_SHUFFLE(3,3,3,3))); __m128i mask = _mm_set_epi32(0, -1, 0, 0); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VSUB_K(1, 1, ctx->vu0_vf[0], _mm_shuffle_ps(ctx->vu0_vf[5], ctx->vu0_vf[5], _MM_SHUFFLE(0,0,0,0))); __m128i mask = _mm_set_epi32(0, 0, -1, 0); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VSUB_K(1, 1, ctx->vu0_vf[6], _mm_shuffle_ps(ctx->vu0_vf[5], ctx->vu0_vf[5], _MM_SHUFFLE(2,2,2,2))); __m128i mask = _mm_set_epi32(0, 0, -1, 0); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VADD_K(1, 1, ctx->vu0_vf[7], _mm_shuffle_ps(ctx->vu0_vf[7], ctx->vu0_vf[7], _MM_SHUFFLE(2,2,2,2))); __m128i mask = _mm_set_epi32(0, 0, 0, -1); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VSUB_K(1, 1, ctx->vu0_vf[0], ctx->vu0_vf[0]); __m128i mask = _mm_set_epi32(-1, 0, 0, 0); ctx->vu0_vf[6] = PS2_VBLEND(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VADD_K(1, 1, ctx->vu0_vf[0], ctx->vu0_vf[0]); __m128i mask = _mm_set_epi32(-1, 0, 0, 0); ctx->vu0_vf[5] = PS2_VBLEND(ctx->vu0_vf[5], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VMUL_K(1, 1, ctx->vu0_vf[6], _mm_shuffle_ps(ctx->vu0_vf[5], ctx->vu0_vf[5], _MM_SHUFFLE(3,3,3,3))); __m128i mask = _mm_set_epi32(0, -1, -1, -1); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VADD_K(1, 1, ctx->vu0_vf[6], _mm_shuffle_ps(ctx->vu0_vf[0], ctx->vu0_vf[0], _MM_SHUFFLE(3,3,3,3))); __m128i mask = _mm_set_epi32(0, 0, -1, 0); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                m.put128(E + 0x30u, _mm_castps_si128(ctx->vu0_vf[6]));
+                break;
+            }
+            case 2:
+            {
+                ctx->vu0_vf[4] = _mm_castsi128_ps(m.q128(E + 0x20u));
+                { __m128 res = PS2_VMUL(ctx->vu0_vf[4], ctx->vu0_vf[4]); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[5] = PS2_VBLEND(ctx->vu0_vf[5], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = _mm_shuffle_ps(ctx->vu0_vf[4], ctx->vu0_vf[4], _MM_SHUFFLE(0,3,2,1)); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VMUL(ctx->vu0_vf[6], ctx->vu0_vf[4]); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[7] = PS2_VBLEND(ctx->vu0_vf[7], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = _mm_shuffle_ps(ctx->vu0_vf[6], ctx->vu0_vf[6], _MM_SHUFFLE(0,3,2,1)); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VMUL(ctx->vu0_vf[6], ctx->vu0_vf[4]); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[8] = PS2_VBLEND(ctx->vu0_vf[8], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VSUB_K(1, 1, ctx->vu0_vf[7], _mm_shuffle_ps(ctx->vu0_vf[7], ctx->vu0_vf[7], _MM_SHUFFLE(2,2,2,2))); __m128i mask = _mm_set_epi32(0, 0, 0, -1); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VADD_K(1, 1, ctx->vu0_vf[0], _mm_shuffle_ps(ctx->vu0_vf[6], ctx->vu0_vf[6], _MM_SHUFFLE(0,0,0,0))); __m128i mask = _mm_set_epi32(0, 0, -1, 0); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VSUB_K(1, 1, ctx->vu0_vf[0], _mm_shuffle_ps(ctx->vu0_vf[5], ctx->vu0_vf[5], _MM_SHUFFLE(1,1,1,1))); __m128i mask = _mm_set_epi32(0, 0, 0, -1); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VSUB_K(1, 1, ctx->vu0_vf[6], _mm_shuffle_ps(ctx->vu0_vf[5], ctx->vu0_vf[5], _MM_SHUFFLE(2,2,2,2))); __m128i mask = _mm_set_epi32(0, 0, 0, -1); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VADD_K(1, 1, ctx->vu0_vf[8], _mm_shuffle_ps(ctx->vu0_vf[8], ctx->vu0_vf[8], _MM_SHUFFLE(3,3,3,3))); __m128i mask = _mm_set_epi32(0, -1, 0, 0); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VSUB(ctx->vu0_vf[6], ctx->vu0_vf[6]); __m128i mask = _mm_set_epi32(-1, 0, 0, 0); ctx->vu0_vf[6] = PS2_VBLEND(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VSUB_K(1, 1, ctx->vu0_vf[0], ctx->vu0_vf[0]); __m128i mask = _mm_set_epi32(-1, 0, 0, 0); ctx->vu0_vf[6] = PS2_VBLEND(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VADD_K(1, 1, ctx->vu0_vf[0], ctx->vu0_vf[0]); __m128i mask = _mm_set_epi32(-1, 0, 0, 0); ctx->vu0_vf[5] = PS2_VBLEND(ctx->vu0_vf[5], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VMUL_K(1, 1, ctx->vu0_vf[6], _mm_shuffle_ps(ctx->vu0_vf[5], ctx->vu0_vf[5], _MM_SHUFFLE(3,3,3,3))); __m128i mask = _mm_set_epi32(0, -1, -1, -1); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VADD_K(1, 1, ctx->vu0_vf[6], _mm_shuffle_ps(ctx->vu0_vf[0], ctx->vu0_vf[0], _MM_SHUFFLE(3,3,3,3))); __m128i mask = _mm_set_epi32(0, 0, 0, -1); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                m.put128(E + 0x30u, _mm_castps_si128(ctx->vu0_vf[6]));
+                break;
+            }
+            case 3:
+            {
+                ctx->vu0_vf[4] = _mm_castsi128_ps(m.q128(E + 0x20u));
+                { __m128 res = PS2_VMUL(ctx->vu0_vf[4], ctx->vu0_vf[4]); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[5] = PS2_VBLEND(ctx->vu0_vf[5], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = _mm_shuffle_ps(ctx->vu0_vf[4], ctx->vu0_vf[4], _MM_SHUFFLE(0,3,2,1)); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VMUL(ctx->vu0_vf[6], ctx->vu0_vf[4]); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[7] = PS2_VBLEND(ctx->vu0_vf[7], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = _mm_shuffle_ps(ctx->vu0_vf[6], ctx->vu0_vf[6], _MM_SHUFFLE(0,3,2,1)); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VMUL(ctx->vu0_vf[6], ctx->vu0_vf[4]); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[8] = PS2_VBLEND(ctx->vu0_vf[8], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VSUB_K(1, 1, ctx->vu0_vf[0], _mm_shuffle_ps(ctx->vu0_vf[5], ctx->vu0_vf[5], _MM_SHUFFLE(0,0,0,0))); __m128i mask = _mm_set_epi32(0, -1, 0, 0); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VSUB_K(1, 1, ctx->vu0_vf[6], _mm_shuffle_ps(ctx->vu0_vf[5], ctx->vu0_vf[5], _MM_SHUFFLE(1,1,1,1))); __m128i mask = _mm_set_epi32(0, -1, 0, 0); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VADD_K(1, 1, ctx->vu0_vf[7], _mm_shuffle_ps(ctx->vu0_vf[7], ctx->vu0_vf[7], _MM_SHUFFLE(3,3,3,3))); __m128i mask = _mm_set_epi32(0, 0, -1, 0); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VSUB_K(1, 1, ctx->vu0_vf[8], _mm_shuffle_ps(ctx->vu0_vf[8], ctx->vu0_vf[8], _MM_SHUFFLE(1,1,1,1))); __m128i mask = _mm_set_epi32(0, 0, 0, -1); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VSUB_K(1, 1, ctx->vu0_vf[0], ctx->vu0_vf[0]); __m128i mask = _mm_set_epi32(-1, 0, 0, 0); ctx->vu0_vf[6] = PS2_VBLEND(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VADD_K(1, 1, ctx->vu0_vf[0], ctx->vu0_vf[0]); __m128i mask = _mm_set_epi32(-1, 0, 0, 0); ctx->vu0_vf[5] = PS2_VBLEND(ctx->vu0_vf[5], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VMUL_K(1, 1, ctx->vu0_vf[6], _mm_shuffle_ps(ctx->vu0_vf[5], ctx->vu0_vf[5], _MM_SHUFFLE(3,3,3,3))); __m128i mask = _mm_set_epi32(0, -1, -1, -1); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VADD_K(1, 1, ctx->vu0_vf[6], _mm_shuffle_ps(ctx->vu0_vf[0], ctx->vu0_vf[0], _MM_SHUFFLE(3,3,3,3))); __m128i mask = _mm_set_epi32(0, -1, 0, 0); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                m.put128(E + 0x30u, _mm_castps_si128(ctx->vu0_vf[6]));
+                break;
+            }
+            case 4:
+            {
+                ctx->vu0_vf[4] = _mm_castsi128_ps(m.q128(E + 0x20u));
+                { __m128 res = PS2_VMUL(ctx->vu0_vf[4], ctx->vu0_vf[4]); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[5] = PS2_VBLEND(ctx->vu0_vf[5], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = _mm_shuffle_ps(ctx->vu0_vf[4], ctx->vu0_vf[4], _MM_SHUFFLE(0,3,2,1)); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VMUL(ctx->vu0_vf[6], ctx->vu0_vf[4]); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[7] = PS2_VBLEND(ctx->vu0_vf[7], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VADD_K(1, 1, ctx->vu0_vf[0], _mm_shuffle_ps(ctx->vu0_vf[7], ctx->vu0_vf[7], _MM_SHUFFLE(1,1,1,1))); __m128i mask = _mm_set_epi32(0, -1, 0, 0); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VSUB_K(1, 1, ctx->vu0_vf[6], _mm_shuffle_ps(ctx->vu0_vf[7], ctx->vu0_vf[7], _MM_SHUFFLE(3,3,3,3))); __m128i mask = _mm_set_epi32(0, -1, 0, 0); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VSUB_K(1, 1, ctx->vu0_vf[0], _mm_shuffle_ps(ctx->vu0_vf[5], ctx->vu0_vf[5], _MM_SHUFFLE(0,0,0,0))); __m128i mask = _mm_set_epi32(0, 0, -1, 0); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VSUB_K(1, 1, ctx->vu0_vf[6], _mm_shuffle_ps(ctx->vu0_vf[5], ctx->vu0_vf[5], _MM_SHUFFLE(2,2,2,2))); __m128i mask = _mm_set_epi32(0, 0, -1, 0); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VADD_K(1, 1, ctx->vu0_vf[7], _mm_shuffle_ps(ctx->vu0_vf[7], ctx->vu0_vf[7], _MM_SHUFFLE(2,2,2,2))); __m128i mask = _mm_set_epi32(0, 0, 0, -1); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VSUB_K(1, 1, ctx->vu0_vf[0], ctx->vu0_vf[0]); __m128i mask = _mm_set_epi32(-1, 0, 0, 0); ctx->vu0_vf[6] = PS2_VBLEND(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VADD_K(1, 1, ctx->vu0_vf[0], ctx->vu0_vf[0]); __m128i mask = _mm_set_epi32(-1, 0, 0, 0); ctx->vu0_vf[5] = PS2_VBLEND(ctx->vu0_vf[5], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VMUL_K(1, 1, ctx->vu0_vf[6], _mm_shuffle_ps(ctx->vu0_vf[5], ctx->vu0_vf[5], _MM_SHUFFLE(3,3,3,3))); __m128i mask = _mm_set_epi32(0, -1, -1, -1); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VADD_K(1, 1, ctx->vu0_vf[6], _mm_shuffle_ps(ctx->vu0_vf[0], ctx->vu0_vf[0], _MM_SHUFFLE(3,3,3,3))); __m128i mask = _mm_set_epi32(0, 0, -1, 0); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                m.put128(E + 0x30u, _mm_castps_si128(ctx->vu0_vf[6]));
+                break;
+            }
+            case 5:
+            {
+                ctx->vu0_vf[4] = _mm_castsi128_ps(m.q128(E + 0x20u));
+                { __m128 res = PS2_VMUL(ctx->vu0_vf[4], ctx->vu0_vf[4]); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[5] = PS2_VBLEND(ctx->vu0_vf[5], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = _mm_shuffle_ps(ctx->vu0_vf[4], ctx->vu0_vf[4], _MM_SHUFFLE(0,3,2,1)); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VMUL(ctx->vu0_vf[6], ctx->vu0_vf[4]); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[7] = PS2_VBLEND(ctx->vu0_vf[7], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = _mm_shuffle_ps(ctx->vu0_vf[6], ctx->vu0_vf[6], _MM_SHUFFLE(0,3,2,1)); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VMUL(ctx->vu0_vf[6], ctx->vu0_vf[4]); __m128i mask = _mm_set_epi32(-1, -1, -1, -1); ctx->vu0_vf[8] = PS2_VBLEND(ctx->vu0_vf[8], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VSUB_K(1, 1, ctx->vu0_vf[7], _mm_shuffle_ps(ctx->vu0_vf[7], ctx->vu0_vf[7], _MM_SHUFFLE(2,2,2,2))); __m128i mask = _mm_set_epi32(0, 0, 0, -1); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VADD_K(1, 1, ctx->vu0_vf[0], _mm_shuffle_ps(ctx->vu0_vf[6], ctx->vu0_vf[6], _MM_SHUFFLE(0,0,0,0))); __m128i mask = _mm_set_epi32(0, 0, -1, 0); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VSUB_K(1, 1, ctx->vu0_vf[0], _mm_shuffle_ps(ctx->vu0_vf[5], ctx->vu0_vf[5], _MM_SHUFFLE(1,1,1,1))); __m128i mask = _mm_set_epi32(0, 0, 0, -1); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VSUB_K(1, 1, ctx->vu0_vf[6], _mm_shuffle_ps(ctx->vu0_vf[5], ctx->vu0_vf[5], _MM_SHUFFLE(2,2,2,2))); __m128i mask = _mm_set_epi32(0, 0, 0, -1); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VADD_K(1, 1, ctx->vu0_vf[8], _mm_shuffle_ps(ctx->vu0_vf[8], ctx->vu0_vf[8], _MM_SHUFFLE(3,3,3,3))); __m128i mask = _mm_set_epi32(0, -1, 0, 0); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VSUB(ctx->vu0_vf[6], ctx->vu0_vf[6]); __m128i mask = _mm_set_epi32(-1, 0, 0, 0); ctx->vu0_vf[6] = PS2_VBLEND(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VSUB_K(1, 1, ctx->vu0_vf[0], ctx->vu0_vf[0]); __m128i mask = _mm_set_epi32(-1, 0, 0, 0); ctx->vu0_vf[6] = PS2_VBLEND(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VADD_K(1, 1, ctx->vu0_vf[0], ctx->vu0_vf[0]); __m128i mask = _mm_set_epi32(-1, 0, 0, 0); ctx->vu0_vf[5] = PS2_VBLEND(ctx->vu0_vf[5], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VMUL_K(1, 1, ctx->vu0_vf[6], _mm_shuffle_ps(ctx->vu0_vf[5], ctx->vu0_vf[5], _MM_SHUFFLE(3,3,3,3))); __m128i mask = _mm_set_epi32(0, -1, -1, -1); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                { __m128 res = PS2_VADD_K(1, 1, ctx->vu0_vf[6], _mm_shuffle_ps(ctx->vu0_vf[0], ctx->vu0_vf[0], _MM_SHUFFLE(3,3,3,3))); __m128i mask = _mm_set_epi32(0, 0, 0, -1); ctx->vu0_vf[6] = _mm_blendv_ps(ctx->vu0_vf[6], res, _mm_castsi128_ps(mask)); }
+                m.put128(E + 0x30u, _mm_castps_si128(ctx->vu0_vf[6]));
+                break;
+            }
+            }
+        }
+
+
+        // 0113AEF8 for a node-attached emitter (+0xc4 == 1; a2 0): the
+        // frame copy, the node's position (GetGeometryPointerPosition into
+        // +0x10 from the node record at +0xd0) and orientation (kind 2:
+        // GetQuaternionByAxisDirZY on the two axes at 0x1e0fb0 / 0x1e0fc0,
+        // else GetGeometryPointerQuaternion) into +0x20 (guest calls), then the
+        // direction +0x30 by +0xc0 through the jump table at 0x1195890 (the
+        // six VU0 blocks; the last three negated). False (nothing written)
+        // when the table holds a target this code does not know.
+        inline bool keepNode(const G &g, uint32_t E, uint32_t Mr, uint32_t spCaller)
+        {
+            const Mem &m = g.m;
+            R5900Context *ctx = g.ctx;
+            static const uint32_t labels[6] = {0x0113AFC0u, 0x0113B008u, 0x0113B050u, 0x0113B0A0u, 0x0113B0E8u, 0x0113B130u};
+            const uint32_t kind = m.u32(E + 0xC0u);
+            int which = 5;
+            if (kind < 6u)
+            {
+                const uint32_t to = m.u32(0x01195890u + kind * 4u);
+                which = -1;
+                for (int i = 0; i < 6; ++i)
+                    if (labels[i] == to)
+                        which = i;
+                if (which < 0)
+                    return false;
+            }
+            const uint32_t sp = spCaller - 0x30u;
+            const uint64_t e16 = GPR_U64(ctx, 16), e17 = GPR_U64(ctx, 17), e18 = GPR_U64(ctx, 18), e19 = GPR_U64(ctx, 19), e20 = GPR_U64(ctx, 20);
+            m.put128(E + 0x40u, m.q128(E + 0x10u));
+            m.put128(E + 0x50u, m.q128(E + 0x20u));
+            m.put128(E + 0x60u, m.q128(E + 0x30u));
+            SET_GPR_U64(ctx, 16, 1u);
+            SET_GPR_U32(ctx, 17, E);
+            SET_GPR_U32(ctx, 18, E + 0xD0u);
+            SET_GPR_U32(ctx, 19, Mr);
+            SET_GPR_U64(ctx, 20, 0u);
+            g.a(4, E + 0x10u);
+            g.a(5, E + 0xD0u);
+            g.call(0x01131D80u, 0x0113AF4Cu, sp); // GetGeometryPointerPosition
+            const bool axes = m.u32(Mr + 0xC8u) == 2u; // 01141080
+            SET_GPR_U64(ctx, 2, axes ? 1u : 0u);
+            SET_GPR_U32(ctx, 16, E + 0x20u);
+            if (axes)
+            {
+                g.a(4, E + 0x20u);
+                g.a(5, sotc_decomp::relocated(g.rdram, 0x0113AF64u, 0x0113AF6Cu));
+                g.a(6, sotc_decomp::relocated(g.rdram, 0x0113AF68u, 0x0113AF70u));
+                g.callRel(0x0113AF74u, sp); // GetQuaternionByAxisDirZY
+            }
+            else
+            {
+                g.a(4, E + 0x20u);
+                g.a(5, E + 0xD0u);
+                g.call(0x01132098u, 0x0113AF8Cu, sp); // GetGeometryPointerQuaternion
+            }
+            dirBlock(m, ctx, E, which);
+            if (which >= 3)
+            {
+                // -1.0 through f0 / v1 (qmtc2 of the whole register), vmulx.xyz, back to +0x30.
+                const float neg = bits(0xBF800000u);
+                ctx->f[0] = neg;
+                SET_GPR_S32(ctx, 3, static_cast<int32_t>(0xBF800000u));
+                ctx->vu0_vf[5] = m.q(E + 0x30u);
+                ctx->vu0_vf[6] = _mm_castsi128_ps(GPR_VEC(ctx, 3));
+                {
+                    __m128 res = PS2_VMUL(ctx->vu0_vf[5], _mm_shuffle_ps(ctx->vu0_vf[6], ctx->vu0_vf[6], _MM_SHUFFLE(0, 0, 0, 0)));
+                    ctx->vu0_vf[5] = _mm_blendv_ps(ctx->vu0_vf[5], res, _mm_castsi128_ps(_mm_set_epi32(0, -1, -1, -1)));
+                }
+                m.putq(E + 0x30u, ctx->vu0_vf[5]);
+            }
+            SET_GPR_U64(ctx, 2, 1u);
+            SET_GPR_U64(ctx, 16, e16);
+            SET_GPR_U64(ctx, 17, e17);
+            SET_GPR_U64(ctx, 18, e18);
+            SET_GPR_U64(ctx, 19, e19);
+            SET_GPR_U64(ctx, 20, e20);
+            return true;
+        }
+    }
+
     // ---- 0113B928: an emitter's particles. a0 the emitter E, a1 its effect
     // record (+0x1c the particle count wanted), a2 its kind K (+0 type, +0x10
     // the generation mode), a3 the blend parameters P (0113B610's frame), t0
     // 1: new particles this frame. v0 1 when the emitter is done.
+    // Round 123's check (SOTC_PTCL123_CHECK=1): the host step against the original, per float field: the largest
+    // relative difference and the count of fields over 1e-4 relative (and 1e-5 absolute), every 600 frames.
+    inline bool check123()
+    {
+        static const bool on = [] { const char *e = ps2_diag::env("SOTC_PTCL123_CHECK"); return e && e[0] == '1'; }();
+        return on;
+    }
+    struct Check123
+    {
+        uint64_t n = 0, fields = 0, over = 0, ints = 0, frame = 0;
+        double maxRel = 0.0;
+        int worst = -1;
+    } g_c123;
+    inline void note123(const uint8_t *host, const uint8_t *orig)
+    {
+        Check123 &c = g_c123;
+        ++c.n;
+        for (int i = 0; i < 0xB0 / 4; ++i)
+        {
+            if (i == 0xA4 / 4 || i == 0xA8 / 4)
+            {
+                c.ints += std::memcmp(host + i * 4, orig + i * 4, 4) != 0;
+                continue;
+            }
+            float a, b;
+            std::memcpy(&a, host + i * 4, 4);
+            std::memcpy(&b, orig + i * 4, 4);
+            ++c.fields;
+            const double d = std::fabs((double)a - (double)b), r = d / std::max(1e-6, std::fabs((double)b));
+            if (d > 1e-5 && r > 1e-4)
+                ++c.over;
+            if (d > 1e-5 && r > c.maxRel)
+            {
+                c.maxRel = r;
+                c.worst = i * 4;
+            }
+        }
+        if (sotc_decomp::g_gameFrame >= c.frame + 600u)
+        {
+            c.frame = sotc_decomp::g_gameFrame;
+            std::fprintf(stderr, "[ptcl123c] frame %llu: particles %llu fields %llu over 1e-4 rel %llu (max rel %.3g at +0x%x) links differ %llu\n",
+                         (unsigned long long)c.frame, (unsigned long long)c.n, (unsigned long long)c.fields, (unsigned long long)c.over, c.maxRel, c.worst,
+                         (unsigned long long)c.ints);
+        }
+    }
+
     void step(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         G g(rdram, ctx, runtime);
@@ -691,13 +1216,21 @@ namespace decomp_ptclupdate
             wind = GPR_U32(ctx, 2);
         }
         m.put128(E, m.q128(wind));
-        g.a(4, E);
-        g.a(5, K);
-        regs();
-        ctx->f[0] = f0;
-        ctx->f[1] = f1;
-        g.call(0x01141400u, 0x0113BD5Cu, sp);
-        f0 = ctx->f[0];
+        if (!(sotc_decomp::leaf117On() && leaf117::kindIdle(m, K)))
+        {
+            g.a(4, E);
+            g.a(5, K);
+            regs();
+            ctx->f[0] = f0;
+            ctx->f[1] = f1;
+            g.call(0x01141400u, 0x0113BD5Cu, sp);
+            f0 = ctx->f[0];
+        }
+        else
+        {
+            ctx->f[0] = f0;
+            ctx->f[1] = f1;
+        }
 
         // Each live particle's step (+0x40 not 0; next at +0xa8).
         // count: loop 1, s3 counts the particles whose step returned 0.
@@ -709,6 +1242,22 @@ namespace decomp_ptclupdate
                 return;
             const float zero = 0.0f;
             (count ? f20 : f21) = zero;
+            const bool p123 = sotc_decomp::switchOn(sotc_decomp::kPtcl123);
+            const uint64_t t123 = st.on ? coll115t::nowUs() : 0u;
+            struct Done
+            {
+                Stats &st;
+                uint64_t t0;
+                int state, n;
+                ~Done()
+                {
+                    if (st.on)
+                    {
+                        st.us123[state] += coll115t::nowUs() - t0;
+                        st.n123[state] += static_cast<uint64_t>(n);
+                    }
+                }
+            } done{st, t123, p123 ? 1 : 0, n};
             s0 = static_cast<uint64_t>(static_cast<int64_t>(n));
             for (int32_t left = n; left != 0; --left)
             {
@@ -716,6 +1265,56 @@ namespace decomp_ptclupdate
                 s2 = static_cast<uint64_t>(static_cast<int64_t>(m.s32(a0 + 0xA8u)));
                 if (!FPU_C_EQ_S(f0, zero))
                 {
+                    // Round 123 (SOTC_PTCL123): the step in plain host floats, no call frame (v0 0 as the original's).
+                    if (p123 && __builtin_expect(check123(), 0) && !decomp_particles::damageWanted(rdram, Mr) && inRam(a0, 0xB0u))
+                    {
+                        // SOTC_PTCL123_CHECK=1: the host step on the record, kept aside; the original from the same
+                        // record is the answer used; the two compared field by field ([ptcl123c]).
+                        uint8_t before[0xB0], host[0xB0];
+                        std::memcpy(before, m.p(a0), 0xB0u);
+                        regs();
+                        float r0 = f0;
+                        // (VU0's R kept: the host step draws the jitter from the guest generator here, and the
+                        // original then draws the same numbers)
+                        const __m128 r = ctx->vu0_r;
+                        const bool did = decomp_particles::update123(rdram, ctx, runtime, a0, E, Mr, K, P, sp + 0x10u, sp, r0, true);
+                        ctx->vu0_r = r;
+                        std::memcpy(host, m.p(a0), 0xB0u);
+                        std::memcpy(m.p(a0), before, 0xB0u);
+                        g.a(4, a0);
+                        g.a(5, E);
+                        g.a(6, Mr);
+                        g.a(7, K);
+                        g.a(8, P);
+                        g.a(9, sp + 0x10u);
+                        regs();
+                        ctx->f[0] = f0;
+                        g.callNative(&decomp_particles::particleUpdate, kUpdate, site, sp);
+                        f0 = ctx->f[0];
+                        if (count && g.v0() == 0u)
+                            ++s3;
+                        if (did)
+                            note123(host, m.p(a0));
+                        s0 = static_cast<uint64_t>(static_cast<int64_t>(left - 1));
+                        a0 = static_cast<uint32_t>(s2);
+                        continue;
+                    }
+                    if (p123)
+                    {
+                        regs();
+                        float r0 = f0;
+                        if (decomp_particles::update123(rdram, ctx, runtime, a0, E, Mr, K, P, sp + 0x10u, sp, r0))
+                        {
+                            st.h123 += st.on;
+                            f0 = r0;
+                            if (count)
+                                ++s3;
+                            s0 = static_cast<uint64_t>(static_cast<int64_t>(left - 1));
+                            a0 = static_cast<uint32_t>(s2);
+                            continue;
+                        }
+                    }
+                    st.o123 += st.on;
                     g.a(4, a0);
                     g.a(5, E);
                     g.a(6, Mr);
@@ -1006,10 +1605,20 @@ namespace decomp_ptclupdate
         }
         m.put32(0x0118CFE8u, stepPtr);
         m.put32(E + 0x198u, 0u);
-        g.a(4, E);
-        g.a(5, Mr);
-        g.a(6, 0u);
-        g.call(0x0113AEF8u, 0x0113B6C0u, sp);
+        const bool l117 = sotc_decomp::leaf117On();
+        const bool chk117 = l117 && leaf117::due();
+        auto keepGuest = [&]
+        {
+            g.a(4, E);
+            g.a(5, Mr);
+            g.a(6, 0u);
+            g.call(0x0113AEF8u, 0x0113B6C0u, sp);
+        };
+        auto keepNative = [&]() -> bool { return leaf117::keepFrame(m, ctx, E) || leaf117::keepNode(g, E, Mr, sp); };
+        if (chk117)
+            leaf117::compare(0, m, ctx, E, 0x200u, true, keepNative, keepGuest);
+        else if (!(l117 && keepNative()))
+            keepGuest();
         s0 = E + 0x10u;
         regs();
         // The camera context's position (+0x140) and axis (+0x150): the
@@ -1169,12 +1778,32 @@ namespace decomp_ptclupdate
         std::memcpy(ctx->vu0_vf, vf, sizeof(vf));
         ctx->vu0_acc = acc;
         ctx->f[0] = f0;
-        g.a(4, E);
-        g.a(5, Mr);
-        g.call(0x011410D0u, 0x0113B7D0u, sp);
-        g.a(4, E);
-        g.a(5, Mr);
-        g.call(0x01141150u, 0x0113B7DCu, sp);
+        auto fadeGuest = [&]
+        {
+            g.a(4, E);
+            g.a(5, Mr);
+            g.call(0x011410D0u, 0x0113B7D0u, sp);
+        };
+        auto lodGuest = [&]
+        {
+            g.a(4, E);
+            g.a(5, Mr);
+            g.call(0x01141150u, 0x0113B7DCu, sp);
+        };
+        if (chk117)
+        {
+            leaf117::compare(1, m, ctx, E, 0x200u, false, [&] { leaf117::distanceFade(m, ctx, E, Mr); return true; }, fadeGuest);
+            leaf117::compare(2, m, ctx, E, 0x200u, true, [&] { return leaf117::lodIndex(m, ctx, E, Mr); }, lodGuest);
+        }
+        else
+        {
+            if (l117)
+                leaf117::distanceFade(m, ctx, E, Mr);
+            else
+                fadeGuest();
+            if (!(l117 && leaf117::lodIndex(m, ctx, E, Mr)))
+                lodGuest();
+        }
         // The effect's LOD record (+0xd4 + 0x1bc x E+0x118): the near / far planes.
         s0 = m.u32(Mr + 0xD4u) + m.u32(E + 0x118u) * 0x1BCu;
         const uint32_t R = static_cast<uint32_t>(s0);
@@ -1204,16 +1833,42 @@ namespace decomp_ptclupdate
         ctx->f[1] = fl1;
         s1 = m.u32(E + 0x168u) != 0u ? 1u : 0u;
         regs();
-        g.a(4, E);
-        g.a(5, Mr);
-        g.a(6, R);
-        g.call(0x01141230u, 0x0113B8BCu, sp);
+        if (!(l117 && leaf117::aimIdle(m, R)))
+        {
+            g.a(4, E);
+            g.a(5, Mr);
+            g.a(6, R);
+            g.call(0x01141230u, 0x0113B8BCu, sp);
+        }
         g.a(7, m.u32(E + 0x118u));
         g.a(4, sp);
         ctx->f[12] = m.f32(E + 0x16Cu);
         g.a(5, Mr);
         g.a(6, A2);
-        g.call(0x01144F68u, 0x0113B8D4u, sp);
+        if (chk117)
+        {
+            // The blend with its leaves inline, then with the guest leaves (the switch off for that call).
+            const uint64_t a4 = GPR_U64(ctx, 4), a5 = GPR_U64(ctx, 5), a6 = GPR_U64(ctx, 6), a7 = GPR_U64(ctx, 7);
+            const float f12 = ctx->f[12];
+            leaf117::compare(3, m, ctx, sp, 0x160u, false,
+                             [&]
+                             {
+                                 g.callNative(&decomp_hot47e::blend, 0x01144F68u, 0x0113B8D4u, sp);
+                                 return true;
+                             },
+                             [&]
+                             {
+                                 g.a64(4, a4), g.a64(5, a5), g.a64(6, a6), g.a64(7, a7);
+                                 ctx->f[12] = f12;
+                                 sotc_decomp::setSwitch(sotc_decomp::kLeaf117, false);
+                                 g.callNative(&decomp_hot47e::blend, 0x01144F68u, 0x0113B8D4u, sp);
+                                 sotc_decomp::setSwitch(sotc_decomp::kLeaf117, true);
+                             });
+        }
+        else if (l117)
+            g.callNative(&decomp_hot47e::blend, 0x01144F68u, 0x0113B8D4u, sp);
+        else
+            g.call(0x01144F68u, 0x0113B8D4u, sp);
         g.a(4, E);
         g.a(5, Mr);
         g.a(6, R);
@@ -1256,9 +1911,10 @@ namespace decomp_ptclupdate
         uint32_t node = m.u32(head);
         m.put32(sp, node);
         if (Stats &st = stats(); st.on && ++st.lists % 600u == 0u)
-            std::fprintf(stderr, "[ptcl] lists %llu: steps %llu (matrix %llu, unit %llu), done %llu, spawned %llu, dead emitters %llu, fallbacks %llu\n",
+            std::fprintf(stderr, "[ptcl] lists %llu: steps %llu (matrix %llu, unit %llu), done %llu, spawned %llu, dead emitters %llu, fallbacks %llu, ptcl123 %llu / original %llu (damage tests %llu, skipped %llu) | loops: ptcl123 on %.2f us a particle (%llu), off %.2f (%llu)\n",
                          (unsigned long long)st.lists, (unsigned long long)st.steps, (unsigned long long)st.matrix, (unsigned long long)st.unit,
-                         (unsigned long long)st.done, (unsigned long long)st.spawned, (unsigned long long)st.dead, (unsigned long long)st.fallbacks);
+                         (unsigned long long)st.done, (unsigned long long)st.spawned, (unsigned long long)st.dead, (unsigned long long)st.fallbacks, (unsigned long long)st.h123, (unsigned long long)st.o123, (unsigned long long)decomp_particles::g_damageCalls, (unsigned long long)decomp_particles::g_damageSkipped,
+                         st.n123[1] ? (double)st.us123[1] / st.n123[1] : 0.0, (unsigned long long)st.n123[1], st.n123[0] ? (double)st.us123[0] / st.n123[0] : 0.0, (unsigned long long)st.n123[0]);
         if (node != 0u)
         {
             s4 = 1u;
@@ -1358,16 +2014,21 @@ namespace decomp_ptclupdate
                         }
                         g.a(4, static_cast<uint32_t>(s0));
                         regs();
-                        g.call(0x0112A450u, 0x0113AC40u, sp); // CheckCollisionFinderAlive
-                        if (g.v0() != 0u)
+                        // Round 91: on the guest worker, kept for the job's end (sotc_worker::deferCall).
+                        if (!sotc_worker::deferCall(0x0112A450u, 0x0112A380u, static_cast<uint32_t>(s0), 0u, 0u, 0u, 0x0113AC48u))
                         {
-                            g.a(4, static_cast<uint32_t>(s0));
-                            g.call(0x0112A380u, 0x0113AC50u, sp); // ReleaseCollisionFinder
+                            g.call(0x0112A450u, 0x0113AC40u, sp); // CheckCollisionFinderAlive
+                            if (g.v0() != 0u)
+                            {
+                                g.a(4, static_cast<uint32_t>(s0));
+                                g.call(0x0112A380u, 0x0113AC50u, sp); // ReleaseCollisionFinder
+                            }
                         }
                     }
                     g.a(4, m.u32(static_cast<uint32_t>(s1)));
                     regs();
-                    g.callRel(0x0113AC5Cu, sp); // iosFree
+                    if (!sotc_worker::deferCall(sotc_decomp::jalTarget(rdram, 0x0113AC5Cu), 0u, m.u32(static_cast<uint32_t>(s1)), 0u, 0u, 0u, 0x0113AC64u))
+                        g.callRel(0x0113AC5Cu, sp); // iosFree
                     m.put32(static_cast<uint32_t>(s1), static_cast<uint32_t>(s3));
                     v0 = m.u32(sp);
                 }

@@ -36,7 +36,7 @@ function(EnableFastReleaseMode TargetName)
 
     # Vita: LTO over the whole recompiled game is too slow and memory hungry.
     if(IPO_SUPPORTED AND NOT PS2X_IS_VITA)
-        set_property(TARGET ${TargetName} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE)
+        set_property(TARGET ${TargetName} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
     else()
         message(WARNING "Interprocedural optimization not supported: ${ipo_error}")
     endif()

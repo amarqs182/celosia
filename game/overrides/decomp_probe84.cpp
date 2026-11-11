@@ -23,6 +23,7 @@
 // height); the game's own answer is the one used then. SOTC_PROBE84_LOG=1:
 // a [probe84] line every 600 frames.
 #include "sotc_decomp.h"
+#include "runtime/ps2_diag.h"
 
 #include "ps2_runtime_macros.h"
 #include "runtime/ps2_memory.h"
@@ -49,9 +50,9 @@ namespace probe84
                 eps = static_cast<float>(std::atof(e));
             if (const char *e = std::getenv("SOTC_PROBE84_WATER_AGE"))
                 age = static_cast<uint32_t>(std::atoi(e));
-            if (const char *e = std::getenv("SOTC_PROBE84_CHECK"))
+            if (const char *e = ps2_diag::env("SOTC_PROBE84_CHECK"))
                 check = std::atoi(e);
-            log = std::getenv("SOTC_PROBE84_LOG") && std::atoi(std::getenv("SOTC_PROBE84_LOG")) != 0;
+            log = ps2_diag::env("SOTC_PROBE84_LOG") && std::atoi(ps2_diag::env("SOTC_PROBE84_LOG")) != 0;
         }
     };
     const Params &params()
@@ -109,7 +110,7 @@ namespace probe84
     void waterAround(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const uint32_t ra = GPR_U32(ctx, 31);
-        if (!sotc_decomp::probe84On() || ra != kCameraCaller)
+        if (!sotc_decomp::probe84On() || ra != kCameraCaller || sotc_decomp::onWorkerLane(runtime)) // (round 108: the memo is lane 0's)
             return runGame(rdram, ctx, runtime);
         const uint32_t out = GPR_U32(ctx, 4), point = GPR_U32(ctx, 5), group = GPR_U32(ctx, 6);
         if (!plain(out, 4u) || !plain(point, 16u))

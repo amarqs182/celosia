@@ -19,7 +19,10 @@ namespace native_renderer
         // Quality (the menus' Quality group). The graphics preset sets these
         // and the render scale together; `preset` is the one they match
         // (kPresetCustom: none), kept up to date by the menus.
-        float preset = 2.0f;        // SOTC_PRESET (0 Low .. 3 Ultra); High on the Mac, Medium on the Vita
+        // Round 124: the Graphics page's preset (kPresetOff .. kPresetMax,
+        // kPresetCustom: none matches) sets every item of presetFields() at
+        // once: resolution, filtering, detail and each optional effect.
+        float preset = 3.0f;        // SOTC_PRESET (0 Off, 1 Low, 2 Medium, 3 High, 4 Max); High is each platform's default look
         float msaa = 0.0f;          // Metal: 0 off, 1 2x, 2 4x, 3 8x samples a pixel, as far as the GPU has them (SOTC_MSAA=0/2/4/8)
         float textureFilter = 2.0f; // 0 nearest, 1 bilinear, 2 trilinear at the game's mip level, 3-6 anisotropic 2x-16x (Metal) (SOTC_TEXTURE_FILTER)
         float modelDetail = 0.0f;   // 0 the game's level of detail, 1 one level finer, 2 always the finest (SOTC_MODEL_DETAIL)
@@ -58,6 +61,10 @@ namespace native_renderer
         bool feedback = true;       // feedbackBlur: the last frame laid over the new one (SOTC_NATIVE_NOFEEDBACK)
         bool reflections = true;    // SOTC_NATIVE_NOREFLECT
         bool refraction = true;     // SOTC_NATIVE_NOREFRACT
+        // Round 124: the heat haze (the screen-copy strips behind the bird,
+        // the fights' shimmer); off: those draws left out (the underwater
+        // view's ripple at layer 19 stays). SOTC_NATIVE_NOHAZE=1.
+        bool heatHaze = true;
 
         // Debugging (the menus' Debug group): what to draw at all.
         uint32_t hiddenLayers = 0;  // bit n: the display list's layer n is not drawn
@@ -87,6 +94,14 @@ namespace native_renderer
         // With the render thread the swap is that thread's, but the game
         // still waits for it when a whole frame ahead.
         bool frameCap30 = false;
+        // Round 107, the player menu's "Frame rate" (frame_rate, SOTC_CAP20
+        // over it): 0 Auto (as before: each frame shown as soon as it is
+        // ready), 1 Steady 20: in frames with a scene the game starts a frame
+        // only every third VBlank (its own clock, so its time step is 50 ms)
+        // and the display holds each picture three refreshes (a frame that
+        // runs over shows at the next refresh, the cadence goes on from
+        // there). Over the 30 fps cap when both are on.
+        float frameRate = 0.0f;
         // OpenGL / Vita: drawing and showing a frame on a thread of its own
         // while the game makes the next (at most one frame ahead); off: the
         // game waits for each frame to be drawn (SOTC_RENDER_THREAD=0/1; on
@@ -270,7 +285,14 @@ namespace native_renderer
         // draws up to 1 level apart on ~0.6% of the altar's pixels (its
         // texture coordinates for such reads), so off by default.
         // SOTC_GL_PLAIN_READS=0/1; A/B name `plainread73` (with it on).
-#if defined(__linux__)
+        // Round 98: on by default on the Vita. Round 92's diagnostics put the
+        // console's GPU time in the pixels, and round 98's pixel estimate put
+        // every textured world pixel through the LOD programs (a texel read
+        // that waits for the program's arithmetic); the 1 level on ~0.6% of
+        // the pixels is Vita3K's texture coordinates for such reads (a
+        // one-level texture read at LOD 0 or at the interpolated UV is the
+        // same texel and filter on the GPU). Its window and r98all turn it off.
+#if defined(__vita__) || defined(__linux__)
         bool glPlainReads = true;
 #else
         bool glPlainReads = false;
@@ -374,8 +396,9 @@ namespace native_renderer
         // GPU's hidden surface removal can take it (a blended draw's pixels
         // are all shaded and read the tile, the scene's overdraw in full).
         // Not where the picture's alpha must be kept (the Vita bloom's mask).
-        // SOTC_GL_OPAQUE88=0/1 (default 0); A/B name `opaque88` (its windows flip it).
-#if defined(__linux__)
+        // SOTC_GL_OPAQUE88=0/1 (default 1 on the Vita since round 93, 0
+        // elsewhere); A/B name `opaque88` (its windows flip it).
+#if defined(__vita__) || defined(__linux__)
         bool glOpaque88 = true;
 #else
         bool glOpaque88 = false;
@@ -385,12 +408,257 @@ namespace native_renderer
         // 256 x 256 target, the PS2's own size (and the Mac's), instead of
         // 512 x 448: ~3.5x fewer pixels; the water reads it by its screen
         // position, rippled, as before.
-        // SOTC_GL_MIRROR88=0/1 (default 0); A/B name `mirror88` (its windows flip it).
-#if defined(__linux__)
+        // SOTC_GL_MIRROR88=0/1 (default 1 on the Vita since round 93, 0
+        // elsewhere); A/B name `mirror88` (its windows flip it).
+#if defined(__vita__) || defined(__linux__)
         bool glMirror88 = true;
 #else
         bool glMirror88 = false;
 #endif
+        // Round 92 (GPU diagnostics for the console's A/B, default 0, the
+        // picture WRONG while on; each A/B window turns its switch on):
+        // diag92px: every target's viewport an eighth of its width and height
+        // (the same draws, vertices, scenes and tile stores; ~1/64 of the
+        // pixels shaded, textured and blended): what the pixels cost.
+        // diag92tex: every game texture read as one grey texel (the same
+        // programs and pixels, no texture memory traffic). diag92half: each
+        // world / character / shadow draw sends the first half of its
+        // triangles (the same draws and state changes, half the vertices).
+        // SOTC_GL_DIAG92_PX / SOTC_GL_DIAG92_TEX / SOTC_GL_DIAG92_HALF=0/1.
+        bool glDiag92Px = false;
+        bool glDiag92Tex = false;
+        bool glDiag92Half = false;
+        // Round 92 (the Vita's GPU): the plain world draws without BG and
+        // without the cut-out (their fragment program reads no screen
+        // position) through a vertex program that does not write the screen
+        // position varying (TEXCOORD2): three varyings a vertex instead of
+        // four in GXM's parameter buffer (every vertex is stored there and
+        // read back for each tile it touches). The same positions, the same
+        // fragment arithmetic. SOTC_GL_NOSCREEN92=0/1 (default 1 on the
+        // Vita); A/B name `noscreen92` (its window turns it off; r92all too).
+#if defined(__vita__) || defined(__linux__)
+        bool glNoScreen92 = true;
+#else
+        bool glNoScreen92 = false;
+#endif
+        // Round 93 (the Vita's GPU). Exact ones (default 1 on the Vita; A/B
+        // windows turn them off, `r93all` all together):
+        // mirror93: the mirror (the scene drawn again mirrored) only in frames
+        // where some draw reads it (the water's reflection draws); before, it
+        // was drawn whenever the game sent mirrored draws, water in view or
+        // not. SOTC_GL_MIRROR93=0/1; A/B `mirror93`.
+        // atop93: a Normal-blend draw whose every drawn pixel has alpha 1
+        // (the GS alpha test's first pass at AREF >= 0x80: only pixels at
+        // AREF or over are drawn and the alpha is clamped to 1; or a draw
+        // with a discard whose least alpha is 1) is drawn with blending off,
+        // as opaque88 does for the draws without discard: Cs x 1 + Cd x 0.
+        // Not the SOFT programs (they rely on blending), not while the
+        // picture's alpha is kept. SOTC_GL_ATOP93=0/1; A/B `atop93`.
+        // post93: the GS bloom composite's (mode 18) texture position from
+        // the vertex program (it is the screen position plus a constant) and
+        // its colour premultiplied on the CPU: one texture read and one
+        // multiply a pixel over the whole picture instead of ~14 operations
+        // and a dependent read. SOTC_GL_POST93=0/1; A/B `post93`.
+#if defined(__vita__) || defined(__linux__)
+        bool glMirror93 = true;
+        bool glAtOpaque93 = true;
+        bool glPost93 = true;
+#else
+        bool glMirror93 = false;
+        bool glAtOpaque93 = false;
+        bool glPost93 = false;
+#endif
+        // Round 93 candidates, NOT the same picture (default 0; their A/B
+        // windows turn them on):
+        // blur93: the GS bloom chain's 12-tap blur (mode 16, 64 x 64 and
+        // 128 x 128, ~270 instructions a pixel) as one weighted sum of the 13
+        // texels (the weights of the 12 chained lerps, computed on the CPU),
+        // the GS's 8-bit truncation after each tap replaced by its mean loss
+        // taken off the sum (the blur feeds the next frame's temporal step:
+        // without that the glow settled at about twice its strength), the
+        // taps past the edge read at the edge; the composite reads the
+        // 128 x 128 blur itself (no stretched 256 x 256 copy). Within a few
+        // levels of the chain. SOTC_GL_BLUR93=0/1; A/B `blur93`.
+        // glow93: the glow layer's 64 x 64 blur (bossDeathEffect: rounds + 1
+        // shifted half-texel copies there and back, 8 scenes at the altar's
+        // 3 rounds) as two passes of the same binomial kernel (across, then
+        // down; the taps' weights of the repeated 2 x 2 box): without the
+        // 8-bit rounding between the copies and with one edge clamp instead
+        // of eight. SOTC_GL_GLOW93=0/1; A/B `glow93`.
+        // blur93: console A/B 2026-11-06 busy -7.6 ms, frame -2.9 ms, the
+        // sky glow judged the same on the console: default on on the Vita.
+#if defined(__vita__) || defined(__linux__)
+        bool glBlur93 = true;
+#else
+        bool glBlur93 = false;
+#endif
+        bool glGlow93 = false;
+        // Round 94 (the Vita's GPU: fewer scenes). Each render-target bind is
+        // a GXM scene with a fixed cost (the firmware kick, the tiles set up,
+        // colour / depth loaded and stored): 35 a frame at the altar before.
+        // bgcopy94 (exact): the 256 x 256 background (bgsmall87) read where it
+        // was drawn, not copied into backgroundSmall first (a copy at the same
+        // size, texel for texel). SOTC_GL_BGCOPY94=0/1; A/B `bgcopy94`.
+        // glow94: the glow layer's chain (512 x 448 -> 256 -> 128 -> 64, the
+        // 64 x 64 blur, -> 128 -> 256: 7 scenes with glow93, 13 without) as
+        // three: the 4 x 4 box of the 256 x 256 reduction straight to 64 x 64
+        // (16 bilinear reads), glow93's binomial blur across, then down into
+        // the 128 x 128 target (its bilinear read is the 64 -> 128 copy), the
+        // composite reading that (one 2x stretch fewer). SOTC_GL_GLOW94=0/1;
+        // A/B `glow94`.
+        // fx94: the soft shadows' mask (4 x 4 reduction + the across blur in
+        // one pass from the picture's alpha, then the down blur), the glow's
+        // reduction / across blur (with glow94) and the water's copy (down to
+        // 128 x 128 in one pass) drawn as regions of two shared targets
+        // (one scene each instead of one a step); where the water's copy
+        // follows the shadows with nothing drawn between (the altar), the
+        // darkening and the glow composite go to the copy and to the start
+        // of the picture's next scene (shmask87's order): one 512 x 448
+        // scene fewer. SOTC_GL_FX94=0/1; A/B `fx94`.
+        // bloom94: the GS bloom chain's two blurs (64 x 64, the next frame's
+        // history, and 128 x 128) drawn as regions of one target, one scene
+        // instead of two; with blur93 and post93 the composite reads the
+        // 128 x 128 blur there (no stretched copy). The same programs and
+        // stored values: exact. (A fused mask + reductions + temporal pass
+        // was tried: the GS temporal step's truncation makes the glow
+        // multi-stable (a history up to ~50 levels under the frame's value
+        // never rises), so its rounding differences settled the glow into a
+        // much brighter state in Vita3K.) SOTC_GL_BLOOM94=0/1; A/B `bloom94`.
+        // `r94all`: all four off together; `r94on`: all four on together.
+        // All four ship OFF (console candidates; their A/B windows turn them
+        // on, `r94on` all four together). Vita3K: with the bloom off, the
+        // frozen altar is identical with bgcopy94, within 1 level with fx94
+        // (~1.7k of 2.1M capture pixels), glow94 up to ~22 levels where the
+        // glow meets the screen's edge (glow93's kernel); bloom94 runs the
+        // same programs on the same stored values. But with the bloom on, the
+        // altar's sky glow settled in a different state (bright, vs r93's
+        // dim) in every window with any of them on, the bloom mask itself
+        // identical: the GS chain's temporal step is multi-stable and which
+        // state it reaches could not be pinned down in Vita3K.
+        // Console A/B 2026-11-06 (r94on: [gpu86] busy -9.9 ms, 3D frame
+        // -5.4 ms; the altar's sky glow did not flicker): default on on the
+        // Vita, their windows now turn them off.
+#if defined(__vita__) || defined(__linux__)
+        bool glBgCopy94 = true;
+        bool glGlow94 = true;
+        bool glFx94 = true;
+        bool glBloom94 = true;
+#else
+        bool glBgCopy94 = false;
+        bool glGlow94 = false;
+        bool glFx94 = false;
+        bool glBloom94 = false;
+#endif
+        // Round 98 (a GPU diagnostic for the console's A/B, default 0, the
+        // picture WRONG while on; its A/B window turns it on): the main
+        // picture's draws of ONE class left out, the class moving on at each
+        // window (SOTC_GL_DIAG98_CLASSES, default 1,2,3,4,5,6; "[diag98]"
+        // lines name each window's class): 1 the alpha test's second passes,
+        // 2 the blended draws of layers 9 and up (water, effects, particles),
+        // 3 the draws through a discard (CUT programs), 4 the fogged draws
+        // (the BG programs), 5 the characters (skinned), 6 the blended world
+        // draws of layers 2-8. A window's busy drop is the class's GPU cost.
+        // SOTC_GL_DIAG98=0/1; A/B `diag98`.
+        bool glDiag98 = false;
+        // Round 98 (the Vita's GPU): the GS alpha test's second pass (the
+        // pixels under AREF, no depth write) drawn with a strict depth test
+        // (LESS): the pixels its first pass drew wrote that very depth, so
+        // the GPU drops them before their fragment program runs (with
+        // LEQUAL every pixel of the draw was shaded a second time, those
+        // at AREF or over only to be cut). Differs only where an earlier
+        // surface lies at exactly the same depth as the draw's own cut
+        // pixels. SOTC_GL_AT98=0/1; A/B `at98` (r98all too).
+#if defined(__vita__) || defined(__linux__)
+        bool glAt98 = true;
+#else
+        bool glAt98 = false;
+#endif
+        // Round 98 (the Vita's GPU): untextured world draws (the full-screen
+        // tints and veils of layers 20 / 27, untextured scenery) drew through
+        // the LOD programs, which make the texel's LOD and read (a dependent
+        // read) before dropping it for the untextured values; now through
+        // programs with those values alone (the same arithmetic after them).
+        // SOTC_GL_UNTEX98=0/1; A/B `untex98` (r98all too).
+#if defined(__vita__) || defined(__linux__)
+        bool glUntex98 = true;
+#else
+        bool glUntex98 = false;
+#endif
+        // Round 98 (the Vita's GPU): the glow layer's two composites over the
+        // whole picture (the sharp layer, then the blurred one, each Over)
+        // as one premultiplied pass reading both: one full-screen blended
+        // pass fewer (the first one's 8-bit store between them left out:
+        // within a level). SOTC_GL_GLOW98=0/1; A/B `glow98` (r98all too).
+#if defined(__vita__) || defined(__linux__)
+        bool glGlow98 = true;
+#else
+        bool glGlow98 = false;
+#endif
+        // Round 98 (the Vita's GPU), the world programs' pixels:
+        // nofog98: a fogged draw (zFog's layers before the fog's own, or a
+        // fogged model) whose mesh lies wholly nearer than the fog's start
+        // (its bounds' greatest clip w) is fogged by 0 at every pixel: drawn
+        // through the program without the background read (and so without
+        // the screen varying, and with the cut-out without discard where it
+        // may). At the altar ~1.6 M of the BG programs' ~1.7 M pixels a frame.
+        // SOTC_GL_NOFOG98=0/1; A/B `nofog98`.
+        // lod0_98: a mipped texture drawn with maxLod <= 0 (the GS's TEX1 at
+        // level 0: the LOD program's lod is 0) is read by the plain program
+        // (a texel read the GPU makes before the program runs, no LOD) with
+        // the texture's sampling held to level 0 (a non-mipmap min filter:
+        // vitaGL's mip count one) while such draws read it. At the altar
+        // ~2.1 M of the LOD programs' ~3.1 M pixels a frame.
+        // SOTC_GL_LOD0_98=0/1; A/B `lod0_98`.
+        // psoft98: the plain (one-level read) draws get round 75's cut-out
+        // without discard too (only the LOD programs had it).
+        // SOTC_GL_PSOFT98=0/1; A/B `psoft98`. (All in r98all.)
+#if defined(__vita__) || defined(__linux__)
+        bool glNoFog98 = true;
+        bool glLod0_98 = true;
+        bool glPlainSoft98 = true;
+#else
+        bool glNoFog98 = false;
+        bool glLod0_98 = false;
+        bool glPlainSoft98 = false;
+#endif
+        // Round 100 (stutter), each in `r100all` too:
+        // glInflight100: at most two frames on the GPU. The render thread
+        // begins a frame's scenes once the GPU has finished the frame before
+        // the last one presented (round 87's inflight87 waited for the last
+        // one: the GPU idle between frames, +3.7 ms). The console's GPU ran
+        // ~3 frames behind ([gpu86] backlog 75-90 scenes at Avion; round 99):
+        // a third frame queued only adds latency and keeps GXM's parameter
+        // buffer and vitaGL's pools (uniforms, the circular vertex pool) full.
+        // Same commands, same picture. SOTC_GL_INFLIGHT100=0/1; A/B `inflight100`.
+        // cdAhead100: the disc's reads into EE memory read ahead as the sound
+        // streams' are (round 12): after two reads in a row on one file the
+        // next 256 KB are read by a thread of their own (64 KB pieces, each
+        // usable once in), and a request it covers is copied from memory. The console's frame logs: the game thread idle ('sched
+        // blocked', every guest thread waiting) 6-15 ms in the frames with
+        // disc reads, the reads 3-5 ms per 32 KB. The same bytes, sooner.
+        // SOTC_CD_AHEAD100=0/1; A/B `cdahead100`.
+        // prio100: the disc reader threads (`loader`: the request worker and
+        // the read-ahead) at priority 145, above the hook worker (150) and
+        // the 191 of the render, lane, build and log threads they share cores
+        // 1-2 with: they mostly wait on the card, and the game thread waits
+        // on them. SOTC_PRIO100=0/1; A/B `prio100`.
+#if defined(__vita__) || defined(__linux__)
+        bool glInflight100 = false; // console 2026-11-07: off was 1.0 ms faster (mean), p90 -1.4
+        bool prio100 = true;
+#else
+        bool glInflight100 = false;
+        bool prio100 = false;
+#endif
+        bool cdAhead100 = true;
+        // Round 116 (the render thread's CPU, the same GL calls in the same
+        // order): a drawMulti's record (one state, one matrix, several meshes)
+        // kept whole on the render thread instead of copied into one ~330-byte
+        // draw per mesh; the frame's draws are its members (record, mesh), the
+        // plan looks the texture up once a record and takes a record's later
+        // members as merging with the one before them (the same state and
+        // matrix bit for bit) without comparing them again. SOTC_GL_FAT116=0/1;
+        // A/B name `fat116`.
+        bool glFat116 = true;
         // Round 74 (the console, an experiment): the render thread above the
         // hook worker in priority (149; 191 before) while a frame is drawn:
         // the console's render thread is ~13 ms a frame longer in the wall
@@ -461,7 +729,14 @@ namespace native_renderer
         uint32_t Tuning::*mask = nullptr; // or one bit of a mask: on = the bit clear
         int bit = 0;
         bool debug = false;             // listed in the Debug group
-        bool quality = false;           // listed in the Quality group
+        bool quality = false;           // listed in the Graphics page (round 124; was the Quality group)
+        // Round 124: the Graphics page's group (0 none; 1 the preset, 2
+        // resolution & filtering, 3 lighting & post, 4 shadows, 5 fog,
+        // 6 effects & particles, 7 distance & detail, 8 performance cuts that
+        // no preset touches); inPreset: the presets set it.
+        uint8_t group = 0;
+        bool inPreset = false;
+        bool restart = false;           // takes effect only after a restart (none of the Graphics items so far)
         uint8_t backends = 3;           // bit 0: Metal, bit 1: OpenGL (the Vita) - where it changes anything
         // An action instead of a value (the Debug group's "Mark"): run on
         // Cross / left / right, never saved; its value text from `actionText`.
@@ -480,6 +755,15 @@ namespace native_renderer
     // host loop turns the Vita's 30 fps cap on only in frames with a scene:
     // not on loading screens, logos and black frames).
     inline std::atomic<uint32_t> g_frameDraws{0}, g_lastFrameDraws{0};
+    // Round 107: Steady 20 in effect now (Tuning::frameRate and a scene on
+    // screen), set by the game's frame release (sotc_overrides.cpp cap20),
+    // read by the host loop, which sets the display's interval from it.
+    inline std::atomic<bool> g_cap20Active{false};
+    // Round 110 (SOTC_PACE110): the game's frame releases counted (sotc_overrides.cpp
+    // cap20, every release); the native renderer's hand-over tags each picture with the
+    // count of the release its frame started at, carried through the render thread to the
+    // present (the Vita's display queue shows it on the refresh its game time asks for).
+    inline std::atomic<uint32_t> g_paceSeq{0};
 
     struct PerfStats
     {
@@ -517,23 +801,43 @@ namespace native_renderer
     // its memory; the presets, settings.cfg and SOTC_RENDER_SCALE are
     // clamped to it). The Mac: up to 4x.
     constexpr float kMinRenderScale = 0.5f;
-#if defined(__vita__)
+#if defined(__vita__) || defined(__linux__)
     constexpr float kMaxRenderScale = 2.0f;
 #else
     constexpr float kMaxRenderScale = 4.0f;
 #endif
+    // Round 124: Off (every optional effect off, the least resolution: the
+    // floor to measure against), Low, Medium, High (each platform's default
+    // look: the Vita's 1x, the Mac's 3x), Max (everything at its best).
+    // Gameplay is the same in all of them: no preset touches the camera's
+    // checks (sac_camcoll) or the far characters' poses (sac_farchara).
     enum Preset
     {
+        kPresetOff,
         kPresetLow,
         kPresetMedium,
         kPresetHigh,
-        kPresetUltra,
+        kPresetMax,
         kPresetCustom
     };
-    // Sets the render scale and the quality items to a preset's values.
+    // "Off" .. "Max", "Custom".
+    const char *presetName(int preset);
+    // Sets every preset item to a preset's values.
     void applyPreset(Tuning &t, int preset);
     // The preset these values match, or kPresetCustom.
     int matchingPreset(const Tuning &t);
+    // Round 124: the preset items and their values now, one line
+    // ("preset High render_scale=1 texture_filter=2 ..."), for [gfx124].
+    std::string gfxLine(const Tuning &t);
+    // Called once a game frame: a "[gfx124] frame F <gfxLine>" line at the
+    // first call and whenever any preset item changed (the menu, the F10
+    // panel, an A/B); keeps gfxPresetNow() for the frame log's lines.
+    void gfxLogIfChanged(unsigned long long frame);
+    inline std::atomic<int> g_gfxPresetNow{kPresetHigh};
+    inline int gfxPresetNow() { return g_gfxPresetNow.load(std::memory_order_relaxed); }
+    // The item's value came from a variable set at start (its own, or
+    // SOTC_PRESET for a preset item): the menus' save keeps the file's.
+    bool tuningFromEnv(const TuningItem &item);
     // A saved value (0/1 for a switch); false when the key is unknown or
     // its variable was set at start.
     bool tuningRestore(const char *key, float value);

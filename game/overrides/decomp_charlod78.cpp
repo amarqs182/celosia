@@ -31,6 +31,7 @@
 // ([charlod]: type, distance to the camera / player, radius, visible
 // frames, updates and put-off ones, its ExecCharaGeometry time).
 #include "sotc_decomp.h"
+#include "runtime/ps2_diag.h"
 
 #include "ps2_runtime_macros.h"
 #include "runtime/ps2_memory.h"
@@ -81,7 +82,7 @@ namespace charlod78
             // at least SOTC_CHARLOD78_FAR_S seconds between updates.
             float far = envF("SOTC_CHARLOD78_FAR", 0.0f);
             float farS = envF("SOTC_CHARLOD78_FAR_S", 0.066f);
-            uint64_t logEvery = std::getenv("SOTC_CHARLOD78_LOG") ? std::strtoull(std::getenv("SOTC_CHARLOD78_LOG"), nullptr, 10) : 0u;
+            uint64_t logEvery = ps2_diag::env("SOTC_CHARLOD78_LOG") ? std::strtoull(ps2_diag::env("SOTC_CHARLOD78_LOG"), nullptr, 10) : 0u;
         };
         const Params &params()
         {
@@ -311,5 +312,27 @@ namespace charlod78
         Rec &r = rec(obj);
         ++r.geos;
         r.geoUs += static_cast<double>(us);
+    }
+}
+
+// Round 96 (decomp_obj96.cpp): the player and the view test's last answer for
+// the script pass's whole-object skip.
+namespace charlod78
+{
+    uint32_t player(uint8_t *rdram)
+    {
+        g_ram = rdram;
+        return playerObj();
+    }
+    // Was obj outside the view at the last character tail that tested it (and
+    // the frame before)? false when it has no record or was seen. The tail's
+    // own camera (the one GetCameraContext gave it just before), not whatever
+    // camera the script pass finds in the global.
+    bool unseenAtLastTest(uint32_t obj)
+    {
+        for (const Rec &r : g_rec)
+            if (r.obj == obj)
+                return r.last != 0u && (r.seenFrame == ~0ull || r.seenFrame + 1u < r.last);
+        return false;
     }
 }

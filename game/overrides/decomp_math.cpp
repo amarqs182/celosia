@@ -6,6 +6,7 @@
 // context (FPU registers and fcr31, VU0 vf15-vf19, Q and status, v0 / at /
 // a3 / t0) is written back at the end.
 #include "sotc_decomp.h"
+#include "runtime/ps2_diag.h"
 
 #include "ps2_runtime_macros.h"
 #include "runtime/ps2_memory.h"
@@ -14,6 +15,15 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+
+// Round 122 (SOTC_QUAT122): plain float paths (decomp_char122.cpp).
+namespace char122::quat
+{
+    using Fn = void (*)(uint8_t *, R5900Context *, PS2Runtime *);
+    bool on();
+    bool sinCos(uint8_t *, R5900Context *, PS2Runtime *, Fn);
+    bool acos(uint8_t *, R5900Context *, PS2Runtime *, Fn, bool exact);
+}
 
 namespace decomp_math
 {
@@ -26,7 +36,7 @@ namespace decomp_math
         return f;
     }
 
-    void getSinCos(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void getSinCosOld(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         constexpr uint32_t kCoefficients = 0x001E2BC0u;
         const float halfPi = bits(0x3FC90FDBu), minusPi = bits(0xC0490FDBu), pi = bits(0x40490FDBu), twoPi = bits(0x40C90FDBu);
@@ -142,6 +152,12 @@ namespace decomp_math
         SET_GPR_S32(ctx, 1, static_cast<int32_t>(at));
         SET_GPR_U64(ctx, 7, a3);
         returnTo(ctx);
+    }
+    // Round 122: the plain float path first (SOTC_QUAT122).
+    void getSinCos(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (!char122::quat::on() || !char122::quat::sinCos(rdram, ctx, runtime, getSinCosOld))
+            getSinCosOld(rdram, ctx, runtime);
     }
 }
 
@@ -460,7 +476,7 @@ namespace decomp_libm
     }
 
     template <uint32_t Self>
-    void acosF(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void acosFOld(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const float x = ctx->f[12];
         const uint32_t a0 = bf(x), v1 = a0 & 0x7FFFFFFFu;
@@ -627,7 +643,7 @@ namespace decomp_libm
             v0 = -0x1000;
         }
         // SOTC_ACOS_STATS=1 (checking): which of the paths ran, every 50 000 calls.
-        static const bool stats = std::getenv("SOTC_ACOS_STATS") != nullptr;
+        static const bool stats = ps2_diag::env("SOTC_ACOS_STATS") != nullptr;
         if (stats)
         {
             static uint64_t n[5] = {}, calls = 0;
@@ -641,6 +657,13 @@ namespace decomp_libm
         SET_GPR_S32(ctx, 2, v0);
         returnTo(ctx);
     }
+    // Round 122: acosf in plain floats first (SOTC_QUAT122, decomp_char122.cpp).
+    template <uint32_t Self>
+    void acosF(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (!char122::quat::on() || !char122::quat::acos(rdram, ctx, runtime, acosFOld<Self>, false))
+            acosFOld<Self>(rdram, ctx, runtime);
+    }
 }
 
 SOTC_DECOMP_FLOAT_FUNCTION(0x001DF480u, __ieee754_sqrtf, decomp_libm::sqrtF<0x001DF480u>);
@@ -653,7 +676,7 @@ SOTC_DECOMP_FLOAT_FUNCTION(0x001DD9C8u, acosf, decomp_libm::acosF<0x001DD9C8u>);
 // directly; acosf's j into __ieee754_acosf likewise).
 namespace decomp_libm
 {
-    void acosExact(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void acosExactOld(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const float x = ctx->f[12], one = fb(0x3F800000u), minusOne = fb(0xBF800000u);
         uint32_t fcr31 = ctx->fcr31;
@@ -676,7 +699,12 @@ namespace decomp_libm
         }
         ctx->fcr31 = fcr31;
         ctx->pc = 0x001DD9C8u;
-        acosF<0x001DD9C8u>(rdram, ctx, runtime);
+        acosFOld<0x001DD9C8u>(rdram, ctx, runtime);
+    }
+    void acosExact(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (!char122::quat::on() || !char122::quat::acos(rdram, ctx, runtime, acosExactOld, true))
+            acosExactOld(rdram, ctx, runtime);
     }
 }
 SOTC_DECOMP_FLOAT_FUNCTION(0x001BE388u, iosGetACosfExact, decomp_libm::acosExact);

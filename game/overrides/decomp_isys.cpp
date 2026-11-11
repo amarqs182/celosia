@@ -26,6 +26,7 @@
 // recompiled code has at that call (its return label may resume there
 // after a blocking WaitSema).
 #include "sotc_decomp.h"
+#include "runtime/ps2_diag.h"
 
 #include "ps2_runtime_macros.h"
 #include "ps2_syscalls.h"
@@ -78,7 +79,7 @@ namespace decomp_isys
     // SOTC_ISYS_STATS=1 (measuring): how the lock was found, every 100 000 calls.
     void stat(int how)
     {
-        static const bool on = std::getenv("SOTC_ISYS_STATS") != nullptr;
+        static const bool on = ps2_diag::env("SOTC_ISYS_STATS") != nullptr;
         if (!on)
             return;
         static uint64_t n[3] = {};
@@ -96,7 +97,7 @@ namespace decomp_isys
     };
     Lock acquire(const M &m, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        ps2_syscalls::GetThreadId(rdram, ctx, runtime);
+        sotc_decomp::getThreadId139(rdram, ctx, runtime);
         const uint32_t tid = GPR_U32(ctx, 2);
         if (tid == m.u32(kOwner))
         {
@@ -111,7 +112,7 @@ namespace decomp_isys
             return Lock::Nested;
         }
         SET_GPR_U32(ctx, 4, m.u32(kSemaWord));
-        ps2_syscalls::PollSema(rdram, ctx, runtime);
+        sotc_decomp::pollSema139(rdram, ctx, runtime);
         if (static_cast<int32_t>(GPR_U32(ctx, 2)) < 0)
         {
             stat(2);

@@ -25,6 +25,7 @@
 // predictor and the 20 MB function table all missing), plus the table
 // lookup alone at random addresses.
 #include "sotc_prof.h"
+#include "runtime/ps2_diag.h"
 
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
@@ -44,6 +45,7 @@
 #include <exception>
 #include <memory>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -443,6 +445,7 @@ namespace sotc_prof
             return index < 0x1Cu && ramWord(rdram, 0x001E42C0u + index * 4u) == 0x001C9A78u ? object + 0x20u : 0u;
         }
 
+        void scrsampTaskMark(int probe);
         int taskProbe(uint8_t type, uint32_t entry)
         {
             const uint64_t key = (static_cast<uint64_t>(type) << 32) | entry;
@@ -459,6 +462,8 @@ namespace sotc_prof
             char name[40];
             std::snprintf(name, sizeof(name), "task t%02x @%08x", type, entry);
             const int probe = newProbe(name);
+            if (probe >= 0)
+                scrsampTaskMark(probe);
             g_tasks.push_back({key, probe});
             lastKey = key;
             return last = probe;
@@ -489,6 +494,117 @@ namespace sotc_prof
                 entry = g_entries[object] = ramWord(rdram, r + 4u); // started before timing: where it is
             const Timed timed(taskProbe(type, entry), ctx);
             g_wake(rdram, ctx, runtime);
+        }
+
+        // ---- round 102: the guest pc sampler by task (SOTC_SCRSAMP102) ------
+        // SOTC_SCRSAMP102=<from frame>:<to frame>[:<us>] (with
+        // SOTC_SUBSYS_PROF=1): a host thread reads the running EE context's
+        // pc / ra every <us> (500) between those game frames and counts them
+        // by the open task (the outermost "task" probe on the probe stack)
+        // and the innermost open probe. Written to scrsamp.txt beside the log
+        // (ux0:data/celosia on the Vita) at the end and every 10 s:
+        // "P id name" lines, then "S task inner pc ra n" (-1: none). The
+        // reads race the game thread (plain ints; a diagnostic).
+        namespace scrsamp
+        {
+            std::array<bool, kMaxProbes> g_isTask{};
+        }
+        void scrsampTaskMark(int probe) { scrsamp::g_isTask[probe] = true; }
+        namespace scrsamp
+        {
+            PS2Runtime *g_runtime = nullptr;
+
+            void write(const std::unordered_map<uint64_t, uint64_t> *maps, int nTask, uint64_t total, uint64_t idle, uint64_t from, uint64_t to)
+            {
+#ifdef PLATFORM_VITA
+                const char *path = "ux0:data/celosia/scrsamp.txt";
+#else
+                const char *path = "scrsamp.txt";
+#endif
+                FILE *f = std::fopen(path, "w");
+                if (!f)
+                    return;
+                std::fprintf(f, "# frames %llu-%llu now %llu total %llu idle %llu\n", (unsigned long long)from, (unsigned long long)to,
+                             (unsigned long long)g_frameNow, (unsigned long long)total, (unsigned long long)idle);
+                for (int i = 0; i < g_probeCount; ++i)
+                    std::fprintf(f, "P %d %s\n", i, g_probes[i].name);
+                for (int t = 0; t < nTask; ++t)
+                    for (const auto &[key, n] : maps[t])
+                    {
+                        const int inner = static_cast<int>(key >> 48) - 1;
+                        const uint32_t pc = static_cast<uint32_t>(key >> 24) & 0xFFFFFFu, ra = static_cast<uint32_t>(key) & 0xFFFFFFu;
+                        std::fprintf(f, "S %d %d %08x %08x %llu\n", t - 1, inner, pc << 2, ra << 2, (unsigned long long)n);
+                    }
+                std::fclose(f);
+            }
+
+            void start()
+            {
+                const char *spec = std::getenv("SOTC_SCRSAMP102");
+                if (!spec || !*spec)
+                    return;
+                const uint64_t from = std::strtoull(spec, nullptr, 0);
+                const char *c1 = std::strchr(spec, ':');
+                const uint64_t to = c1 ? std::strtoull(c1 + 1, nullptr, 0) : from + 1800u;
+                const char *c2 = c1 ? std::strchr(c1 + 1, ':') : nullptr;
+                const unsigned us = c2 ? static_cast<unsigned>(std::strtoul(c2 + 1, nullptr, 0)) : 500u;
+                std::fprintf(stderr, "[scrsamp] frames %llu-%llu every %u us\n", (unsigned long long)from, (unsigned long long)to, us);
+                std::thread([from, to, us]() {
+                    // index task + 1 (0: no task); key: inner + 1 << 48 | pc >> 2 << 24 | ra >> 2 (24 bits each: below 0x4000000)
+                    auto *maps = new std::unordered_map<uint64_t, uint64_t>[kMaxProbes + 1];
+                    uint64_t total = 0, idle = 0;
+                    auto last = std::chrono::steady_clock::now();
+                    while (true)
+                    {
+                        std::this_thread::sleep_for(std::chrono::microseconds(us));
+                        const uint64_t frame = g_frameNow;
+                        if (frame < from)
+                            continue;
+                        const bool done = frame >= to;
+                        if (!done)
+                        {
+                            ++total;
+                            const R5900Context *ctx = g_runtime ? g_runtime->eeScheduler().profileContext() : nullptr;
+                            if (!ctx)
+                                ++idle;
+                            else
+                            {
+                                const int depth = g_depth;
+                                int inner = -1, task = -1;
+                                if (depth > 0 && depth <= kMaxDepth)
+                                {
+                                    inner = g_stack[depth - 1].probe;
+                                    for (int i = 0; i < depth; ++i)
+                                    {
+                                        const int p = g_stack[i].probe;
+                                        if (p >= 0 && p < kMaxProbes && g_isTask[p])
+                                        {
+                                            task = p;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if (inner < -1 || inner >= kMaxProbes)
+                                    inner = -1;
+                                const uint32_t pc = (ctx->pc >> 2) & 0xFFFFFFu;
+                                const uint32_t ra = (static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0)) >> 2) & 0xFFFFFFu;
+                                ++maps[task + 1][(static_cast<uint64_t>(inner + 1) << 48) | (static_cast<uint64_t>(pc) << 24) | ra];
+                            }
+                        }
+                        const auto now = std::chrono::steady_clock::now();
+                        if (done || now - last >= std::chrono::seconds(10))
+                        {
+                            last = now;
+                            write(maps, kMaxProbes + 1, total, idle, from, to);
+                        }
+                        if (done)
+                        {
+                            std::fprintf(stderr, "[scrsamp] written: %llu samples, %llu idle\n", (unsigned long long)total, (unsigned long long)idle);
+                            return;
+                        }
+                    }
+                }).detach();
+            }
         }
 
         // ---- the report ----------------------------------------------------
@@ -539,7 +655,7 @@ namespace sotc_prof
                 line += buf;
             }
             // SOTC_SUBSYS_PROF_MIN=<ms>: the cut (0.05; lower on the Mac, ~35x faster).
-            static const double minMs = std::getenv("SOTC_SUBSYS_PROF_MIN") ? std::atof(std::getenv("SOTC_SUBSYS_PROF_MIN")) : 0.05;
+            static const double minMs = ps2_diag::env("SOTC_SUBSYS_PROF_MIN") ? std::atof(ps2_diag::env("SOTC_SUBSYS_PROF_MIN")) : 0.05;
             const bool fine = minMs < 0.01;
             for (int i : order)
             {
@@ -583,7 +699,7 @@ namespace sotc_prof
         // (the open calls' time is not in it until they close).
         void slowFrame(uint64_t frame, uint64_t now)
         {
-            static const double limitMs = std::getenv("SOTC_SUBSYS_PROF_SLOW") ? std::atof(std::getenv("SOTC_SUBSYS_PROF_SLOW")) : 0.0;
+            static const double limitMs = ps2_diag::env("SOTC_SUBSYS_PROF_SLOW") ? std::atof(ps2_diag::env("SOTC_SUBSYS_PROF_SLOW")) : 0.0;
             static uint64_t last = 0, lastWait = 0;
             const uint64_t wait = ps2_load::waitUs[ps2_load::kGame].load(std::memory_order_relaxed);
             const double wallMs = last ? (now - last) / kTicksPerMs : 0.0;
@@ -745,7 +861,7 @@ namespace sotc_prof
             }
             g_innerProbe = g_eeDispatchProbe;
             g_eeDispatchProbe = dispatchProbe;
-            g_dump = std::getenv("SOTC_CALL_COUNT_DUMP");
+            g_dump = ps2_diag::env("SOTC_CALL_COUNT_DUMP");
             g_installed = true;
             std::fprintf(stderr, "[calls] %u functions counted behind one thunk\n", n);
         }
@@ -803,7 +919,7 @@ namespace sotc_prof
             g_timeline->clear();
         }
         if (!g_timeline)
-            if (const char *tl = std::getenv("SOTC_SUBSYS_PROF_TIMELINE"))
+            if (const char *tl = ps2_diag::env("SOTC_SUBSYS_PROF_TIMELINE"))
             {
                 g_timeline = new std::vector<TimelineEvent>;
                 g_timeline->reserve(1 << 16);
@@ -1181,13 +1297,13 @@ namespace sotc_prof
             // SOTC_SUBSYS_PROF_ONLY=1 (round 70): only the EXTRA list (the
             // default set's ~2 000 probe calls a frame left out: a narrow
             // breakdown with little of the probes' own cost in it).
-            const char *only = std::getenv("SOTC_SUBSYS_PROF_ONLY");
+            const char *only = ps2_diag::env("SOTC_SUBSYS_PROF_ONLY");
             if (!only || std::atoi(only) == 0)
                 for (const Target &t : kTargets)
                     wrap(t.address, t.name);
             // SOTC_SUBSYS_PROF_EXTRA=0xaddr:name,0xaddr,...
             static std::vector<std::string> extraNames;
-            if (const char *extra = std::getenv("SOTC_SUBSYS_PROF_EXTRA"))
+            if (const char *extra = ps2_diag::env("SOTC_SUBSYS_PROF_EXTRA"))
             {
                 std::string list(extra);
                 size_t at = 0;
@@ -1230,7 +1346,7 @@ namespace sotc_prof
         void start(const char *path)
         {
             uint64_t lo = 0, hi = ~0ull;
-            if (const char *r = std::getenv("SOTC_HOST_PROF_FRAMES"))
+            if (const char *r = ps2_diag::env("SOTC_HOST_PROF_FRAMES"))
             {
                 char *end = nullptr;
                 lo = std::strtoull(r, &end, 10);
@@ -1361,14 +1477,15 @@ namespace sotc_prof
 
     void install(PS2Runtime &runtime)
     {
+        prof129::install(runtime); // round 129 (SOTC_PROF129=1)
 #if defined(__APPLE__) && defined(__aarch64__)
-        if (const char *path = std::getenv("SOTC_HOST_PROF"))
+        if (const char *path = ps2_diag::env("SOTC_HOST_PROF"))
         {
             hostprof::g_runtime = &runtime;
             hostprof::start(path);
         }
 #endif
-        const char *env = std::getenv("SOTC_SUBSYS_PROF");
+        const char *env = ps2_diag::env("SOTC_SUBSYS_PROF");
         if (!(env && std::atoi(env) != 0) && !native_renderer::tuning().subsysProf)
         {
             calls::install(runtime);
@@ -1385,6 +1502,8 @@ namespace sotc_prof
         wrapAll(runtime);
         g_eeDispatchProbe = dispatchProbe;
         g_installed = true;
+        scrsamp::g_runtime = &runtime;
+        scrsamp::start();
         calls::install(runtime);
     }
 }
