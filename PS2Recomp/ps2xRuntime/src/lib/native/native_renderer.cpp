@@ -62,7 +62,7 @@ namespace native_renderer
 #else
         applyPreset(d, kPresetMedium);
 #endif
-#if defined(__vita__)
+#if defined(__vita__) || defined(__linux__)
         // Copies of the picture made mid-frame came out white in Vita3K when
         // the picture was taken up again after them: drawn again instead, so
         // the heat haze and the water read the PS2's 256 x 256 copy as on the Mac.
