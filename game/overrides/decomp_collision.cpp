@@ -3140,7 +3140,7 @@ namespace decomp_collision
     // (what that call would do: v0 the record; false: make the guest call).
     bool attributeAdrDirect(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t id)
     {
-        if (!sotc_decomp::coll71On() || sotc_decomp::guestFunction(runtime, kAttributeAdr) != attributeAdr)
+        if (!sotc_decomp::coll71On())
             return false;
         const G g{rdram, ctx, runtime};
         uint32_t v0;
@@ -5456,7 +5456,8 @@ namespace decomp_collision
         {
             return ra == 0x01417108u || ra == 0x0141AA0Cu || ra == 0x01418494u || ra == 0x01418548u || ra == 0x0140F2ACu ||
                    ra == 0x01419F30u || ra == 0x0141729Cu || ra == 0x01416058u || ra == 0x01416080u || ra == 0x014160F0u ||
-                   ra == 0x01416668u || ra == 0x014178A8u || ra == 0x014273A8u || ra == 0x014273E4u || ra == 0x014115DCu;
+                   ra == 0x01416668u || ra == 0x014178A8u || ra == 0x014273A8u || ra == 0x014273E4u || ra == 0x014115DCu ||
+                   ra == 0x0140E6A4u || ra == 0x010D4668u;
         }
         uint32_t nthCall(uint32_t ra)
         {
@@ -5950,7 +5951,7 @@ namespace decomp_collision
         // Round 119 (SOTC_FLUSH119, default on): an empty list (count 0) is not handed to
         // FlushModifiedManager's native, which would only set v0 = 2 and return: a0 stays the list
         // as the call leaves it; ra / sp / v0 are set at the end below whatever the last call left.
-        const bool skipEmpty = sotc_decomp::switchOn(sotc_decomp::kFlush119) && sotc_decomp::guestFunction(runtime, kFlushModified) == &flushModified;
+        const bool skipEmpty = sotc_decomp::switchOn(sotc_decomp::kFlush119);
         auto flush = [&](uint32_t list, uint32_t site)
         {
             SET_GPR_U32(ctx, 4, list);
