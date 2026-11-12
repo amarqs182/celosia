@@ -443,7 +443,7 @@ namespace
     // in GLES2/3): one program, position + uv -> texture * color, with the
     // screen transform (glOrtho(0, w, h, 0)) in the vertex shader.
     GLuint g_quadProgram = 0;
-    GLint g_quadPos = -1, g_quadUv = -1, g_quadSize = -1, g_quadTexture = -1, g_quadColor = -1, g_quadTonemap = -1;
+    GLint g_quadPos = -1, g_quadUv = -1, g_quadSize = -1, g_quadTexture = -1, g_quadColor = -1;
     GLuint g_whiteTexture = 0; // 1x1 white texel: the texture-less draws
 
     GLuint compileShader(GLenum type, const char *source)
@@ -479,23 +479,8 @@ namespace
             "varying vec2 vuv;\n"
             "uniform sampler2D tex;\n"
             "uniform vec4 color;\n"
-            "uniform int uTonemap;\n"
             "void main() {\n"
-            "    vec4 c = texture2D(tex, vuv) * color;\n"
-            "    if (uTonemap == 1) {\n"
-            "        // Photographic Filmic Tonemapping (Extended Reinhard with Soft Highlight Shoulder)\n"
-            "        // 1. Anchors pure black (0.0) with rich shadow contrast\n"
-            "        vec3 x = c.rgb;\n"
-            "        vec3 col = pow(x, vec3(1.12));\n"
-            "        // 2. Luma-preserving filmic compression: smoothly rolls off bright sunbeams,\n"
-            "        // specular highlights, and illuminated floors without washing out stone textures\n"
-            "        float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));\n"
-            "        float toneLuma = (luma * (1.0 + luma / 1.82)) / (1.0 + luma);\n"
-            "        col = col * (toneLuma / max(luma, 0.0001));\n"
-            "        gl_FragColor = vec4(clamp(col, 0.0, 1.0), c.a);\n"
-            "    } else {\n"
-            "        gl_FragColor = c;\n"
-            "    }\n"
+            "    gl_FragColor = texture2D(tex, vuv) * color;\n"
             "}\n";
         const GLuint vs = compileShader(GL_VERTEX_SHADER, kVertex);
         const GLuint fs = compileShader(GL_FRAGMENT_SHADER, kFragment);
@@ -521,7 +506,6 @@ namespace
         g_quadSize = glGetUniformLocation(g_quadProgram, "size");
         g_quadTexture = glGetUniformLocation(g_quadProgram, "tex");
         g_quadColor = glGetUniformLocation(g_quadProgram, "color");
-        g_quadTonemap = glGetUniformLocation(g_quadProgram, "uTonemap");
         // A 1x1 white texel for the draws without a texture (DrawRectangle).
         const uint8_t white[4] = {255, 255, 255, 255};
         glGenTextures(1, &g_whiteTexture);
@@ -536,7 +520,7 @@ namespace
 
     // Immediate quads with client arrays (the Vita's drawQuads, on a
     // GLES program instead of vitaGL's fixed-function path).
-    void drawQuads(GLuint texture, const float *xy, const float *uv, int quads, Color color, int tonemap = 0)
+    void drawQuads(GLuint texture, const float *xy, const float *uv, int quads, Color color)
     {
         if (!initQuadProgram() || quads <= 0)
             return;
@@ -565,8 +549,6 @@ namespace
         glVertexAttribPointer(g_quadUv, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), reinterpret_cast<const void *>(2 * sizeof(float)));
         glUniform2f(g_quadSize, static_cast<float>(g_width), static_cast<float>(g_height));
         glUniform4f(g_quadColor, color.r / 255.0f, color.g / 255.0f, color.b / 255.0f, color.a / 255.0f);
-        if (g_quadTonemap >= 0)
-            glUniform1i(g_quadTonemap, tonemap);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, texture ? texture : g_whiteTexture);
         glUniform1i(g_quadTexture, 0);
@@ -823,11 +805,7 @@ void DrawTexturePro(Texture2D texture, Rectangle source, Rectangle dest, Vector2
         rectQuad(xy, dest.x, dest.y, dest.width, dest.height);
         rectQuad(uv, source.x / texture.width, source.y / texture.height, source.width / texture.width, source.height / texture.height);
         glDisable(GL_BLEND);
-        static const int tonemapMode = [] {
-            const char *env = std::getenv("SOTC_TONEMAP");
-            return env ? std::atoi(env) : 0; // Default to 0 (direct clean presentation), 1 = modern single-pass
-        }();
-        drawQuads(texture.id & 0x7FFFFFFFu, xy, uv, 1, tint, tonemapMode);
+        drawQuads(texture.id & 0x7FFFFFFFu, xy, uv, 1, tint);
         glEnable(GL_BLEND);
         return;
     }
