@@ -107,6 +107,71 @@ namespace
         g_gamecoreEntry(rdram, ctx, runtime);
     }
 
+    // Modern delta-time pacing: hooks GAMECORE's frame time calculation (gamecore_sub_013455F8).
+    // Clamps delta-time to prevent physics / collision / camera death spirals when frame pacing slips.
+    constexpr uint32_t kGamecoreFrameTime = 0x013455F8u;
+    PS2Runtime::RecompiledFunction g_gamecoreFrameTime = nullptr;
+
+    void gamecoreFrameTimeHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_gamecoreFrameTime(rdram, ctx, runtime);
+
+        constexpr uint32_t kGameDt = 0x014657D0u;
+        constexpr uint32_t kInvGameDt = 0x014657D4u;
+        constexpr uint32_t kAnimeDt = 0x014657E0u;
+        constexpr uint32_t kInvAnimeDt = 0x014657E4u;
+
+        float dt = 0.0f, animeDt = 0.0f;
+        std::memcpy(&dt, rdram + kGameDt, 4);
+        std::memcpy(&animeDt, rdram + kAnimeDt, 4);
+
+        static const float fixedDt = [] {
+            const char *e = std::getenv("SOTC_FIXED_DT");
+            return e ? std::strtof(e, nullptr) : 0.0f;
+        }();
+        static const float maxDt = [] {
+            const char *e = std::getenv("SOTC_MAX_DT");
+            return e ? std::strtof(e, nullptr) : 0.0333334f; // 30 FPS floor clamp
+        }();
+
+        bool clamped = false;
+        if (fixedDt > 0.0001f)
+        {
+            dt = fixedDt;
+            animeDt = fixedDt;
+            clamped = true;
+        }
+        else
+        {
+            if (dt > maxDt)
+            {
+                dt = maxDt;
+                clamped = true;
+            }
+            if (animeDt > maxDt)
+            {
+                animeDt = maxDt;
+                clamped = true;
+            }
+        }
+
+        if (clamped)
+        {
+            if (dt > 0.0001f)
+            {
+                const float invDt = 1.0f / dt;
+                std::memcpy(rdram + kGameDt, &dt, 4);
+                std::memcpy(rdram + kInvGameDt, &invDt, 4);
+            }
+            if (animeDt > 0.0001f)
+            {
+                const float invAnime = 1.0f / animeDt;
+                std::memcpy(rdram + kAnimeDt, &animeDt, 4);
+                std::memcpy(rdram + kInvAnimeDt, &invAnime, 4);
+            }
+        }
+    }
+
     // SOTC_TRACE_CALLS="0xaddr,0xaddr": count calls that go through the function
     // table (indirect calls, callbacks) and report them periodically.
     constexpr int kMaxTraced = 48;
@@ -1319,6 +1384,12 @@ namespace
         {
             g_gamecoreEntry = runtime.lookupFunction(kGamecoreEntry);
             runtime.registerFunction(kGamecoreEntry, gamecoreEntryHook);
+        }
+        if (runtime.hasFunction(kGamecoreFrameTime))
+        {
+            g_gamecoreFrameTime = runtime.lookupFunction(kGamecoreFrameTime);
+            runtime.registerFunction(kGamecoreFrameTime, gamecoreFrameTimeHook);
+            std::fprintf(stderr, "[ovr] Modern gamecoreFrameTimeHook INSTALLED at 0x%08x\n", kGamecoreFrameTime);
         }
         ps2_lean::afterOverrides(runtime);
         // The input recorder / replay (SOTC_INPUT_RECORD, SOTC_INPUT_REPLAY).
