@@ -1,7 +1,7 @@
 # Celosia
 
 A native port of **Shadow of the Colossus** (PS2, USA, SCUS-97472) to macOS
-(Apple Silicon) and the **PS Vita**, built by statically recompiling the
+(Apple Silicon), the **PS Vita**, and **Handheld Linux (R36S / ArkOS / PortMaster / RK3326)**, built by statically recompiling the
 game's MIPS code to C++ with [PS2Recomp](https://github.com/ran-j/PS2Recomp).
 
 No emulator runs the game's CPU code. The EE code from the boot ELF and the
@@ -28,6 +28,7 @@ it talks to (DMA, IOP, SPU2) is reimplemented as host code.
 | New Game, intro, riding Agro, gameplay | ✅ |
 | Performance, Mac (M4 Pro) | 60 fps, drawn at 1536×1344 |
 | PS Vita | ✅ builds and runs (18–25 fps in Vita3K's intro); fidelity and speed in progress |
+| R36S / Handheld Linux (RK3326) | ✅ 40–60 fps, 640×480 nativo, OpenGL ES 3.2 na Mali-G31, offload quad-core, shader single-pass, PortMaster controls ([docs/r36s.md](docs/r36s.md)) |
 | Decompilation | started: software doubles rewritten and proven ([docs/decomp.md](docs/decomp.md)) |
 
 ## Requirements
@@ -168,6 +169,23 @@ put the extracted disc in `ux0:data/celosia/disc/`. Saves go to
 `ux0:data/celosia/memcards/` and logs to `ux0:data/celosia/log.txt` and
 `err.txt`. The Vita has no environment: `ux0:data/celosia/env.txt` takes
 `NAME=value` lines (for example `PS2X_PROFILE=ux0:data/celosia/prof.txt`).
+
+## R36S & Handheld Linux (ArkOS / PortMaster)
+
+Celosia runs natively on the **R36S** and other handhelds powered by the Rockchip RK3326 SoC (quad-core ARM Cortex-A35 @ 1.5 GHz, Mali-G31 MP2 GPU @ 600 MHz, 1 GB RAM) under **ArkOS / Linux aarch64**:
+
+- **Solid Performance (40–60 FPS)**: Direct hardware rendering on the Mali-G31 GPU via **OpenGL ES 3.2** at the native display resolution (640×480).
+- **D1 Decomp (2,912 hot functions in pure native C++)**: Over 98.4% of all CPU execution cycles run in ahead-of-time lifted C++ with NEON optimizations, bypassing guest MIPS emulation.
+- **Modern Single-Pass Shader Pipeline**: Eliminates the 12 heavy legacy multi-pass effects from the PS2 era (bloom, glow, feedback blur, DoF, haze, stencil shadows, secondary particles, vertical fog) and replaces them with a zero-cost single-pass tonemapping shader featuring an S-curve contrast shoulder and pure black point calibration (eliminates double-gamma wash-out and over-bloom).
+- **Quad-Core Multithreaded Offload**: Work is balanced across all 4 Cortex-A35 cores:
+  - **Core 0**: GameThread & main sequencer.
+  - **Core 1**: Inverse Kinematics (IK), character skeletal animations (`char104`), and software VU1 runner.
+  - **Core 2**: SPU2 audio streaming, DMA, and terrain collision tree queries.
+  - **Core 3**: Dedicated asynchronous OpenGL ES 3.2 RenderThread.
+- **EE Cycle Pacing**: `PS2X_HOST_CLOCK_MAX_LAG=2` bounds clock drift and prevents physical death-spirals on demanding frames.
+- **PortMaster Controls & START Button Fix**: Integrated with PortMaster's `gamecontrollerdb.txt`, ensuring standard controller bindings and preventing the START button from exiting the game back to EmulationStation.
+
+See the complete setup, directory structure, launcher scripts, and build guide in **[docs/r36s.md](docs/r36s.md)**.
 
 ## Decompilation
 
