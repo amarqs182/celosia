@@ -243,8 +243,12 @@ namespace
 
     unsigned char axisToByte(int16_t v)
     {
-        const int b = (int(v) + 32768) * 255 / 65535;
-        return static_cast<unsigned char>(std::clamp(b, 0, 255));
+        if (v == 0)
+            return 128;
+        if (v > 0)
+            return static_cast<unsigned char>(128 + (int(v) * 127 + 16383) / 32767);
+        else
+            return static_cast<unsigned char>(128 + (int(v) * 128 - 16384) / 32768);
     }
 
     void pollInput()
