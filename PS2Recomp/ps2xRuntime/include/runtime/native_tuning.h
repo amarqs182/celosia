@@ -352,7 +352,11 @@ namespace native_renderer
         // MHz, altar and route 6, matched): the world's neighbours differ by
         // matrix as well as texture, so sorting by texture buys few merges and
         // costs the sort. Off by default (SOTC_GL_SORT87=1 to try; A/B name `sort87`).
+#if defined(__vita__) || defined(__linux__)
+        bool glSort87 = true;
+#else
         bool glSort87 = false;
+#endif
         // Round 87 (GPU, console A/B candidate): the shadow volumes' stencil
         // count drawn with the fragment program disabled (GXM's depth /
         // stencil-only primitives: the ISP alone, no USSE program, no blend)

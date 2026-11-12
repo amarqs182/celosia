@@ -82,7 +82,7 @@ extern "C" void ps2x_vita_pace_tag(uint32_t seq);        // raylib_vita.cpp (rou
 // and the context is asked for below ES 3.10 no shader here compiles), plus
 // the fragment stage's default precision ES requires.
 #if defined(PS2X_NATIVE_GLES)
-#define PS2X_GL_VERSION "#version 310 es\nprecision highp float;\nprecision highp int;\n"
+#define PS2X_GL_VERSION "#version 310 es\nprecision mediump float;\nprecision mediump int;\nprecision highp sampler2D;\n"
 #else
 #define PS2X_GL_VERSION "#version 330 core\n"
 #endif
