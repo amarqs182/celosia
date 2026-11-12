@@ -827,7 +827,19 @@ namespace decomp_walk
             if (const char *e = std::getenv("SOTC_SAC_FAR_TERRAIN_SCALE"))
                 return std::strtof(e, nullptr);
             if (const char *e = std::getenv("SOTC_SAC_FAR_TERRAIN"))
-                return (std::atoi(e) != 0) ? 1.8f : 0.0f;
+                return (std::atoi(e) != 0) ? 1.5f : 0.0f;
+            return 0.0f;
+        }();
+        return s;
+    }
+
+    inline float sacMinProjectedSize()
+    {
+        static const float s = []() {
+            if (const char *e = std::getenv("SOTC_SAC_MIN_PROJECTED"))
+                return std::strtof(e, nullptr);
+            if (std::getenv("SOTC_SAC_FAR_TERRAIN"))
+                return 0.004f; // Bluepoint Remake style: screen-projected radius cull (~2-3px on 480p)
             return 0.0f;
         }();
         return s;
@@ -1020,6 +1032,12 @@ namespace decomp_walk
         }
         else
             f1 = 0.0f;
+        if (sacMinProjectedSize() > 0.0f && f1 > 10.0f)
+        {
+            const float r = m.f32(sp + 0x1Cu);
+            if (r > 0.0f && (r / f1) < sacMinProjectedSize())
+                return finish(-1.0f, qbits());
+        }
         // The level by distance, then against the model's count (+0x1c):
         // past it the last level, or none when the record says so (+0x28);
         // 01097F88 when the model picks its own level (+0xc).
@@ -1052,8 +1070,12 @@ namespace decomp_walk
                 none = true;
             else
             {
-                const float tFar = m.f32(a0 + 0x20u);
-                if (sacFarTerrainScale() > 0.0f && tFar > 0.0f && f1 > tFar * sacFarTerrainScale())
+                float tFar = 0.0f;
+                if (count >= 3 && m.f32(a0 + 0x20u) > 0.0f) tFar = m.f32(a0 + 0x20u);
+                else if (count >= 2 && m.f32(a0 + 0x1Cu) > 0.0f) tFar = m.f32(a0 + 0x1Cu);
+                else if (count >= 1 && m.f32(a0 + 0x18u) > 0.0f) tFar = m.f32(a0 + 0x18u);
+                const float effectiveFar = (tFar > 0.0f) ? (tFar * sacFarTerrainScale()) : (350.0f * sacFarTerrainScale());
+                if (sacFarTerrainScale() > 0.0f && f1 > effectiveFar)
                 {
                     none = true;
                 }
@@ -1360,6 +1382,7 @@ namespace decomp_walk
                 // centre with w grown by the radius's projected size.
                 const V4 c = hq(hd, 0x20u);
                 const float r = c.w * lodScale;
+                const float rr = r;
                 const V4 world = rows(M, c.x, c.y, c.z, 1.0f);
                 V4 P[4], VP[4], V[4];
                 load4(cp, 0x1E0u, P);
@@ -1398,12 +1421,18 @@ namespace decomp_walk
                     f20 = f12;
                 else
                 {
-                    const float tFar = hf(lod, 0x20u);
-                    if (keepsLast && sacFarTerrainScale() > 0.0f && tFar > 0.0f && d > tFar * sacFarTerrainScale())
+                    float tFar = 0.0f;
+                    if (count >= 3 && hf(lod, 0x20u) > 0.0f) tFar = hf(lod, 0x20u);
+                    else if (count >= 2 && hf(lod, 0x1Cu) > 0.0f) tFar = hf(lod, 0x1Cu);
+                    else if (count >= 1 && hf(lod, 0x18u) > 0.0f) tFar = hf(lod, 0x18u);
+                    const float effectiveFar = (tFar > 0.0f) ? (tFar * sacFarTerrainScale()) : (350.0f * sacFarTerrainScale());
+                    if (keepsLast && sacFarTerrainScale() > 0.0f && d > effectiveFar)
                         f20 = -1.0f;
                     else
                         f20 = keepsLast ? static_cast<float>(count - 1) : -1.0f;
                 }
+                if (sacMinProjectedSize() > 0.0f && d > 10.0f && rr > 0.0f && (rr / d) < sacMinProjectedSize())
+                    f20 = -1.0f;
                 if (f20 < 0.0f)
                     level = -1.0f;
                 else if (f21 < 0.0f)
@@ -1615,12 +1644,18 @@ namespace decomp_walk
                     f20 = f12;
                 else
                 {
-                    const float tFar = hf(lod, 0x20u);
-                    if (keepsLast && sacFarTerrainScale() > 0.0f && tFar > 0.0f && d > tFar * sacFarTerrainScale())
+                    float tFar = 0.0f;
+                    if (count >= 3 && hf(lod, 0x20u) > 0.0f) tFar = hf(lod, 0x20u);
+                    else if (count >= 2 && hf(lod, 0x1Cu) > 0.0f) tFar = hf(lod, 0x1Cu);
+                    else if (count >= 1 && hf(lod, 0x18u) > 0.0f) tFar = hf(lod, 0x18u);
+                    const float effectiveFar = (tFar > 0.0f) ? (tFar * sacFarTerrainScale()) : (350.0f * sacFarTerrainScale());
+                    if (keepsLast && sacFarTerrainScale() > 0.0f && d > effectiveFar)
                         f20 = -1.0f;
                     else
                         f20 = keepsLast ? static_cast<float>(count - 1) : -1.0f;
                 }
+                if (sacMinProjectedSize() > 0.0f && d > 10.0f && rr > 0.0f && (rr / d) < sacMinProjectedSize())
+                    f20 = -1.0f;
                 if (f20 < 0.0f)
                     level = -1.0f;
                 else if (f21 < 0.0f)

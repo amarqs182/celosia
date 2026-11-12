@@ -3094,6 +3094,8 @@ void PS2Runtime::run()
             static const float cropRatio = []() {
                 if (const char *e = std::getenv("SOTC_CROP_LETTERBOX"))
                     return std::clamp(std::strtof(e, nullptr), 0.0f, 0.25f);
+                if (envScreenMode == 1 || std::getenv("SOTC_STRETCH"))
+                    return 0.115f; // remove PS2 cinema letterbox bands on stretched handheld displays
                 return 0.0f;
             }();
             const float cropY = srcHeight * cropRatio;
