@@ -41,6 +41,9 @@
 #include "sotc_prof.h"
 #include "sotc_decomp.h"
 #include "sotc_worker.h"
+#if defined(__GNUC__)
+extern "C" void __gcov_dump() __attribute__((weak));
+#endif
 namespace char104 // round 104 (decomp_char104.cpp)
 {
     void install(PS2Runtime &runtime);
@@ -5851,6 +5854,10 @@ namespace sotc_native
             sotc_worker::frameTick(frame); // round 91: the guest worker joined at the frame's end, its statistics
             char104::frameTick(frame);     // round 104
             sotc_decomp::g_gameFrame = frame;
+#if defined(__GNUC__)
+            if (frame > 0 && frame % 600 == 0 && __gcov_dump)
+                __gcov_dump();
+#endif
             sotc_decomp::fastStatsTick(frame);
             ps2_lean::frameTick(frame);
             sotc_decomp::abTick(frame);
