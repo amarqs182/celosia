@@ -441,6 +441,20 @@ namespace
             std::memset(stream, 0, static_cast<size_t>(bytes));
         // One-shot sounds ride on top of the SPU2 stream.
         mixSounds(reinterpret_cast<int16_t *>(stream), frames);
+        static const bool mono = []() {
+            const char *e = std::getenv("SOTC_AUDIO_MONO");
+            return e && std::atoi(e) != 0;
+        }();
+        if (mono)
+        {
+            auto *s16 = reinterpret_cast<int16_t *>(stream);
+            for (unsigned int i = 0; i < frames; ++i)
+            {
+                int32_t m = (static_cast<int32_t>(s16[i * 2]) + static_cast<int32_t>(s16[i * 2 + 1])) >> 1;
+                s16[i * 2] = static_cast<int16_t>(m);
+                s16[i * 2 + 1] = static_cast<int16_t>(m);
+            }
+        }
     }
 
     // 2D quads on GLES (vitaGL's immediate-mode client arrays do not exist
@@ -609,12 +623,37 @@ void InitWindow(int width, int height, const char *title)
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
     SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-    g_window = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, width, height,
-                                SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+    SDL_DisplayMode dm;
+    if (SDL_GetCurrentDisplayMode(0, &dm) == 0 && dm.w > 0 && dm.h > 0)
+    {
+        static const bool fullscreen = []() {
+            const char *e = std::getenv("SOTC_FULLSCREEN");
+            if (e) return std::atoi(e) != 0;
+            return true; // default full screen on embedded handhelds
+        }();
+        if (fullscreen)
+        {
+            width = dm.w;
+            height = dm.h;
+        }
+    }
+    Uint32 winFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_ALLOW_HIGHDPI;
+    if (std::getenv("SOTC_FULLSCREEN") && std::atoi(std::getenv("SOTC_FULLSCREEN")) != 0)
+        winFlags |= SDL_WINDOW_FULLSCREEN;
+    else
+        winFlags |= SDL_WINDOW_RESIZABLE;
+    g_window = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, width, height, winFlags);
     if (!g_window)
     {
         std::fprintf(stderr, "[linux] SDL_CreateWindow failed: %s\n", SDL_GetError());
         return;
+    }
+    int actualW = 0, actualH = 0;
+    SDL_GetWindowSize(g_window, &actualW, &actualH);
+    if (actualW > 0 && actualH > 0)
+    {
+        g_width = actualW;
+        g_height = actualH;
     }
     for (const int minor : {2, 1, 0})
     {

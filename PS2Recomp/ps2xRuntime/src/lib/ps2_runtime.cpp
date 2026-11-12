@@ -3067,7 +3067,12 @@ void PS2Runtime::run()
             const float screenHeight = static_cast<float>(GetScreenHeight());
             // The PS2 picture is 4:3 whatever its pixel size (512x448, 640x448...).
             const float aspect = 4.0f / 3.0f;
-            const int screenMode = hostmenu::settings().screenMode.load(std::memory_order_relaxed);
+            static const int envScreenMode = []() {
+                if (const char *e = std::getenv("SOTC_SCREEN_MODE")) return std::atoi(e);
+                if (std::getenv("SOTC_STRETCH")) return 1;
+                return -1;
+            }();
+            const int screenMode = (envScreenMode >= 0) ? envScreenMode : hostmenu::settings().screenMode.load(std::memory_order_relaxed);
             float dstWidth = std::min(screenWidth, screenHeight * aspect);
             float dstHeight = dstWidth / aspect;
             if (screenMode == hostmenu::kScreenStretch)
@@ -3081,7 +3086,14 @@ void PS2Runtime::run()
                 dstWidth = srcWidth * whole;
                 dstHeight = srcHeight * whole;
             }
-            const Rectangle srcRect{0.0f, 0.0f, srcWidth, hostFrameFlipY ? -srcHeight : srcHeight};
+            static const float cropRatio = []() {
+                if (const char *e = std::getenv("SOTC_CROP_LETTERBOX"))
+                    return std::clamp(std::strtof(e, nullptr), 0.0f, 0.25f);
+                return 0.0f;
+            }();
+            const float cropY = srcHeight * cropRatio;
+            const float activeSrcH = srcHeight - 2.0f * cropY;
+            const Rectangle srcRect{0.0f, cropY, srcWidth, hostFrameFlipY ? -activeSrcH : activeSrcH};
             const Rectangle dstRect{
                 (screenWidth - dstWidth) * 0.5f,
                 (screenHeight - dstHeight) * 0.5f,
