@@ -821,6 +821,18 @@ namespace decomp_walk
         return s;
     }
 
+    inline float sacFarTerrainScale()
+    {
+        static const float s = []() {
+            if (const char *e = std::getenv("SOTC_SAC_FAR_TERRAIN_SCALE"))
+                return std::strtof(e, nullptr);
+            if (const char *e = std::getenv("SOTC_SAC_FAR_TERRAIN"))
+                return (std::atoi(e) != 0) ? 1.8f : 0.0f;
+            return 0.0f;
+        }();
+        return s;
+    }
+
     // modelClipSolid's level by distance (0x1098a14..0x1098b48): the LOD
     // record's thresholds of levels 1..3 (+0x18 / +0x1c / +0x20) against
     // the distance, then with the hysteresis +0x24 around the current level:
@@ -1040,15 +1052,23 @@ namespace decomp_walk
                 none = true;
             else
             {
-                if (last < 0)
+                const float tFar = m.f32(a0 + 0x20u);
+                if (sacFarTerrainScale() > 0.0f && tFar > 0.0f && f1 > tFar * sacFarTerrainScale())
                 {
-                    const uint32_t half = static_cast<uint32_t>(last) >> 1;
-                    f12 = FPU_CVT_S_W(static_cast<int32_t>((static_cast<uint32_t>(last) & 1u) | half));
-                    f12 = FPU_ADD_S(f12, f12);
+                    none = true;
                 }
                 else
-                    f12 = FPU_CVT_S_W(last);
-                v0 = static_cast<uint64_t>(static_cast<int64_t>(m.s32(s1 + 0xCu)));
+                {
+                    if (last < 0)
+                    {
+                        const uint32_t half = static_cast<uint32_t>(last) >> 1;
+                        f12 = FPU_CVT_S_W(static_cast<int32_t>((static_cast<uint32_t>(last) & 1u) | half));
+                        f12 = FPU_ADD_S(f12, f12);
+                    }
+                    else
+                        f12 = FPU_CVT_S_W(last);
+                    v0 = static_cast<uint64_t>(static_cast<int64_t>(m.s32(s1 + 0xCu)));
+                }
             }
         }
         if (!none)
@@ -1377,7 +1397,13 @@ namespace decomp_walk
                 if (static_cast<uint64_t>(static_cast<int64_t>(lv)) < static_cast<uint64_t>(static_cast<int64_t>(count)))
                     f20 = f12;
                 else
-                    f20 = keepsLast ? static_cast<float>(count - 1) : -1.0f;
+                {
+                    const float tFar = hf(lod, 0x20u);
+                    if (keepsLast && sacFarTerrainScale() > 0.0f && tFar > 0.0f && d > tFar * sacFarTerrainScale())
+                        f20 = -1.0f;
+                    else
+                        f20 = keepsLast ? static_cast<float>(count - 1) : -1.0f;
+                }
                 if (f20 < 0.0f)
                     level = -1.0f;
                 else if (f21 < 0.0f)
@@ -1588,7 +1614,13 @@ namespace decomp_walk
                 if (static_cast<uint64_t>(static_cast<int64_t>(lv)) < static_cast<uint64_t>(static_cast<int64_t>(count)))
                     f20 = f12;
                 else
-                    f20 = keepsLast ? static_cast<float>(count - 1) : -1.0f;
+                {
+                    const float tFar = hf(lod, 0x20u);
+                    if (keepsLast && sacFarTerrainScale() > 0.0f && tFar > 0.0f && d > tFar * sacFarTerrainScale())
+                        f20 = -1.0f;
+                    else
+                        f20 = keepsLast ? static_cast<float>(count - 1) : -1.0f;
+                }
                 if (f20 < 0.0f)
                     level = -1.0f;
                 else if (f21 < 0.0f)
