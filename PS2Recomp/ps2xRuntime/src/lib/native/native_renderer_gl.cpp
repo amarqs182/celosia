@@ -6373,22 +6373,25 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             phases.arenaUs += native_renderer::nowUs() - arenaStart;
         const bool fogOn = fog.enabled && fog.width > 0.0f;
         bool haveMirror = false, mirrorRead = false;
-        for (const Draw &d : draws)
+        if (native_renderer::tuning().reflections)
         {
-            haveMirror = haveMirror || d.state.reflectionSource;
-            mirrorRead = mirrorRead || d.state.reflectionSample;
-            if (haveMirror && mirrorRead)
-                break;
+            for (const Draw &d : draws)
+            {
+                haveMirror = haveMirror || d.state.reflectionSource;
+                mirrorRead = mirrorRead || d.state.reflectionSample;
+                if (haveMirror && mirrorRead)
+                    break;
+            }
+            // Round 93 (Tuning glMirror93): no draw reads the mirror this frame
+            // (no water reflection sent): it is not drawn (nothing samples it).
+            if (haveMirror && !mirrorRead && native_renderer::tuning().glMirror93)
+            {
+                haveMirror = false;
+                ++r93Stats.mirrorSkip;
+            }
+            else if (haveMirror)
+                ++r93Stats.mirrorDrawn;
         }
-        // Round 93 (Tuning glMirror93): no draw reads the mirror this frame
-        // (no water reflection sent): it is not drawn (nothing samples it).
-        if (haveMirror && !mirrorRead && native_renderer::tuning().glMirror93)
-        {
-            haveMirror = false;
-            ++r93Stats.mirrorSkip;
-        }
-        else if (haveMirror)
-            ++r93Stats.mirrorDrawn;
 #if defined(PS2X_NATIVE_VITA)
         // The soft path draws a separate mask that must test the picture's
         // stencil; vitaGL framebuffers cannot share it, so the mask covered
@@ -8230,12 +8233,15 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         };
         bool haveRefraction = false;
         uint32_t screenCopyOrder = 0;
-        for (const Draw &d : draws)
+        if (native_renderer::tuning().refraction)
         {
-            if (d.state.refractionSample)
-                haveRefraction = true;
-            if (d.state.screenCopy && !screenCopyOrder)
-                screenCopyOrder = d.state.order;
+            for (const Draw &d : draws)
+            {
+                if (d.state.refractionSample)
+                    haveRefraction = true;
+                if (d.state.screenCopy && !screenCopyOrder)
+                    screenCopyOrder = d.state.order;
+            }
         }
         auto doRefraction = [&]
         {
