@@ -6580,6 +6580,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 firstAt = static_cast<size_t>(std::partition_point(leaders.begin(), leaders.end(), [&](uint32_t k) { return layerOf(k) < fromOrder; }) - leaders.begin());
                 endAt = static_cast<size_t>(std::partition_point(leaders.begin(), leaders.end(), [&](uint32_t k) { return layerOf(k) < toOrder; }) - leaders.begin());
             }
+            const Mesh *prevFurMesh = nullptr;
+            int furShellCount = 0;
+            const int maxFurShells = native_renderer::tuning().furShells;
             for (size_t li = firstAt; li < endAt; ++li)
             {
                 const size_t k = byLeaders ? leaders[li] : li;
@@ -6654,6 +6657,29 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     (skipKind == 7 && planned.mesh->dynamic) || (skipKind >= 100 && skipKind < 200 && d.state.screen && d.state.order == static_cast<uint32_t>(skipKind - 100)) ||
                     (skipKind >= 200 && planned.mesh->dynamic && !planned.mesh->indexed && d.state.order == static_cast<uint32_t>(skipKind - 200)) || (skipKind == 8 && planned.mesh->indexed) || (skipKind == 9 && !planned.mesh->skinned && d.state.order >= 2u && d.state.order <= 3u))
                     continue;
+
+                // Dynamic Fur Shell Clamping (Optimization #1)
+                // When consecutive alpha-tested draws share the same skinned mesh (multi-pass shells),
+                // clamp the layer count to maxFurShells to eliminate TBDR tile overdraw on Mali-G31.
+                if (maxFurShells > 0 && planned.mesh->skinned && d.state.alphaTest && d.state.blend != native_renderer::Blend::Opaque)
+                {
+                    if (planned.mesh == prevFurMesh)
+                    {
+                        ++furShellCount;
+                        if (furShellCount > maxFurShells)
+                            continue;
+                    }
+                    else
+                    {
+                        prevFurMesh = planned.mesh;
+                        furShellCount = 1;
+                    }
+                }
+                else
+                {
+                    prevFurMesh = nullptr;
+                    furShellCount = 0;
+                }
                 Mesh &mesh = *planned.mesh;
                 if (bloomLog() && mesh.dynamic && !mesh.indexed && &target == &color) // (round 65e) the frame's non-indexed per-frame draws
                     std::fprintf(stderr, "[gl:dyn] f=%llu order %u screen %d blend %d tex %llx count %u skinned %d overlay %d mesh %016llx\n",

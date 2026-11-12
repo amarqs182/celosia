@@ -685,6 +685,10 @@ namespace native_renderer
         // Models' detail levels picked as if 1.6x as far (coarser sooner;
         // none vanishes sooner) (SOTC_SAC_LOD).
         bool sacLod = false;
+        // Fur shells clamping (SOTC_FUR_SHELLS): limits consecutive alpha-tested
+        // shell layers (colossi fur) to N shells to prevent TBDR tile overdraw.
+        // 0 = full PS2 layers (8-16), 4 = default on handhelds.
+        int furShells = 4;
         // Round 65: the Quality menu's performance cuts (all off by default on
         // every platform; each saved in settings.cfg, each its own variable).
         // Camera checks: the camera's look / visibility segment tests (not

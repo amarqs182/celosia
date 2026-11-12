@@ -152,6 +152,8 @@ namespace native_renderer
             d.sacLod = flag("SOTC_SAC_LOD");
         if (on("SOTC_SAC_PARTICLES"))
             d.sacParticles = flag("SOTC_SAC_PARTICLES");
+        if (on("SOTC_FUR_SHELLS"))
+            d.furShells = std::max(0, std::atoi(std::getenv("SOTC_FUR_SHELLS")));
         // Round 65: the Quality menu's cuts. SOTC_SAC_MAX=1 all four (the
         // menu's "Max performance"), each one's own variable over it.
         if (on("SOTC_SAC_MAX") && flag("SOTC_SAC_MAX"))
