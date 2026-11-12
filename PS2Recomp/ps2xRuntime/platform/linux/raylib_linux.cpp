@@ -585,8 +585,6 @@ namespace
 
 void InitWindow(int width, int height, const char *title)
 {
-    g_width = width;
-    g_height = height;
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_AUDIO) != 0)
         std::fprintf(stderr, "[linux] SDL_Init failed: %s\n", SDL_GetError());
 
@@ -623,7 +621,7 @@ void InitWindow(int width, int height, const char *title)
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
     SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-    SDL_DisplayMode dm;
+    SDL_DisplayMode dm{};
     if (SDL_GetCurrentDisplayMode(0, &dm) == 0 && dm.w > 0 && dm.h > 0)
     {
         static const bool fullscreen = []() {
@@ -637,6 +635,11 @@ void InitWindow(int width, int height, const char *title)
             height = dm.h;
         }
     }
+    if (const char *e = std::getenv("SOTC_RES_W")) width = std::atoi(e);
+    if (const char *e = std::getenv("SOTC_RES_H")) height = std::atoi(e);
+    g_width = width;
+    g_height = height;
+
     Uint32 winFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_ALLOW_HIGHDPI;
     if (std::getenv("SOTC_FULLSCREEN") && std::atoi(std::getenv("SOTC_FULLSCREEN")) != 0)
         winFlags |= SDL_WINDOW_FULLSCREEN;
@@ -670,6 +673,15 @@ void InitWindow(int width, int height, const char *title)
         g_window = nullptr;
         return;
     }
+    int drawW = 0, drawH = 0;
+    SDL_GL_GetDrawableSize(g_window, &drawW, &drawH);
+    if (drawW > 0 && drawH > 0)
+    {
+        g_width = drawW;
+        g_height = drawH;
+    }
+    std::fprintf(stderr, "[linux] display mode %dx%d, requested %dx%d, drawable %dx%d -> active resolution %dx%d\n",
+                 dm.w, dm.h, width, height, drawW, drawH, g_width, g_height);
     // The context that was granted (once): profile and version, as the
     // renderer's shader set depends on both.
     int glMajor = 0, glMinor = 0, glProfile = 0, glDepth = 0, glStencil = 0;
@@ -773,6 +785,16 @@ void BeginDrawing(void)
     if (g_lastFrameTime > 0.0)
         g_frameTime = now - g_lastFrameTime;
     g_lastFrameTime = now;
+    if (g_window)
+    {
+        int drawW = 0, drawH = 0;
+        SDL_GL_GetDrawableSize(g_window, &drawW, &drawH);
+        if (drawW > 0 && drawH > 0)
+        {
+            g_width = drawW;
+            g_height = drawH;
+        }
+    }
     if (!initQuadProgram())
         return;
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
