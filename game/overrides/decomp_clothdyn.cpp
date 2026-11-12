@@ -20,7 +20,11 @@
 #include "ps2_runtime_macros.h"
 #include "runtime/ps2_memory.h"
 
+#include <cmath>
 #include <cstring>
+#if defined(__ARM_NEON) || defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 
 namespace decomp_clothdyn
 {
@@ -90,6 +94,43 @@ namespace decomp_clothdyn
         float q = ctx->vu0_q;
         const float vf0w = _mm_cvtss_f32(_mm_shuffle_ps(ctx->vu0_vf[0], ctx->vu0_vf[0], _MM_SHUFFLE(0, 0, 0, 3)));
         uint32_t row = ram.u32(t0 + 0xCu);
+#if defined(__ARM_NEON) || defined(__aarch64__)
+        for (int32_t r = rows - 1; r != -1; --r, row += 0x18u)
+        {
+            uint32_t a1 = ram.u32(row + 0x10u);
+            float prev[4];
+            std::memcpy(prev, rdram + (a1 & PS2_RAM_MASK & ~0xFu), 16);
+            for (int32_t k = cols - 2; k > -1; --k, a1 += 0x10u)
+            {
+                const uint32_t v1 = a1 + 0x10u;
+                float cur[4];
+                std::memcpy(cur, rdram + (v1 & PS2_RAM_MASK & ~0xFu), 16);
+                const float dx = cur[0] - prev[0];
+                const float dy = cur[1] - prev[1];
+                const float dz = cur[2] - prev[2];
+                const float l2 = dx * dx + dy * dy + dz * dz;
+                const float q_val = l2 > 0.0f ? (1.0f / std::sqrt(l2)) : 3.4028235e38f;
+                touched = true;
+                q = q_val;
+                f0 = q;
+                std::memcpy(&v0, &q, 4);
+                cond = f0 < f2;
+                if (cond)
+                {
+                    f0 = f1 * f0;
+                    const float k_val = f0;
+                    cur[0] = prev[0] + dx * k_val;
+                    cur[1] = prev[1] + dy * k_val;
+                    cur[2] = prev[2] + dz * k_val;
+                    std::memcpy(rdram + (v1 & PS2_RAM_MASK & ~0xFu), cur, 16);
+                }
+                prev[0] = cur[0];
+                prev[1] = cur[1];
+                prev[2] = cur[2];
+                prev[3] = cur[3];
+            }
+        }
+#else
         for (int32_t r = rows - 1; r != -1; --r, row += 0x18u)
         {
             uint32_t a1 = ram.u32(row + 0x10u);
@@ -127,6 +168,7 @@ namespace decomp_clothdyn
                     prev = vf5;
             }
         }
+#endif
         if (touched)
         {
             // The frame's scratch qword (dead after the return) as the original leaves it.
@@ -290,6 +332,28 @@ namespace decomp_clothdyn
         __m128 vf5 = ctx->vu0_vf[5], vf6 = ctx->vu0_vf[6], scratch = vf5;
         bool touched = false;
         uint32_t row = ram.u32(t3 + 0xCu);
+#if defined(__ARM_NEON) || defined(__aarch64__)
+        const float32x4_t vscale = vdupq_n_f32(ctx->f[13]);
+        for (int32_t r = rows - 1; r != -1; --r, row += 0x18u)
+        {
+            uint32_t pos = ram.u32(row + 0x10u), before = ram.u32(row + 0x14u), out = ram.u32(row + 8u);
+            for (int32_t k = cols - 1; k != -1; --k, pos += 0x10u, before += 0x10u, out += 0x10u)
+            {
+                float p[4], b[4];
+                std::memcpy(p, rdram + (pos & PS2_RAM_MASK & ~0xFu), 16);
+                std::memcpy(b, rdram + (before & PS2_RAM_MASK & ~0xFu), 16);
+                float32x4_t vp = vld1q_f32(p);
+                float32x4_t vb = vld1q_f32(b);
+                float32x4_t diff = vsubq_f32(vp, vb);
+                float32x4_t vel = vmulq_f32(diff, vscale);
+                vel = vsetq_lane_f32(0.0f, vel, 3);
+                float out_v[4];
+                vst1q_f32(out_v, vel);
+                std::memcpy(rdram + (out & PS2_RAM_MASK & ~0xFu), out_v, 16);
+                touched = true;
+            }
+        }
+#else
         for (int32_t r = rows - 1; r != -1; --r, row += 0x18u)
         {
             uint32_t pos = ram.u32(row + 0x10u), before = ram.u32(row + 0x14u), out = ram.u32(row + 8u);
@@ -306,6 +370,7 @@ namespace decomp_clothdyn
                 touched = true;
             }
         }
+#endif
         if (touched)
         {
             ram.putq(sp, scratch); // the frame's scratch qword (dead after the return)

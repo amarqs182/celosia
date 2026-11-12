@@ -102,6 +102,7 @@ A GPU ARM Mali-G31 possui o dobro de unidades aritméticas para dados de 16-bit 
   * Implementação da Fase 1: Clamping dinâmico de *fur shells* (`furShells = 4`) para alívio do tile overdraw na GPU Mali-G31.
   * Implementação da Fase 2 & 5: Ativação global de shaders FP16 (`mediump float`) e state sorting / merging de draws (`glSort87`).
   * Implementação da Fase 6: Ativação por padrão de `sacCamColl`, `sacFarChara`, `sacFxHalf` e `sacDrawDist` para eliminar micro-stutters de raycast de câmera.
+  * Implementação da Fase 7: Vetorização com intrinsics ARM NEON de 128 bits no relaxamento de comprimento e cálculo de velocidade de tecidos (`decomp_clothdyn.cpp`), eliminando o overhead do emulador de VU0 na CPU Cortex-A35.
   * Implementação da Fase 9: Calibração de resposta e zona morta radial dos analógicos (`axisToByte` com ponto neutro 128 exato e curva exponencial suave `PS2X_STICK_CURVE=1.25`).
 
   * Reversão do shader fotográfico para passthrough limpo 1:1 (`raylib_linux.cpp`).
