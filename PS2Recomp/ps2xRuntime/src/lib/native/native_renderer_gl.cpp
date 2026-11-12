@@ -6383,6 +6383,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             phases.arenaUs += native_renderer::nowUs() - arenaStart;
         const bool fogOn = fog.enabled && fog.width > 0.0f;
         bool haveMirror = false, mirrorRead = false;
+        if (native_renderer::tuning().reflections)
+        {
         for (const Draw &d : draws)
         {
             haveMirror = haveMirror || d.state.reflectionSource;
@@ -6399,6 +6401,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         }
         else if (haveMirror)
             ++r93Stats.mirrorDrawn;
+        }
 #if defined(PS2X_NATIVE_VITA)
         // The soft path draws a separate mask that must test the picture's
         // stencil; vitaGL framebuffers cannot share it, so the mask covered
@@ -8240,12 +8243,15 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         };
         bool haveRefraction = false;
         uint32_t screenCopyOrder = 0;
+        if (native_renderer::tuning().refraction)
+        {
         for (const Draw &d : draws)
         {
             if (d.state.refractionSample)
                 haveRefraction = true;
             if (d.state.screenCopy && !screenCopyOrder)
                 screenCopyOrder = d.state.order;
+        }
         }
         auto doRefraction = [&]
         {
