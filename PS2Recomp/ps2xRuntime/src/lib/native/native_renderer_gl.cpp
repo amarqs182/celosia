@@ -82,9 +82,13 @@ extern "C" void ps2x_vita_pace_tag(uint32_t seq);        // raylib_vita.cpp (rou
 // and the context is asked for below ES 3.10 no shader here compiles), plus
 // the fragment stage's default precision ES requires.
 #if defined(PS2X_NATIVE_GLES)
-#define PS2X_GL_VERSION "#version 310 es\nprecision mediump float;\nprecision mediump int;\nprecision highp sampler2D;\n"
+#define PS2X_GL_VERSION_VERT "#version 310 es\nprecision highp float;\nprecision highp int;\n"
+#define PS2X_GL_VERSION_FRAG "#version 310 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\n"
+#define PS2X_GL_VERSION PS2X_GL_VERSION_VERT
 #else
-#define PS2X_GL_VERSION "#version 330 core\n"
+#define PS2X_GL_VERSION_VERT "#version 330 core\n"
+#define PS2X_GL_VERSION_FRAG "#version 330 core\n"
+#define PS2X_GL_VERSION PS2X_GL_VERSION_VERT
 #endif
 
 #include "ThreadNaming.h"
@@ -458,7 +462,7 @@ namespace
 
 #if !defined(PS2X_NATIVE_VITA)
     // ---- GLSL (macOS) ----
-    const char *kMainVertex = PS2X_GL_VERSION R"(layout(location = 0) in vec3 aPos;
+    const char *kMainVertex = PS2X_GL_VERSION_VERT R"(layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec4 aColor;
 layout(location = 3) in vec2 aUV;
@@ -467,9 +471,9 @@ uniform vec4 uMisc;  // lit, opacity, uv offset
 uniform vec4 uFogB;  // size, vertex fog, base
 uniform vec4 uFogC;  // scale, lod K, lod scale, max lod
 uniform vec4 uGuard; // x > 0: layer 1's near plane (see Renderer::guardFor): what lies nearer than w = y cut
-out vec4 vUV;        // uv, w, fog x w (the fog factor is linear on the screen, as the GS's)
-out vec4 vColor;
-out vec4 vScreen;    // clip x, y, w
+out highp vec4 vUV;        // uv, w, fog x w (the fog factor is linear on the screen, as the GS's)
+out mediump vec4 vColor;
+out highp vec4 vScreen;    // clip x, y, w
 void main()
 {
     vec4 c = uClip[0] * aPos.x + uClip[1] * aPos.y + uClip[2] * aPos.z + uClip[3];
@@ -499,9 +503,9 @@ void main()
 }
 )";
 
-    const char *kMainFragment = PS2X_GL_VERSION R"(in vec4 vUV;
-in vec4 vColor;
-in vec4 vScreen;
+    const char *kMainFragment = PS2X_GL_VERSION_FRAG R"(in highp vec4 vUV;
+in mediump vec4 vColor;
+in highp vec4 vScreen;
 uniform sampler2D uTex, uBackground, uReflection, uRefraction;
 uniform vec4 uFogA;      // start, width, steps, fogged
 uniform vec4 uFogC;      // scale, lod K, lod scale, max lod
@@ -514,8 +518,8 @@ void main()
     if (vScreen.w < 0.0) // layer 1 nearer than its near plane (uGuard)
         discard;
     float textured = uFogColour.w;
-    vec2 screen = vScreen.xy / vScreen.z * 0.5 + 0.5;
-    float depth = vUV.z;
+    highp vec2 screen = vScreen.xy / vScreen.z * 0.5 + 0.5;
+    highp float depth = vUV.z;
     // Textured 5 and 4 sample pictures this renderer drew (y-up in GL) at
     // the draw's PS2 UV (v down the screen): v is turned over.
     if (textured > 4.5) // the last frame shown, at the draw's UV
@@ -540,7 +544,7 @@ void main()
     {
         // TEX0 TCC 0: the mirror's alpha is not read; the vertex alpha (microcode 1) x VU 0x3f3 w.
         // reflectionBegin's ripple: band i of 32 (from the top) shifted by (sin(2 (12 i + t) 24 pi / H) + 1) (6.4 i / H + 0.2) texels.
-        vec2 uv = screen;
+        highp vec2 uv = screen;
         if (uFogC.z > 0.0)
         {
             float band = floor(clamp(1.0 - uv.y, 0.0, 0.999) * 32.0);
@@ -549,7 +553,7 @@ void main()
         oColor = vec4(clamp(texture(uReflection, uv).rgb * uDebug.rgb * vColor.rgb, 0.0, 1.0), clamp(vColor.a * -uDebug.w, 0.0, 1.0));
         return;
     }
-    float lod = uFogC.w > 0.0 ? clamp(log2(max(depth, 1e-3)) * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
+    highp float lod = uFogC.w > 0.0 ? clamp(log2(max(depth, 1e-3)) * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
     vec4 t = textured > 0.5 ? textureLod(uTex, vUV.xy, lod) : vec4(vec3(128.0 / 255.0), 1.0); // untextured: the GS takes the vertex colour as is (255 = white)
     float alpha = clamp(t.a * (textured > 0.5 ? 2.0 : 1.0) * vColor.a, 0.0, 1.0);
     if (alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y)) // the cut-out, the GS alpha test's side (DrawState::alphaTest)
@@ -563,7 +567,7 @@ void main()
     rgb = mix(uFogColour.rgb, rgb, vUV.w / vUV.z);
     if (uFogA.w > 0.5)
     {
-        float f = clamp((depth - uFogA.x) / uFogA.y, 0.0, 1.0);
+        highp float f = clamp((depth - uFogA.x) / uFogA.y, 0.0, 1.0);
         if (uFogA.z > 0.0)
             f = floor(f * uFogA.z) / uFogA.z;
         rgb = mix(rgb, texture(uBackground, screen).rgb, f);
@@ -572,7 +576,6 @@ void main()
 }
 )";
 
-
     // The plain world draws' fragment stage (textured 0 / 1 of kMainFragment,
     // the same arithmetic): only the samplers it reads (vitaGL sets every
     // sampler of a program at each draw). BG: fogged / zFogged draws (the
@@ -580,9 +583,9 @@ void main()
     // variant, for draws whose alpha cannot fall under 0.02). Preceded by
     // "#define BG n" and "#define CUT n" (after the version line).
     const char *kWorldFragment = R"(
-in vec4 vUV;
-in vec4 vColor;
-in vec4 vScreen;
+in highp vec4 vUV;
+in mediump vec4 vColor;
+in highp vec4 vScreen;
 uniform sampler2D uTex;
 #if BG
 uniform sampler2D uBackground;
@@ -597,8 +600,8 @@ out vec4 oColor;
 void main()
 {
     float textured = uFogColour.w;
-    float depth = vUV.z;
-    float lod = uFogC.w > 0.0 ? clamp(log2(max(depth, 1e-3)) * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
+    highp float depth = vUV.z;
+    highp float lod = uFogC.w > 0.0 ? clamp(log2(max(depth, 1e-3)) * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
     vec4 t = textured > 0.5 ? textureLod(uTex, vUV.xy, lod) : vec4(vec3(128.0 / 255.0), 1.0); // untextured: the GS takes the vertex colour as is (255 = white)
     float alpha = clamp(t.a * (textured > 0.5 ? 2.0 : 1.0) * vColor.a, 0.0, 1.0);
 #if CUT
@@ -612,8 +615,8 @@ void main()
 #if BG
     if (uFogA.w > 0.5)
     {
-        vec2 screen = vScreen.xy / vScreen.z * 0.5 + 0.5;
-        float f = clamp((depth - uFogA.x) / uFogA.y, 0.0, 1.0);
+        highp vec2 screen = vScreen.xy / vScreen.z * 0.5 + 0.5;
+        highp float f = clamp((depth - uFogA.x) / uFogA.y, 0.0, 1.0);
         if (uFogA.z > 0.0)
             f = floor(f * uFogA.z) / uFogA.z;
         rgb = mix(rgb, texture(uBackground, screen).rgb, f);
@@ -625,7 +628,7 @@ void main()
 
     // Round 45: the shadow volumes' fragment stage: nothing (the volume only
     // counts in the stencil; its colour is masked and blended away).
-    const char *kVolumeFragment = PS2X_GL_VERSION R"(out vec4 oColor;
+    const char *kVolumeFragment = PS2X_GL_VERSION_FRAG R"(out vec4 oColor;
 void main()
 {
     oColor = vec4(0.0);
@@ -633,10 +636,10 @@ void main()
 )";
 
     // Full-screen passes: a triangle over the screen, uv 0..1 (y up).
-    const char *kQuadVertex = PS2X_GL_VERSION R"(layout(location = 0) in vec2 aPos;
+    const char *kQuadVertex = PS2X_GL_VERSION_VERT R"(layout(location = 0) in vec2 aPos;
 uniform vec4 uQuad; // blur copy: scale, angle, offset (NDC); scale 0: plain
 uniform float uZ;   // the NDC z (SOTC_BLOOM_VITA: the Vita bloom mask's quad at the threshold's depth)
-out vec2 vUV;
+out highp vec2 vUV;
 void main()
 {
     vec2 p = aPos;
@@ -651,7 +654,7 @@ void main()
 }
 )";
 
-    const char *kQuadFragment = PS2X_GL_VERSION R"(in vec2 vUV;
+    const char *kQuadFragment = PS2X_GL_VERSION_FRAG R"(in highp vec2 vUV;
 uniform sampler2D uSrc, uSrc2, uDepth;
 uniform int uMode;
 uniform vec4 uA, uB, uC, uSize;
@@ -2828,7 +2831,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             glGetProgramiv(p, GL_LINK_STATUS, &ok);
             if (!ok)
             {
-                std::cerr << "[native:gl] link failed" << std::endl;
+                char log[4096] = {};
+                GLsizei length = 0;
+                glGetProgramInfoLog(p, sizeof(log), &length, log);
+                std::cerr << "[native:gl] link failed: " << std::string(log, std::min<size_t>(length, sizeof(log))) << std::endl;
                 return 0;
             }
             return p;
@@ -2928,7 +2934,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #if defined(PS2X_NATIVE_VITA)
             return defines + kWorldFragment;
 #else
-            return PS2X_GL_VERSION + defines + kWorldFragment;
+            return PS2X_GL_VERSION_FRAG + defines + kWorldFragment;
 #endif
         }
 
