@@ -185,7 +185,7 @@ Celosia runs natively on the **R36S** and other handhelds powered by the Rockchi
 - **EE Cycle Pacing**: `PS2X_HOST_CLOCK_MAX_LAG=2` bounds clock drift and prevents physical death-spirals on demanding frames.
 - **PortMaster Controls & START Button Fix**: Integrated with PortMaster's `gamecontrollerdb.txt`, ensuring standard controller bindings and preventing the START button from exiting the game back to EmulationStation.
 
-See the complete setup, directory structure, launcher scripts, and build guide in **[docs/r36s.md](docs/r36s.md)**.
+See the complete setup, directory structure, launcher scripts, and build guide in **[docs/r36s.md](docs/r36s.md)** and the next-generation performance architecture in **[docs/modern_optimizations_roadmap.md](docs/modern_optimizations_roadmap.md)**.
 
 ## Decompilation
 
