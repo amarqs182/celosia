@@ -599,6 +599,14 @@ target_include_directories(ps2_runtime PUBLIC
 )
 
 target_link_libraries(ps2_runtime PUBLIC ps2_host_backend ffmpeg ps2_iop)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/meshoptimizer/CMakeLists.txt")
+    set(MESHOPT_BUILD_DEMO OFF CACHE BOOL "" FORCE)
+    set(MESHOPT_BUILD_GLTFPACK OFF CACHE BOOL "" FORCE)
+    set(MESHOPT_INSTALL OFF CACHE BOOL "" FORCE)
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/meshoptimizer" "${CMAKE_CURRENT_BINARY_DIR}/meshoptimizer" EXCLUDE_FROM_ALL)
+    target_link_libraries(ps2_runtime PUBLIC meshoptimizer)
+    target_include_directories(ps2_runtime PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/meshoptimizer/src")
+endif()
 target_link_libraries(ps2EntryRunner
     PRIVATE
     ps2_runtime

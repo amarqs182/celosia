@@ -2578,7 +2578,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             {
                 MeshKind,
                 SkinnedKind,
-                TextureKind
+                TextureKind,
+                IndexedMeshKind
             } kind = MeshKind;
             uint64_t id = 0;
             uint32_t count = 0, width = 0, height = 0, levels = 1;
@@ -2598,6 +2599,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         void applyUploadList(std::vector<Upload> &list); // and empties it
         std::vector<uint8_t> texChain118; // round 118: uploadTexture's swizzled chain (kept between uploads)
         void uploadMesh(uint64_t id, const native_renderer::Vertex *vertices, uint32_t count);
+        void uploadIndexedMesh(uint64_t id, const native_renderer::Vertex *vertices, uint32_t count, const uint32_t *indices, uint32_t indexCount);
         void uploadSkinned(uint64_t id, const native_renderer::SkinVertex *vertices, uint32_t count, const uint32_t *indices, uint32_t indexCount);
         void uploadTexture(uint64_t id, uint32_t width, uint32_t height, const uint8_t *rgba, uint32_t levels);
         // What the last frame drawn cost (the render thread's): read at the next hand-over.
@@ -4330,6 +4332,49 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             px98.pos.erase(id);
     }
 
+    void Renderer::uploadIndexedMesh(uint64_t id, const native_renderer::Vertex *vertices, uint32_t count, const uint32_t *indices, uint32_t indexCount)
+    {
+        Mesh &mesh = meshes[id];
+        forget(mesh);
+        mesh.used = arenaFrame;
+        mesh.dynamic = false;
+        mesh.skinned = false;
+        mesh.indexed = true;
+        if (mesh.pool >= 0)
+        {
+            poolFree(mesh.pool, mesh.first, mesh.count);
+            mesh.pool = -1;
+        }
+        uint8_t minAlpha = 0xFF, maxAlpha = 0;
+        float lo[3] = {INFINITY, INFINITY, INFINITY}, hi[3] = {-INFINITY, -INFINITY, -INFINITY};
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            minAlpha = std::min(minAlpha, vertices[i].a);
+            maxAlpha = std::max(maxAlpha, vertices[i].a);
+            const float v[3] = {vertices[i].x, vertices[i].y, vertices[i].z};
+            for (int a = 0; a < 3; ++a)
+                lo[a] = std::min(lo[a], v[a]), hi[a] = std::max(hi[a], v[a]);
+        }
+        mesh.minAlpha = count ? minAlpha : 0;
+        mesh.maxAlpha = count ? maxAlpha : 0xFF;
+        mesh.box = count && std::isfinite(lo[0] + lo[1] + lo[2] + hi[0] + hi[1] + hi[2]);
+        std::memcpy(mesh.lo, lo, sizeof(lo));
+        std::memcpy(mesh.hi, hi, sizeof(hi));
+        mesh.first = 0;
+        if (!mesh.buffer)
+            glGenBuffers(1, &mesh.buffer);
+        if (!mesh.indexBuffer)
+            glGenBuffers(1, &mesh.indexBuffer);
+        glBindBuffer(GL_ARRAY_BUFFER, mesh.buffer);
+        uploadStream(GL_ARRAY_BUFFER, vertices, count * sizeof(native_renderer::Vertex), GL_STATIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.indexBuffer);
+        uploadStream(GL_ELEMENT_ARRAY_BUFFER, indices, indexCount * sizeof(uint32_t), GL_STATIC_DRAW);
+        mesh.count = indexCount;
+        mesh.bytes = static_cast<uint64_t>(count) * sizeof(native_renderer::Vertex) + static_cast<uint64_t>(indexCount) * sizeof(uint32_t);
+        meshBytes += mesh.bytes;
+        cache.buffer = ~0u;
+    }
+
     // First fit over the pools' free ranges; a new pool when none has room
     // (false: larger than a pool, the mesh gets a buffer of its own).
     bool Renderer::poolAlloc(uint32_t count, int &pool, uint32_t &first)
@@ -5080,6 +5125,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             case Upload::MeshKind:
                 uploadMesh(u.id, reinterpret_cast<const native_renderer::Vertex *>(u.bytes.data()), u.count);
                 break;
+            case Upload::IndexedMeshKind:
+                uploadIndexedMesh(u.id, reinterpret_cast<const native_renderer::Vertex *>(u.bytes.data()), u.count, u.indices.data(),
+                                  static_cast<uint32_t>(u.indices.size()));
+                break;
             case Upload::SkinnedKind:
                 uploadSkinned(u.id, reinterpret_cast<const native_renderer::SkinVertex *>(u.bytes.data()), u.count, u.indices.data(),
                               static_cast<uint32_t>(u.indices.size()));
@@ -5562,6 +5611,18 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 return false;
             if (st.texture && !p.tex)
                 return false;
+            static const bool sortAggressive = []() {
+                const char *e = std::getenv("SOTC_SORT_OPAQUE");
+                return !e || std::atoi(e) != 0;
+            }();
+            if (sortAggressive)
+            {
+                if (st.opacity < 0.95f)
+                    return false;
+                if (st.blend != native_renderer::Blend::Opaque && st.blend != native_renderer::Blend::Normal)
+                    return false;
+                return true;
+            }
             float least = -1.0f; // alpha = texel a x 2 x vertex a / 128 x opacity, at least
             if (p.minAlpha)
             {
@@ -9291,6 +9352,26 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             m_rec.indexArena.count = m_pendingIndexFirst;
         }
         bool canSkin() override { return r->skinProgram != 0; } // set once by init
+        void uploadIndexedMesh(uint64_t id, const native_renderer::Vertex *vertices, uint32_t count, const uint32_t *indices, uint32_t indexCount) override
+        {
+            const auto *from = reinterpret_cast<const uint8_t *>(vertices);
+            Renderer::Upload *u = queue(Renderer::Upload::IndexedMeshKind, id, count, from, count * sizeof(native_renderer::Vertex), indexCount * 4u);
+            if (!u)
+                return;
+            try
+            {
+                u->indices.assign(indices, indices + indexCount);
+            }
+            catch (const std::bad_alloc &)
+            {
+                m_recUploadBytes -= u->bytes.size() + indexCount * 4u;
+                m_rec.uploads.pop_back();
+                ++m_skipped;
+                return;
+            }
+            m_knownMeshes.insert(id);
+            flushIfLarge();
+        }
         void uploadSkinnedMesh(uint64_t id, const native_renderer::SkinVertex *vertices, uint32_t count, const uint32_t *indices, uint32_t indexCount) override
         {
             const auto *from = reinterpret_cast<const uint8_t *>(vertices);

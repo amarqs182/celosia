@@ -1200,6 +1200,7 @@ namespace
         bool hasMesh(uint64_t id) override { return a->hasMesh(id) && b->hasMesh(id); }
         uint64_t meshEvictions() override { return a->meshEvictions() + b->meshEvictions(); }
         void uploadMesh(uint64_t id, const native_renderer::Vertex *v, uint32_t n, bool f) override { a->uploadMesh(id, v, n, f), b->uploadMesh(id, v, n, f); }
+        void uploadIndexedMesh(uint64_t id, const native_renderer::Vertex *v, uint32_t n, const uint32_t *idx, uint32_t in) override { a->uploadIndexedMesh(id, v, n, idx, in), b->uploadIndexedMesh(id, v, n, idx, in); }
         bool hasTexture(uint64_t id) override { return a->hasTexture(id) && b->hasTexture(id); }
         void uploadTexture(uint64_t id, uint32_t w, uint32_t h, const uint8_t *p, uint32_t l) override { a->uploadTexture(id, w, h, p, l), b->uploadTexture(id, w, h, p, l); }
         void beginFrame() override { a->beginFrame(), b->beginFrame(); }
@@ -2493,6 +2494,28 @@ namespace native_renderer
         c.meshUs += nowUs() - start;
         ++c.meshUploads;
         c.meshBytes += static_cast<uint64_t>(count) * sizeof(Vertex);
+    }
+    void uploadIndexedMesh(uint64_t id, const Vertex *vertices, uint32_t count, const uint32_t *indices, uint32_t indexCount)
+    {
+        RaceScope race("uploadIndexedMesh");
+        if (g_uploads.on)
+        {
+            g_uploads.staticMeshes += 1;
+            g_uploads.staticBytes += static_cast<uint64_t>(count) * sizeof(Vertex) + static_cast<uint64_t>(indexCount) * sizeof(uint32_t);
+        }
+        if (!backend())
+            return;
+        if (!tuning().frameTiming())
+        {
+            g_backend->uploadIndexedMesh(id, vertices, count, indices, indexCount);
+            return;
+        }
+        const uint64_t start = nowUs();
+        g_backend->uploadIndexedMesh(id, vertices, count, indices, indexCount);
+        FrameCounters &c = frameCounters();
+        c.meshUs += nowUs() - start;
+        ++c.meshUploads;
+        c.meshBytes += static_cast<uint64_t>(count) * sizeof(Vertex) + static_cast<uint64_t>(indexCount) * sizeof(uint32_t);
     }
     Vertex *frameMesh(uint32_t count)
     {

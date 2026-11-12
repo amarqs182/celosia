@@ -28,6 +28,7 @@
 #include "runtime/native_recorder.h"
 #include "runtime/host_menu.h"
 #include "runtime/native_renderer.h"
+#include "meshoptimizer.h"
 #include "runtime/ps2_diag.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/ps2_gs_psmct32.h"
@@ -538,6 +539,116 @@ namespace sotc_native
                     out.push_back(v);
                 }
             }
+        }
+    }
+
+    inline int meshoptMode()
+    {
+        static const int mode = []() {
+            const char *e = std::getenv("SOTC_MESHOPT");
+            if (!e) return 2; // Default to 2: overdraw-optimized triangle stream into batching pools
+            return std::atoi(e);
+        }();
+        return mode;
+    }
+
+    inline bool optStaticMeshWithMeshopt(
+        const std::vector<native_renderer::Vertex> &in_vertices,
+        std::vector<native_renderer::Vertex> &out_vertices,
+        std::vector<uint32_t> &out_indices)
+    {
+        if (meshoptMode() == 0 || in_vertices.size() < 3 || (in_vertices.size() % 3) != 0)
+            return false;
+
+        const size_t vertex_count = in_vertices.size();
+        std::vector<unsigned int> remap(vertex_count);
+        const size_t unique_verts = meshopt_generateVertexRemap(
+            remap.data(),
+            nullptr,
+            vertex_count,
+            in_vertices.data(),
+            vertex_count,
+            sizeof(native_renderer::Vertex)
+        );
+
+        if (unique_verts == 0 || unique_verts > vertex_count)
+            return false;
+
+        out_vertices.resize(unique_verts);
+        out_indices.resize(vertex_count);
+
+        meshopt_remapVertexBuffer(
+            out_vertices.data(),
+            in_vertices.data(),
+            vertex_count,
+            sizeof(native_renderer::Vertex),
+            remap.data()
+        );
+
+        meshopt_remapIndexBuffer(
+            out_indices.data(),
+            nullptr,
+            vertex_count,
+            remap.data()
+        );
+
+        meshopt_optimizeVertexCache(
+            out_indices.data(),
+            out_indices.data(),
+            vertex_count,
+            unique_verts
+        );
+
+        meshopt_optimizeOverdraw(
+            out_indices.data(),
+            out_indices.data(),
+            vertex_count,
+            &out_vertices[0].x,
+            unique_verts,
+            sizeof(native_renderer::Vertex),
+            1.05f
+        );
+
+        meshopt_optimizeVertexFetch(
+            out_vertices.data(),
+            out_indices.data(),
+            vertex_count,
+            out_vertices.data(),
+            unique_verts,
+            sizeof(native_renderer::Vertex)
+        );
+
+        return true;
+    }
+
+    inline void uploadOptimizedStaticMesh(uint64_t id, const std::vector<native_renderer::Vertex> &verts)
+    {
+        const int mode = meshoptMode();
+        if (mode == 0)
+        {
+            native_renderer::uploadMesh(id, verts.data(), static_cast<uint32_t>(verts.size()));
+            return;
+        }
+        std::vector<native_renderer::Vertex> opt_verts;
+        std::vector<uint32_t> opt_indices;
+        if (optStaticMeshWithMeshopt(verts, opt_verts, opt_indices))
+        {
+            if (mode == 1)
+            {
+                native_renderer::uploadIndexedMesh(id, opt_verts.data(), static_cast<uint32_t>(opt_verts.size()),
+                                                   opt_indices.data(), static_cast<uint32_t>(opt_indices.size()));
+            }
+            else // mode 2: overdraw-optimized triangle stream into batching pools
+            {
+                std::vector<native_renderer::Vertex> reordered(opt_indices.size());
+                for (size_t i = 0; i < opt_indices.size(); ++i)
+                    reordered[i] = opt_verts[opt_indices[i]];
+                native_renderer::uploadMesh(id, reordered.data(), static_cast<uint32_t>(reordered.size()));
+            }
+        }
+        else
+        {
+            native_renderer::uploadMesh(id, verts.data(), static_cast<uint32_t>(verts.size()));
         }
     }
 
@@ -9473,6 +9584,9 @@ namespace sotc_native
         uint64_t id = 0;
         bool twoPasses = false, ok = false, isSkinned = false, isLit = false;
         std::vector<native_renderer::Vertex> vertices, second;
+        std::vector<native_renderer::Vertex> opt_verts, opt_second_verts;
+        std::vector<uint32_t> opt_indices, opt_second_indices;
+        bool indexed = false, indexed_second = false;
         SkinnedPacket packet;
         void work() override
         {
@@ -9496,8 +9610,43 @@ namespace sotc_native
                         o.nz = v.nz;
                     };
                     triangulate(strips, place, vertices);
+                    const int mode = meshoptMode();
+                    if (mode == 1)
+                    {
+                        indexed = optStaticMeshWithMeshopt(vertices, opt_verts, opt_indices);
+                    }
+                    else if (mode == 2)
+                    {
+                        if (optStaticMeshWithMeshopt(vertices, opt_verts, opt_indices))
+                        {
+                            std::vector<native_renderer::Vertex> reordered(opt_indices.size());
+                            for (size_t i = 0; i < opt_indices.size(); ++i)
+                                reordered[i] = opt_verts[opt_indices[i]];
+                            vertices = std::move(reordered);
+                            opt_verts.clear();
+                            opt_indices.clear();
+                        }
+                    }
                     if (twoPasses) // two textures: the second pass's mesh, with the second coordinates
+                    {
                         triangulate(strips, place, second, true);
+                        if (mode == 1)
+                        {
+                            indexed_second = optStaticMeshWithMeshopt(second, opt_second_verts, opt_second_indices);
+                        }
+                        else if (mode == 2)
+                        {
+                            if (optStaticMeshWithMeshopt(second, opt_second_verts, opt_second_indices))
+                            {
+                                std::vector<native_renderer::Vertex> reordered(opt_second_indices.size());
+                                for (size_t i = 0; i < opt_second_indices.size(); ++i)
+                                    reordered[i] = opt_second_verts[opt_second_indices[i]];
+                                second = std::move(reordered);
+                                opt_second_verts.clear();
+                                opt_second_indices.clear();
+                            }
+                        }
+                    }
                 }
                 ok = true;
             }
@@ -9523,9 +9672,19 @@ namespace sotc_native
                 }
                 return;
             }
-            native_renderer::uploadMesh(id, vertices.data(), static_cast<uint32_t>(vertices.size()));
+            if (indexed)
+                native_renderer::uploadIndexedMesh(id, opt_verts.data(), static_cast<uint32_t>(opt_verts.size()),
+                                                   opt_indices.data(), static_cast<uint32_t>(opt_indices.size()));
+            else
+                native_renderer::uploadMesh(id, vertices.data(), static_cast<uint32_t>(vertices.size()));
             if (twoPasses)
-                native_renderer::uploadMesh(id ^ (1ull << 61), second.data(), static_cast<uint32_t>(second.size()));
+            {
+                if (indexed_second)
+                    native_renderer::uploadIndexedMesh(id ^ (1ull << 61), opt_second_verts.data(), static_cast<uint32_t>(opt_second_verts.size()),
+                                                       opt_second_indices.data(), static_cast<uint32_t>(opt_second_indices.size()));
+                else
+                    native_renderer::uploadMesh(id ^ (1ull << 61), second.data(), static_cast<uint32_t>(second.size()));
+            }
         }
     };
     bool buildPacketAsync(uint64_t id, uint32_t data, uint32_t size, bool twoPasses)
@@ -11341,12 +11500,12 @@ namespace sotc_native
                         o.nz = v.nz;
                     };
                     triangulate(strips, place, vertices);
-                    native_renderer::uploadMesh(id, vertices.data(), static_cast<uint32_t>(vertices.size()));
+                    uploadOptimizedStaticMesh(id, vertices);
                     if (twoPasses) // two textures: the second pass's mesh, with the second coordinates
                     {
                         vertices.clear();
                         triangulate(strips, place, vertices, true);
-                        native_renderer::uploadMesh(id ^ (1ull << 61), vertices.data(), static_cast<uint32_t>(vertices.size()));
+                        uploadOptimizedStaticMesh(id ^ (1ull << 61), vertices);
                     }
                 }
                 if (here)
