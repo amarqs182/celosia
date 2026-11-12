@@ -154,6 +154,7 @@ namespace native_renderer
     // perFrame: made again every frame (skinned, 2D, particles...): kept only
     // for this frame (one shared buffer per frame on GL).
     void uploadMesh(uint64_t id, const Vertex *vertices, uint32_t count, bool perFrame = false);
+    void uploadIndexedMesh(uint64_t id, const Vertex *vertices, uint32_t count, const uint32_t *indices, uint32_t indexCount);
     // A per-frame mesh written in place (no copy): room for `count` vertices,
     // then commitFrameMesh(id, n) keeps the first n as uploadMesh(id, ...,
     // n, true) would. The room is valid until that commit; no other renderer

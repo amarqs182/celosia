@@ -19,6 +19,12 @@ namespace native_renderer::detail
         // Meshes let go so far (native_renderer::meshEvictions); none by default.
         virtual uint64_t meshEvictions() { return 0; }
         virtual void uploadMesh(uint64_t id, const Vertex *vertices, uint32_t count, bool perFrame) = 0;
+        virtual void uploadIndexedMesh(uint64_t id, const Vertex *vertices, uint32_t count, const uint32_t *indices, uint32_t indexCount)
+        {
+            (void)indices;
+            (void)indexCount;
+            uploadMesh(id, vertices, count, false);
+        }
         // native_renderer::frameMesh: by default a scratch buffer handed to
         // uploadMesh at the commit (the GL backend writes into its frame arena).
         virtual Vertex *frameMesh(uint32_t count)

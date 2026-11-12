@@ -28,6 +28,7 @@ imgui.ini
 # Local scratch
 /dumps/
 /recomp/
+/scratch/
 /fantaskink-SOTC/
 __pycache__/
 .DS_Store

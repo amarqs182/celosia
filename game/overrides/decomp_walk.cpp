@@ -1032,7 +1032,7 @@ namespace decomp_walk
         }
         else
             f1 = 0.0f;
-        if (sacMinProjectedSize() > 0.0f && f1 > 10.0f)
+        if (m.s32(a0 + 0x28u) != 0 && sacMinProjectedSize() > 0.0f && f1 > 10.0f)
         {
             const float r = m.f32(sp + 0x1Cu);
             if (r > 0.0f && (r / f1) < sacMinProjectedSize())
@@ -1070,27 +1070,15 @@ namespace decomp_walk
                 none = true;
             else
             {
-                float tFar = 0.0f;
-                if (count >= 3 && m.f32(a0 + 0x20u) > 0.0f) tFar = m.f32(a0 + 0x20u);
-                else if (count >= 2 && m.f32(a0 + 0x1Cu) > 0.0f) tFar = m.f32(a0 + 0x1Cu);
-                else if (count >= 1 && m.f32(a0 + 0x18u) > 0.0f) tFar = m.f32(a0 + 0x18u);
-                const float effectiveFar = (tFar > 0.0f) ? (tFar * sacFarTerrainScale()) : (350.0f * sacFarTerrainScale());
-                if (sacFarTerrainScale() > 0.0f && f1 > effectiveFar)
+                if (last < 0)
                 {
-                    none = true;
+                    const uint32_t half = static_cast<uint32_t>(last) >> 1;
+                    f12 = FPU_CVT_S_W(static_cast<int32_t>((static_cast<uint32_t>(last) & 1u) | half));
+                    f12 = FPU_ADD_S(f12, f12);
                 }
                 else
-                {
-                    if (last < 0)
-                    {
-                        const uint32_t half = static_cast<uint32_t>(last) >> 1;
-                        f12 = FPU_CVT_S_W(static_cast<int32_t>((static_cast<uint32_t>(last) & 1u) | half));
-                        f12 = FPU_ADD_S(f12, f12);
-                    }
-                    else
-                        f12 = FPU_CVT_S_W(last);
-                    v0 = static_cast<uint64_t>(static_cast<int64_t>(m.s32(s1 + 0xCu)));
-                }
+                    f12 = FPU_CVT_S_W(last);
+                v0 = static_cast<uint64_t>(static_cast<int64_t>(m.s32(s1 + 0xCu)));
             }
         }
         if (!none)
@@ -1420,18 +1408,8 @@ namespace decomp_walk
                 if (static_cast<uint64_t>(static_cast<int64_t>(lv)) < static_cast<uint64_t>(static_cast<int64_t>(count)))
                     f20 = f12;
                 else
-                {
-                    float tFar = 0.0f;
-                    if (count >= 3 && hf(lod, 0x20u) > 0.0f) tFar = hf(lod, 0x20u);
-                    else if (count >= 2 && hf(lod, 0x1Cu) > 0.0f) tFar = hf(lod, 0x1Cu);
-                    else if (count >= 1 && hf(lod, 0x18u) > 0.0f) tFar = hf(lod, 0x18u);
-                    const float effectiveFar = (tFar > 0.0f) ? (tFar * sacFarTerrainScale()) : (350.0f * sacFarTerrainScale());
-                    if (keepsLast && sacFarTerrainScale() > 0.0f && d > effectiveFar)
-                        f20 = -1.0f;
-                    else
-                        f20 = keepsLast ? static_cast<float>(count - 1) : -1.0f;
-                }
-                if (sacMinProjectedSize() > 0.0f && d > 10.0f && rr > 0.0f && (rr / d) < sacMinProjectedSize())
+                    f20 = keepsLast ? static_cast<float>(count - 1) : -1.0f;
+                if (!keepsLast && sacMinProjectedSize() > 0.0f && d > 10.0f && rr > 0.0f && (rr / d) < sacMinProjectedSize())
                     f20 = -1.0f;
                 if (f20 < 0.0f)
                     level = -1.0f;
@@ -1643,18 +1621,8 @@ namespace decomp_walk
                 if (static_cast<uint64_t>(static_cast<int64_t>(lv)) < static_cast<uint64_t>(static_cast<int64_t>(count)))
                     f20 = f12;
                 else
-                {
-                    float tFar = 0.0f;
-                    if (count >= 3 && hf(lod, 0x20u) > 0.0f) tFar = hf(lod, 0x20u);
-                    else if (count >= 2 && hf(lod, 0x1Cu) > 0.0f) tFar = hf(lod, 0x1Cu);
-                    else if (count >= 1 && hf(lod, 0x18u) > 0.0f) tFar = hf(lod, 0x18u);
-                    const float effectiveFar = (tFar > 0.0f) ? (tFar * sacFarTerrainScale()) : (350.0f * sacFarTerrainScale());
-                    if (keepsLast && sacFarTerrainScale() > 0.0f && d > effectiveFar)
-                        f20 = -1.0f;
-                    else
-                        f20 = keepsLast ? static_cast<float>(count - 1) : -1.0f;
-                }
-                if (sacMinProjectedSize() > 0.0f && d > 10.0f && rr > 0.0f && (rr / d) < sacMinProjectedSize())
+                    f20 = keepsLast ? static_cast<float>(count - 1) : -1.0f;
+                if (!keepsLast && sacMinProjectedSize() > 0.0f && d > 10.0f && rr > 0.0f && (rr / d) < sacMinProjectedSize())
                     f20 = -1.0f;
                 if (f20 < 0.0f)
                     level = -1.0f;
