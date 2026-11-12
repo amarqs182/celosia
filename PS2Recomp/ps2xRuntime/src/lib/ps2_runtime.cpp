@@ -3030,6 +3030,164 @@ void PS2Runtime::HandleIntegerOverflow(R5900Context *ctx)
     raiseCop0Exception(ctx, EXCEPTION_INTEGER_OVERFLOW);
 }
 
+#if defined(__linux__) || defined(PLATFORM_LINUX)
+namespace
+{
+    struct SystemTelemetry
+    {
+        float cpuTotal = 0.0f;
+        float cpuCores[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        int gpuLoad = 0;
+        int gpuFreqMhz = 0;
+        int ramUsedMb = 0;
+        int ramTotalMb = 0;
+        int zramUsedKb = 0;
+        int zramTotalMb = 0;
+        int ioReadKbSec = 0;
+        int ioWriteKbSec = 0;
+    };
+
+    struct CpuSample {
+        uint64_t idle = 0;
+        uint64_t total = 0;
+    };
+
+    static CpuSample s_lastCpuTotal;
+    static CpuSample s_lastCpuCore[4];
+    static uint64_t s_lastDiskReadSec = 0;
+    static uint64_t s_lastDiskWriteSec = 0;
+    static double s_lastSampleTime = 0.0;
+    static SystemTelemetry s_telemetryCache;
+
+    void updateSystemTelemetry(double now)
+    {
+        double dt = (s_lastSampleTime > 0.0) ? (now - s_lastSampleTime) : 1.0;
+        if (dt < 0.1) dt = 1.0;
+        s_lastSampleTime = now;
+
+        // 1. CPU from /proc/stat
+        if (FILE *f = std::fopen("/proc/stat", "r"))
+        {
+            char line[256];
+            while (std::fgets(line, sizeof(line), f))
+            {
+                if (std::strncmp(line, "cpu", 3) == 0)
+                {
+                    uint64_t u=0, n=0, s=0, id=0, io=0, irq=0, sirq=0, st=0;
+                    if (line[3] == ' ')
+                    {
+                        std::sscanf(line + 4, "%llu %llu %llu %llu %llu %llu %llu %llu",
+                                    &u, &n, &s, &id, &io, &irq, &sirq, &st);
+                        uint64_t idle = id + io;
+                        uint64_t total = u + n + s + id + io + irq + sirq + st;
+                        uint64_t dIdle = idle - s_lastCpuTotal.idle;
+                        uint64_t dTot = total - s_lastCpuTotal.total;
+                        s_lastCpuTotal = {idle, total};
+                        s_telemetryCache.cpuTotal = (dTot > 0) ? (100.0f * (1.0f - (float)dIdle / (float)dTot)) : 0.0f;
+                    }
+                    else if (line[3] >= '0' && line[3] <= '3')
+                    {
+                        int c = line[3] - '0';
+                        std::sscanf(line + 5, "%llu %llu %llu %llu %llu %llu %llu %llu",
+                                    &u, &n, &s, &id, &io, &irq, &sirq, &st);
+                        uint64_t idle = id + io;
+                        uint64_t total = u + n + s + id + io + irq + sirq + st;
+                        uint64_t dIdle = idle - s_lastCpuCore[c].idle;
+                        uint64_t dTot = total - s_lastCpuCore[c].total;
+                        s_lastCpuCore[c] = {idle, total};
+                        s_telemetryCache.cpuCores[c] = (dTot > 0) ? (100.0f * (1.0f - (float)dIdle / (float)dTot)) : 0.0f;
+                    }
+                }
+            }
+            std::fclose(f);
+        }
+
+        // 2. GPU from /sys/class/devfreq
+        if (FILE *f = std::fopen("/sys/class/devfreq/ff400000.gpu/load", "r"))
+        {
+            int load = 0, freq = 0;
+            if (std::fscanf(f, "%d@%dHz", &load, &freq) == 2)
+            {
+                s_telemetryCache.gpuLoad = load;
+                s_telemetryCache.gpuFreqMhz = freq / 1000000;
+            }
+            std::fclose(f);
+        }
+        else if (FILE *f = std::fopen("/sys/class/devfreq/ff400000.gpu/cur_freq", "r"))
+        {
+            int freq = 0;
+            if (std::fscanf(f, "%d", &freq) == 1)
+                s_telemetryCache.gpuFreqMhz = freq / 1000000;
+            std::fclose(f);
+        }
+
+        // 3. RAM from /proc/meminfo
+        if (FILE *f = std::fopen("/proc/meminfo", "r"))
+        {
+            char key[64];
+            long val = 0;
+            long totalKb = 0, availKb = 0;
+            while (std::fscanf(f, "%63s %ld kB", key, &val) == 2)
+            {
+                if (std::strcmp(key, "MemTotal:") == 0) totalKb = val;
+                else if (std::strcmp(key, "MemAvailable:") == 0) availKb = val;
+            }
+            std::fclose(f);
+            s_telemetryCache.ramTotalMb = totalKb / 1024;
+            s_telemetryCache.ramUsedMb = (totalKb - availKb) / 1024;
+        }
+
+        // 4. ZRAM from /sys/block/zram0
+        if (FILE *f = std::fopen("/sys/block/zram0/mm_stat", "r"))
+        {
+            uint64_t orig = 0, comp = 0, memTotal = 0;
+            if (std::fscanf(f, "%llu %llu %llu", &orig, &comp, &memTotal) >= 3)
+                s_telemetryCache.zramUsedKb = memTotal / 1024;
+            std::fclose(f);
+        }
+        if (FILE *f = std::fopen("/sys/block/zram0/disksize", "r"))
+        {
+            uint64_t diskSize = 0;
+            if (std::fscanf(f, "%llu", &diskSize) == 1)
+                s_telemetryCache.zramTotalMb = diskSize / (1024 * 1024);
+            std::fclose(f);
+        }
+
+        // 5. I/O from /proc/diskstats
+        if (FILE *f = std::fopen("/proc/diskstats", "r"))
+        {
+            char line[256];
+            while (std::fgets(line, sizeof(line), f))
+            {
+                if (std::strstr(line, "mmcblk0 "))
+                {
+                    int major = 0, minor = 0;
+                    char dev[32];
+                    uint64_t r_ios = 0, r_merges = 0, r_sec = 0, r_ticks = 0;
+                    uint64_t w_ios = 0, w_merges = 0, w_sec = 0, w_ticks = 0;
+                    if (std::sscanf(line, "%d %d %31s %llu %llu %llu %llu %llu %llu %llu %llu",
+                                    &major, &minor, dev, &r_ios, &r_merges, &r_sec, &r_ticks,
+                                    &w_ios, &w_merges, &w_sec, &w_ticks) >= 11)
+                    {
+                        if (s_lastDiskReadSec > 0)
+                        {
+                            uint64_t dR = (r_sec >= s_lastDiskReadSec) ? (r_sec - s_lastDiskReadSec) : 0;
+                            uint64_t dW = (w_sec >= s_lastDiskWriteSec) ? (w_sec - s_lastDiskWriteSec) : 0;
+                            s_telemetryCache.ioReadKbSec = static_cast<int>(dR * 512.0 / 1024.0 / dt);
+                            s_telemetryCache.ioWriteKbSec = static_cast<int>(dW * 512.0 / 1024.0 / dt);
+                        }
+                        s_lastDiskReadSec = r_sec;
+                        s_lastDiskWriteSec = w_sec;
+                    }
+                    break;
+                }
+            }
+            std::fclose(f);
+        }
+    }
+}
+#endif
+
 void PS2Runtime::run()
 {
     m_stopRequested.store(false, std::memory_order_relaxed);
@@ -3110,7 +3268,7 @@ void PS2Runtime::run()
             }
             if (hostmenu::settings().showFps.load(std::memory_order_relaxed))
             {
-                // FPS overlay: game frames = display lists sent to VIF1 per second.
+                // Enhanced Telemetry Overlay: game/host FPS, draws, CPU, GPU, RAM, ZRAM, I/O
                 static double windowStart = GetTime();
                 static uint64_t lastChains = 0;
                 static int gameFps = 0;
@@ -3121,10 +3279,51 @@ void PS2Runtime::run()
                     gameFps = static_cast<int>((chains - lastChains) / (now - windowStart) + 0.5);
                     lastChains = chains;
                     windowStart = now;
+#if defined(__linux__) || defined(PLATFORM_LINUX)
+                    updateSystemTelemetry(now);
+#endif
                 }
-                const std::string fpsText = "game " + std::to_string(gameFps) + " fps | host " + std::to_string(GetFPS()) + " fps";
-                DrawRectangle(8, GetScreenHeight() - 30, MeasureText(fpsText.c_str(), 20) + 12, 26, Color{0, 0, 0, 160});
-                DrawText(fpsText.c_str(), 14, GetScreenHeight() - 27, 20, Color{120, 255, 120, 255});
+
+                native_renderer::PerfStats perf{};
+                native_renderer::perfSnapshot(perf);
+
+                char l1[160];
+                if (perf.draws > 0)
+                {
+                    std::snprintf(l1, sizeof(l1), "game %d fps | host %d fps | draws %.0f | %.1f ms",
+                                  gameFps, GetFPS(), perf.draws, perf.frameMs);
+                }
+                else
+                {
+                    std::snprintf(l1, sizeof(l1), "game %d fps | host %d fps", gameFps, GetFPS());
+                }
+
+#if defined(__linux__) || defined(PLATFORM_LINUX)
+                char l2[200];
+                std::snprintf(l2, sizeof(l2), "CPU %d%% (C0:%d C1:%d C2:%d C3:%d) | GPU %d%% %dM | RAM %d/%dM | ZRAM %dM | IO R:%dK W:%dK",
+                              (int)(s_telemetryCache.cpuTotal + 0.5f),
+                              (int)(s_telemetryCache.cpuCores[0] + 0.5f), (int)(s_telemetryCache.cpuCores[1] + 0.5f),
+                              (int)(s_telemetryCache.cpuCores[2] + 0.5f), (int)(s_telemetryCache.cpuCores[3] + 0.5f),
+                              s_telemetryCache.gpuLoad, s_telemetryCache.gpuFreqMhz,
+                              s_telemetryCache.ramUsedMb, s_telemetryCache.ramTotalMb,
+                              s_telemetryCache.zramUsedKb > 1024 ? s_telemetryCache.zramUsedKb / 1024 : 0,
+                              s_telemetryCache.ioReadKbSec, s_telemetryCache.ioWriteKbSec);
+
+                const int fontSize = 13;
+                const int boxW = std::max(MeasureText(l1, fontSize), MeasureText(l2, fontSize)) + 14;
+                const int boxH = 34;
+                const int boxY = GetScreenHeight() - boxH - 4;
+                DrawRectangle(6, boxY, boxW, boxH, Color{0, 0, 0, 175});
+                DrawText(l1, 12, boxY + 3, fontSize, Color{120, 255, 120, 255});
+                DrawText(l2, 12, boxY + 18, fontSize, Color{180, 225, 255, 255});
+#else
+                const int fontSize = 16;
+                const int boxW = MeasureText(l1, fontSize) + 14;
+                const int boxH = 26;
+                const int boxY = GetScreenHeight() - boxH - 4;
+                DrawRectangle(6, boxY, boxW, boxH, Color{0, 0, 0, 160});
+                DrawText(l1, 12, boxY + 4, fontSize, Color{120, 255, 120, 255});
+#endif
             }
             if (m_debugUiInitialized && m_debugUiDrawCallback)
             {
