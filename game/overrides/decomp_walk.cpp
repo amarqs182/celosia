@@ -801,6 +801,26 @@ namespace decomp_walk
         return v0;
     }
 
+    inline float sacLodScale()
+    {
+        static const float s = []() {
+            if (const char *e = std::getenv("SOTC_SAC_LOD_SCALE"))
+                return std::max(1.0f, std::strtof(e, nullptr));
+            return 1.6f;
+        }();
+        return s;
+    }
+
+    inline float sacDrawDistScale()
+    {
+        static const float s = []() {
+            if (const char *e = std::getenv("SOTC_SAC_DRAWDIST_SCALE"))
+                return std::max(1.0f, std::strtof(e, nullptr));
+            return 1.5f;
+        }();
+        return s;
+    }
+
     // modelClipSolid's level by distance (0x1098a14..0x1098b48): the LOD
     // record's thresholds of levels 1..3 (+0x18 / +0x1c / +0x20) against
     // the distance, then with the hysteresis +0x24 around the current level:
@@ -996,13 +1016,13 @@ namespace decomp_walk
         // level past their range (+0x28 clear: nothing vanishes sooner,
         // terrain included; it is drawn coarser).
         if (native_renderer::tuning().sacLod && m.s32(a0 + 0x28u) == 0)
-            f1 = f1 * 1.6f;
+            f1 = f1 * sacLodScale();
         // Round 65, "Shorter draw distance" (Tuning::sacDrawDist): for the
         // records that drop the model past their last level (+0x28 set:
         // never terrain, whose records keep their last level) the level is
         // picked as if 1.5x as far, so the model goes at 2/3 of its range.
         if (native_renderer::tuning().sacDrawDist && m.s32(a0 + 0x28u) != 0)
-            f1 = f1 * 1.5f;
+            f1 = f1 * sacDrawDistScale();
         float f12 = lodByDistance(m, a0, f1, static_cast<int32_t>(static_cast<int64_t>(m.u64(s2 + 0x250u) << 21) >> 61));
         uint64_t v0;
         float f20 = -1.0f;
@@ -1345,9 +1365,9 @@ namespace decomp_walk
                 }
                 const bool keepsLast = static_cast<int32_t>(hu(lod, 0x28u)) == 0;
                 if (native_renderer::tuning().sacLod && keepsLast)
-                    d *= 1.6f;
+                    d *= sacLodScale();
                 if (native_renderer::tuning().sacDrawDist && !keepsLast)
-                    d *= 1.5f;
+                    d *= sacDrawDistScale();
                 uint64_t w250;
                 std::memcpy(&w250, gp + 0x250u, 8);
                 const Ram m{rdram};
@@ -1558,9 +1578,9 @@ namespace decomp_walk
                 }
                 const bool keepsLast = static_cast<int32_t>(hu(lod, 0x28u)) == 0;
                 if (native_renderer::tuning().sacLod && keepsLast)
-                    d *= 1.6f;
+                    d *= sacLodScale();
                 if (native_renderer::tuning().sacDrawDist && !keepsLast)
-                    d *= 1.5f;
+                    d *= sacDrawDistScale();
                 const Ram m{const_cast<uint8_t *>(rdram)};
                 float f12 = lodByDistance(m, hu(hd, 8u), d, static_cast<int32_t>(static_cast<int64_t>(w250 << 21) >> 61));
                 const int32_t lv = static_cast<int32_t>(f12);
