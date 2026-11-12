@@ -716,6 +716,16 @@ namespace coll125
             p = setXyz(a, PS2_VADD(acc, PS2_VMUL(b, lane<3>(oneMinus))));
         }
         {
+#if defined(__aarch64__)
+            const float32x4_t es_v = vreinterpretq_f32_m128(e.s);
+            const float32x4_t p_v = vreinterpretq_f32_m128(p);
+            const float32x4_t dv = vsubq_f32(es_v, p_v);
+            const float32x4_t dv2 = vmulq_f32(dv, dv);
+            const float dist2 = vgetq_lane_f32(dv2, 0) + vgetq_lane_f32(dv2, 1) + vgetq_lane_f32(dv2, 2);
+            const float r2 = vgetq_lane_f32(es_v, 3);
+            if (dist2 > r2)
+                return 0;
+#else
             __m128 dv = PS2_VSUB(e.s, p);
             dv = setXyz(dv, PS2_VMUL(dv, dv));
             dv = setLane0(dv, PS2_VADD(dv, lane<1>(dv)));
@@ -724,6 +734,7 @@ namespace coll125
             std::memcpy(&r2, reinterpret_cast<const float *>(&e.s) + 3, 4);
             if (FPU_C_OLT_S(r2, dist2))
                 return 0;
+#endif
         }
         // u / v: the triangle's terms made once (triangleTerms), the crossing's side here, as ClipCollisionDB
         const __m128 vf0c = vu::clamp(vf0);
