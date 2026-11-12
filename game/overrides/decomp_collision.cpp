@@ -97,6 +97,13 @@ namespace decomp_collision
             g_stats.name.fetch_add(1, std::memory_order_relaxed); \
     } while (0)
 
+    inline float fastDiv(uint32_t &fcr31, float num, float den)
+    {
+        if (__builtin_expect(den != 0.0f, 1))
+            return num / den;
+        return ps2FpuDivide(fcr31, num, den);
+    }
+
     // Filters run as guest code (SOTC_COLLISION_STATS): address, count.
     std::atomic<uint32_t> g_guestFilterAt[8];
     std::atomic<uint64_t> g_guestFilterRuns[8];
@@ -1109,7 +1116,7 @@ namespace decomp_collision
             g.put(sp, g.q(a1));
         else
         {
-            const float t = ps2FpuDivide(ctx->fcr31, d1, span);
+            const float t = fastDiv(ctx->fcr31, d1, span);
             g.f0(t);
             const __m128 vt = _mm_set1_ps(t);
             const __m128 p0 = g.q(a1), p1 = g.q(a2);
@@ -1166,9 +1173,9 @@ namespace decomp_collision
             return x(vu::addN(acc, lane<2>(prod)));
         };
         __m128 c2 = crossN(nrm, e2);
-        const float u = ps2FpuDivide(ctx->fcr31, dot(c2, w), dot(c2, e1));
+        const float u = fastDiv(ctx->fcr31, dot(c2, w), dot(c2, e1));
         __m128 c1 = crossN(nrm, e1);
-        const float v = ps2FpuDivide(ctx->fcr31, dot(c1, w), dot(c1, e2));
+        const float v = fastDiv(ctx->fcr31, dot(c1, w), dot(c1, e2));
         uint32_t ub, vb;
         std::memcpy(&ub, &u, 4);
         std::memcpy(&vb, &v, 4);
@@ -1960,6 +1967,18 @@ namespace decomp_collision
     uint64_t nodeOld(const G g, const Seg &s, uint32_t a1, uint32_t a2, uint32_t t0, uint32_t spIn);
     sotc_decomp::NativeCount g_countLow("collisionLow"), g_countHigh("collisionHigh"), g_countNode("collisionNode");
 
+#if defined(__aarch64__) || defined(__ARM_NEON)
+    // r.xyz = a.xyz * t + b.xyz * (1 - t); r.w = a.w (single-cycle NEON FMA)
+    inline __m128 lerp(const G g, __m128 a, __m128 b, float t)
+    {
+        float32x4_t va = a;
+        float32x4_t vb = b;
+        float32x4_t vt = vdupq_n_f32(t);
+        float32x4_t v1mt = vdupq_n_f32(1.0f - t);
+        float32x4_t vr = vmlaq_f32(vmulq_f32(vb, v1mt), va, vt);
+        return vsetq_lane_f32(vgetq_lane_f32(va, 3), vr, 3);
+    }
+#else
     // vmulax.xyz ACC = a * t; vmaddw.xyz a = ACC + b * (1 - t): w stays a's.
     inline __m128 lerp(const G g, __m128 a, __m128 b, float t)
     {
@@ -1969,6 +1988,7 @@ namespace decomp_collision
         const __m128 r = PS2_VADD(acc, PS2_VMUL(b, lane<3>(vf8)));
         return _mm_blendv_ps(a, r, _mm_castsi128_ps(_mm_set_epi32(0, -1, -1, -1)));
     }
+#endif
 
     // 0x112c498: the low side of the node at t0 (coordinates <= split x scale).
     uint64_t lowOld(const G g, const Seg &s, uint32_t a1, uint32_t a2, uint32_t t0, uint32_t spIn)
@@ -1997,7 +2017,7 @@ namespace decomp_collision
         {
             const float f2 = FPU_SUB_S(f0, f1);
             f0 = FPU_SUB_S(split, f1);
-            f0 = ps2FpuDivide(g.ctx->fcr31, f0, f2);
+            f0 = fastDiv(g.ctx->fcr31, f0, f2);
             f0 = FPU_ADD_S(f0, zero);
             g.f0(f0);
             g.put(sp, lerp(g, g.q(a2), g.q(a1), f0));
@@ -2005,7 +2025,7 @@ namespace decomp_collision
         }
         const float f2 = FPU_SUB_S(f1, f0);
         f0 = FPU_SUB_S(split, f0);
-        f0 = ps2FpuDivide(g.ctx->fcr31, f0, f2);
+        f0 = fastDiv(g.ctx->fcr31, f0, f2);
         f0 = FPU_ADD_S(f0, zero);
         g.f0(f0);
         g.put(sp + 0x10u, lerp(g, g.q(a1), g.q(a2), f0));
@@ -2038,7 +2058,7 @@ namespace decomp_collision
         {
             const float f2 = FPU_SUB_S(f1, f0);
             f0 = FPU_SUB_S(split, f0);
-            f0 = ps2FpuDivide(g.ctx->fcr31, f0, f2);
+            f0 = fastDiv(g.ctx->fcr31, f0, f2);
             f0 = FPU_SUB_S(f0, zero);
             g.f0(f0);
             g.put(sp, lerp(g, g.q(a1), g.q(a2), f0));
@@ -2046,7 +2066,7 @@ namespace decomp_collision
         }
         const float f2 = FPU_SUB_S(f0, f1);
         f0 = FPU_SUB_S(split, f1);
-        f0 = ps2FpuDivide(g.ctx->fcr31, f0, f2);
+        f0 = fastDiv(g.ctx->fcr31, f0, f2);
         f0 = FPU_SUB_S(f0, zero);
         g.f0(f0);
         g.put(sp + 0x10u, lerp(g, g.q(a2), g.q(a1), f0));
@@ -2158,7 +2178,7 @@ namespace decomp_collision
         {
             const float f2 = FPU_SUB_S(f0, f1);
             f0 = FPU_SUB_S(split, f1);
-            f0 = ps2FpuDivide(g.ctx->fcr31, f0, f2);
+            f0 = fastDiv(g.ctx->fcr31, f0, f2);
             f0 = FPU_ADD_S(f0, zero);
             g.f0(f0);
             g.put(sp, lerp(g, g.q(a2), g.q(a1), f0));
@@ -2166,7 +2186,7 @@ namespace decomp_collision
         }
         const float f2 = FPU_SUB_S(f1, f0);
         f0 = FPU_SUB_S(split, f0);
-        f0 = ps2FpuDivide(g.ctx->fcr31, f0, f2);
+        f0 = fastDiv(g.ctx->fcr31, f0, f2);
         f0 = FPU_ADD_S(f0, zero);
         g.f0(f0);
         g.put(sp + 0x10u, lerp(g, g.q(a1), g.q(a2), f0));
@@ -2198,7 +2218,7 @@ namespace decomp_collision
         {
             const float f2 = FPU_SUB_S(f1, f0);
             f0 = FPU_SUB_S(split, f0);
-            f0 = ps2FpuDivide(g.ctx->fcr31, f0, f2);
+            f0 = fastDiv(g.ctx->fcr31, f0, f2);
             f0 = FPU_SUB_S(f0, zero);
             g.f0(f0);
             g.put(sp, lerp(g, g.q(a1), g.q(a2), f0));
@@ -2206,7 +2226,7 @@ namespace decomp_collision
         }
         const float f2 = FPU_SUB_S(f0, f1);
         f0 = FPU_SUB_S(split, f1);
-        f0 = ps2FpuDivide(g.ctx->fcr31, f0, f2);
+        f0 = fastDiv(g.ctx->fcr31, f0, f2);
         f0 = FPU_SUB_S(f0, zero);
         g.f0(f0);
         g.put(sp + 0x10u, lerp(g, g.q(a2), g.q(a1), f0));
@@ -2348,7 +2368,7 @@ namespace decomp_collision
                 f2 = FPU_SUB_S(f1, f0);
                 f0 = FPU_SUB_S(split, f0);
             }
-            f0 = ps2FpuDivide(g.ctx->fcr31, f0, f2);
+            f0 = fastDiv(g.ctx->fcr31, f0, f2);
             f0 = high ? FPU_SUB_S(f0, zero) : FPU_ADD_S(f0, zero);
             g.f0(f0);
             const __m128 A = walk101::ld(e.a), B = walk101::ld(e.b);

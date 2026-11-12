@@ -709,7 +709,7 @@ namespace coll125
             p = a;
         else
         {
-            const float t = ps2FpuDivide(ctx->fcr31, d1, span);
+            const float t = fastDiv(ctx->fcr31, d1, span);
             const __m128 vt = _mm_set1_ps(t);
             const __m128 oneMinus = PS2_VSUB(vf0, lane<0>(vt));
             const __m128 acc = PS2_VMUL(a, lane<0>(vt));
@@ -735,8 +735,8 @@ namespace coll125
             acc = vu::addN(acc, lane<1>(prod));
             return x(vu::addN(acc, lane<2>(prod)));
         };
-        u = ps2FpuDivide(ctx->fcr31, dot(e.c2, w), e.d2);
-        v = ps2FpuDivide(ctx->fcr31, dot(e.c1, w), e.d1);
+        u = fastDiv(ctx->fcr31, dot(e.c2, w), e.d2);
+        v = fastDiv(ctx->fcr31, dot(e.c1, w), e.d1);
         const float lo = -2e-05f;
         if (FPU_C_OLT_S(u, lo) || FPU_C_OLT_S(v, lo))
             return 0;
