@@ -325,6 +325,16 @@ namespace sotc_native
 
     // A vertex as the batch gives it: model space, or bind pose with up to
     // three bones (palette matrices) and weights.
+    inline bool detailTexturesOn()
+    {
+        static const bool on = []() {
+            if (const char *e = std::getenv("SOTC_DETAIL_TEX"))
+                return std::atoi(e) != 0;
+            return true;
+        }();
+        return on;
+    }
+
     struct BatchVertex
     {
         float x, y, z;
@@ -2915,6 +2925,15 @@ namespace sotc_native
             e.slot = surfaceSlot(e.s);
             p.pk.push_back(e);
         }
+        // Group packets of the same layer and surface contiguously to maximize
+        // PlanRun / drawMulti batching and eliminate Mali-G31 draw call bottlenecks.
+        std::stable_sort(p.pk.begin(), p.pk.end(), [header](const PlanPacket &a, const PlanPacket &b) {
+            const uint32_t layerA = surfaceLayer(header, a.s, false);
+            const uint32_t layerB = surfaceLayer(header, b.s, false);
+            if (layerA != layerB)
+                return layerA < layerB;
+            return a.s < b.s;
+        });
         p.surfaceRecords.clear();
         for (const PlanPacket &e : p.pk)
             if (std::find(p.surfaceRecords.begin(), p.surfaceRecords.end(), e.s) == p.surfaceRecords.end())
@@ -10013,6 +10032,128 @@ namespace sotc_native
     // same state by the old code and compared (the memory it writes, the
     // CLIP register, the parts, the out-of-view decision), and the CLIP
     // records (`known`) checked against the register at the next hook.
+    inline uint32_t nodeClipTest(uint32_t node, const float clip[16])
+    {
+#if defined(__ARM_NEON) || defined(__aarch64__)
+        const float32x4_t c0 = vld1q_f32(clip + 0);
+        const float32x4_t c1 = vld1q_f32(clip + 4);
+        const float32x4_t c2 = vld1q_f32(clip + 8);
+        const float32x4_t c3 = vld1q_f32(clip + 12);
+
+        const float minX = real(node);
+        const float minY = real(node + 4u);
+        const float minZ = real(node + 8u);
+        const float maxX = real(node + 0x10u);
+        const float maxY = real(node + 0x14u);
+        const float maxZ = real(node + 0x18u);
+
+        const float32x4_t x_min = vmulq_n_f32(c0, minX);
+        const float32x4_t x_max = vmulq_n_f32(c0, maxX);
+        const float32x4_t y_min = vmulq_n_f32(c1, minY);
+        const float32x4_t y_max = vmulq_n_f32(c1, maxY);
+        const float32x4_t z_min = vmulq_n_f32(c2, minZ);
+        const float32x4_t z_max = vmulq_n_f32(c2, maxZ);
+
+        const float32x4_t xs[2] = {x_min, x_max};
+        const float32x4_t ys[2] = {y_min, y_max};
+        const float32x4_t zs[2] = {z_min, z_max};
+
+        static const uint32_t kGtMask[4] = {1, 4, 16, 0};
+        static const uint32_t kLtMask[4] = {2, 8, 32, 0};
+        const uint32x4_t vGtMask = vld1q_u32(kGtMask);
+        const uint32x4_t vLtMask = vld1q_u32(kLtMask);
+
+        uint32_t all = 0x3Fu, any = 0u;
+        for (int c = 0; c < 8; ++c)
+        {
+            float32x4_t v = vaddq_f32(c3, xs[c & 1]);
+            v = vaddq_f32(v, ys[(c >> 1) & 1]);
+            v = vaddq_f32(v, zs[(c >> 2) & 1]);
+
+            const float32x4_t w = vabsq_f32(vdupq_laneq_f32(v, 3));
+            const float32x4_t nw = vnegq_f32(w);
+
+            const uint32x4_t gt = vcgtq_f32(v, w);
+            const uint32x4_t lt = vcltq_f32(v, nw);
+
+            const uint32x4_t f_gt = vandq_u32(gt, vGtMask);
+            const uint32x4_t f_lt = vandq_u32(lt, vLtMask);
+            const uint32x4_t f_or = vorrq_u32(f_gt, f_lt);
+
+            const uint32_t flags = vgetq_lane_u32(f_or, 0) | vgetq_lane_u32(f_or, 1) | vgetq_lane_u32(f_or, 2);
+            all &= flags;
+            any |= flags;
+        }
+        if (all)
+            return 1u;
+
+        // Sub-pixel Node Culling (Bluepoint Remake technique):
+        // If the bounding box's projected screen diameter is sub-pixel (< ~1.0 px on 480p),
+        // skip this node and its sub-meshes completely.
+        static const float s_minProj = []() {
+            if (const char *e = std::getenv("SOTC_SAC_MIN_PROJECTED"))
+                return std::strtof(e, nullptr);
+            return 0.0f;
+        }();
+        if (s_minProj > 0.0f)
+        {
+            const float cx = 0.5f * (minX + maxX);
+            const float cy = 0.5f * (minY + maxY);
+            const float cz = 0.5f * (minZ + maxZ);
+            const float wc = clip[3] * cx + clip[7] * cy + clip[11] * cz + clip[15];
+            if (wc > 8.0f)
+            {
+                const float dx = maxX - minX;
+                const float dy = maxY - minY;
+                const float dz = maxZ - minZ;
+                const float diam2 = dx * dx + dy * dy + dz * dz;
+                const float limit = s_minProj * wc;
+                if (diam2 < limit * limit)
+                    return 1u; // Sub-pixel detail: culled
+            }
+        }
+        return any ? 0u : 2u;
+#else
+        uint32_t all = 0x3Fu, any = 0u;
+        for (int c = 0; c < 8; ++c)
+        {
+            const float x = real(node + ((c & 1) ? 0x10u : 0u)), y = real(node + ((c & 2) ? 0x14u : 4u)), z = real(node + ((c & 4) ? 0x18u : 8u));
+            float v[4];
+            for (int r = 0; r < 4; ++r)
+                v[r] = clip[r] * x + clip[4 + r] * y + clip[8 + r] * z + clip[12 + r];
+            const float w = std::fabs(v[3]);
+            const uint32_t flags = (v[0] > w ? 1u : 0u) | (v[0] < -w ? 2u : 0u) | (v[1] > w ? 4u : 0u) | (v[1] < -w ? 8u : 0u) | (v[2] > w ? 16u : 0u) |
+                                   (v[2] < -w ? 32u : 0u);
+            all &= flags;
+            any |= flags;
+        }
+        if (all)
+            return 1u;
+
+        static const float s_minProj = []() {
+            if (const char *e = std::getenv("SOTC_SAC_MIN_PROJECTED"))
+                return std::strtof(e, nullptr);
+            return 0.0f;
+        }();
+        if (s_minProj > 0.0f)
+        {
+            const float minX = real(node), minY = real(node + 4u), minZ = real(node + 8u);
+            const float maxX = real(node + 0x10u), maxY = real(node + 0x14u), maxZ = real(node + 0x18u);
+            const float cx = 0.5f * (minX + maxX), cy = 0.5f * (minY + maxY), cz = 0.5f * (minZ + maxZ);
+            const float wc = clip[3] * cx + clip[7] * cy + clip[11] * cz + clip[15];
+            if (wc > 8.0f)
+            {
+                const float dx = maxX - minX, dy = maxY - minY, dz = maxZ - minZ;
+                const float diam2 = dx * dx + dy * dy + dz * dz;
+                const float limit = s_minProj * wc;
+                if (diam2 < limit * limit)
+                    return 1u;
+            }
+        }
+        return any ? 0u : 2u;
+#endif
+    }
+
     namespace mdslane
     {
         enum JoinSite : int { kJClip, kJCache, kJShadow, kJHook, kJSync, kJFrame, kJSites };
@@ -10103,20 +10244,7 @@ namespace sotc_native
             {
                 if (useGame)
                     return word(node + 0x2Cu);
-                uint32_t all = 0x3Fu, any = 0u;
-                for (int c = 0; c < 8; ++c)
-                {
-                    const float x = real(node + ((c & 1) ? 0x10u : 0u)), y = real(node + ((c & 2) ? 0x14u : 4u)), z = real(node + ((c & 4) ? 0x18u : 8u));
-                    float v[4];
-                    for (int r = 0; r < 4; ++r)
-                        v[r] = clip[r] * x + clip[4 + r] * y + clip[8 + r] * z + clip[12 + r];
-                    const float w = std::fabs(v[3]);
-                    const uint32_t flags = (v[0] > w ? 1u : 0u) | (v[0] < -w ? 2u : 0u) | (v[1] > w ? 4u : 0u) | (v[1] < -w ? 8u : 0u) | (v[2] > w ? 16u : 0u) |
-                                           (v[2] < -w ? 32u : 0u);
-                    all &= flags;
-                    any |= flags;
-                }
-                return all ? 1u : (any ? 0u : 2u);
+                return nodeClipTest(node, clip);
             };
             uint32_t budget = 4096u;
             const auto visit = [&](auto &&self, uint32_t index, uint32_t inherited, int depth) -> void
@@ -10625,20 +10753,24 @@ namespace sotc_native
             return;
         // SOTC_HIDE_HEADER=<hex> (debugging, round 12): that model left out.
         static const uint32_t hideHeader = std::getenv("SOTC_HIDE_HEADER") ? static_cast<uint32_t>(std::strtoul(std::getenv("SOTC_HIDE_HEADER"), nullptr, 16)) : 0u;
-        if (hideHeader && word(word(instance) + 0x20u) == hideHeader)
+        const uint32_t h = word(word(instance) + 0x20u);
+        if (!h || (hideHeader && h == hideHeader))
             return;
-        CallRecord *record = nullptr; // this draw's, for the next frame's prefetch
-        if (g_prefetch)
-        {
-            queueNextDraw(instance);
-            const uint32_t object = word(instance);
-            CallRecord r{instance, object, word(object + 0x20u), word(instance + 0xCu)};
-            if (lean)
-                r.matrix = matrix;
-            g_calls.push_back(r);
-            if (lean)
-                record = &g_calls.back();
-        }
+
+        // Early Cull 1: Fully transparent instance
+        const float f244 = real(instance + 0x244u);
+        float opacity = 1.0f - f244;
+        if (word(h + 0xCu) != 0u)
+            opacity *= 1.0f - real(instance + 0x248u);
+        if (!(opacity > 0.0f))
+            return;
+
+        // Early Cull 2: LOD < 0 (Culled by modelClipSolid / modelClipSkin)
+        uint64_t lw;
+        std::memcpy(&lw, rdram + ((instance + 0x250u) & 0x1FFFFF8u), 8);
+        const int32_t signedLod = static_cast<int32_t>(static_cast<int64_t>(lw << 21) >> 61);
+        if (signedLod < 0)
+            return;
 
         float camera[16], clip[16];
         if (lean)
@@ -10654,6 +10786,46 @@ namespace sotc_native
                     sum += camera[k * 4 + r] * model[c * 4 + k];
                 clip[c * 4 + r] = sum;
             }
+
+        uint32_t gl = static_cast<uint32_t>((lw >> 40) & 7u);
+        if ((word(h + 0x18u) & 1u) && gl >= word(h + 0x1Cu) && word(h + 0x1Cu) != 0u)
+            gl = word(h + 0x1Cu) - 1u;
+        uint32_t l = gl;
+        if (const int finer = static_cast<int>(native_renderer::tuning().modelDetail + 0.5f); finer > 0 && l > 0u)
+        {
+            l = finer >= 2 ? 0u : l - 1u;
+            if (word(h + 0x30u + l * 4u) == 0u && word(h + 0x30u + gl * 4u) != 0u)
+                l = gl;
+        }
+        const uint32_t table = word(h + 0x30u + l * 4u);
+        const bool partCulled = (word(h + 0x18u) & 1u) == 0u && word(h + 0x54u) != 1u;
+        if (partCulled && table == 0u)
+            return;
+
+        // Early Cull 3: Fast Root Bounding Box Frustum Rejection
+        if (partCulled && !check)
+        {
+            const uint32_t rootTest = nodeClipTest(table, clip);
+            if (rootTest == 1u)
+            {
+                std::memcpy(const_cast<uint8_t *>(g_ram) + ((table + 0x2Cu) & 0x1FFFFFCu), &rootTest, 4);
+                return;
+            }
+        }
+
+        CallRecord *record = nullptr; // this draw's, for the next frame's prefetch
+        if (g_prefetch)
+        {
+            queueNextDraw(instance);
+            const uint32_t object = word(instance);
+            CallRecord r{instance, object, h, word(instance + 0xCu)};
+            if (lean)
+                r.matrix = matrix;
+            g_calls.push_back(r);
+            if (lean)
+                record = &g_calls.back();
+        }
+
         static const bool viewChecks = ps2_diag::env("SOTC_VIEW_CHECK") != nullptr;
         if (viewChecks)
         {
@@ -10676,12 +10848,6 @@ namespace sotc_native
         ModelPlan *gamePlan = nullptr;
         if (planOn)
         {
-            const uint32_t h = word(word(instance) + 0x20u);
-            uint64_t lw;
-            std::memcpy(&lw, rdram + ((instance + 0x250u) & 0x1FFFFF8u), 8);
-            uint32_t l = static_cast<uint32_t>((lw >> 40) & 7u);
-            if ((word(h + 0x18u) & 1u) && l >= word(h + 0x1Cu) && word(h + 0x1Cu) != 0u)
-                l = word(h + 0x1Cu) - 1u;
             gamePlan = modelPlan(h, l);
             ++g_planStats.uses;
             if (record && gamePlan)
@@ -10710,26 +10876,11 @@ namespace sotc_native
             if (laneOk)
             {
                 mdslane::Job &lj = mdslane::take(ctx);
-                const uint32_t h = word(word(instance) + 0x20u);
-                uint64_t lw;
-                std::memcpy(&lw, rdram + ((instance + 0x250u) & 0x1FFFFF8u), 8);
-                // The hook's LOD and table as it works them out below (gameLod,
-                // then "Model detail"'s finer level, tested by the hook itself).
-                uint32_t gl = static_cast<uint32_t>((lw >> 40) & 7u);
-                if ((word(h + 0x18u) & 1u) && gl >= word(h + 0x1Cu) && word(h + 0x1Cu) != 0u)
-                    gl = word(h + 0x1Cu) - 1u;
-                uint32_t l = gl;
-                if (const int finer = static_cast<int>(native_renderer::tuning().modelDetail + 0.5f); finer > 0 && l > 0u)
-                {
-                    l = finer >= 2 ? 0u : l - 1u;
-                    if (word(h + 0x30u + l * 4u) == 0u && word(h + 0x30u + gl * 4u) != 0u)
-                        l = gl;
-                }
                 lj.instance = instance;
-                lj.table = word(h + 0x30u + l * 4u);
+                lj.table = table;
                 lj.useGame = l == gl;
                 std::memcpy(lj.clip, clip, sizeof(lj.clip));
-                lj.partCulled = (word(h + 0x18u) & 1u) == 0u && word(h + 0x54u) != 1u;
+                lj.partCulled = partCulled;
                 std::memcpy(lj.model, model, sizeof(lj.model));
                 lj.plan = gamePlan;
                 MdsIn &in = lj.in;
@@ -10795,56 +10946,10 @@ namespace sotc_native
         }
         zone(0x2004u);
 
-        const uint32_t header = word(word(instance) + 0x20u);
-        static const uint32_t skipHeader = std::getenv("SOTC_NATIVE_SKIP") ? static_cast<uint32_t>(std::strtoul(std::getenv("SOTC_NATIVE_SKIP"), nullptr, 16)) : 0u; // debugging
-        if (header == skipHeader)
-            return;
+        const uint32_t header = h;
+        const uint32_t lod = l;
+        const uint32_t gameLod = gl;
         const bool fading = real(instance + 0x244u) > 0.0f; // modelDisp: param_1[0x91]
-        // modelDisp's instance opacity (the microcode's, at its packet + 0xdc).
-        float opacity = 1.0f - real(instance + 0x244u);
-        if (word(header + 0xCu) != 0u)
-            opacity *= 1.0f - real(instance + 0x248u);
-        if (!(opacity > 0.0f))
-        {
-            static const bool log = ps2_diag::env("SOTC_NATIVE_LOG") != nullptr;
-            static uint64_t logged = 0;
-            if (log && g_frame >= logged + 120u)
-            {
-                logged = g_frame;
-                std::fprintf(stderr, "[native-hidden] frame %llu header %08x f91 %g f92 %g hc %08x\n", (unsigned long long)g_frame, header,
-                             real(instance + 0x244u), real(instance + 0x248u), word(header + 0xCu));
-            }
-            return;
-        }
-        opacity = std::min(opacity, 1.0f);
-        uint64_t lodWord;
-        std::memcpy(&lodWord, rdram + ((instance + 0x250u) & 0x1FFFFF8u), 8);
-        uint32_t lod = static_cast<uint32_t>((lodWord >> 40) & 7u);
-        if ((word(header + 0x18u) & 1u) && lod >= word(header + 0x1Cu) && word(header + 0x1Cu) != 0u)
-            lod = word(header + 0x1Cu) - 1u;
-        // Quality "Model detail" (SOTC_MODEL_DETAIL): one level finer than
-        // the game's, or always level 0 (the finest; far hills and colossi
-        // lose their blocky outlines). The parts are then tested here, as
-        // the game's results (+0x2c) are for its own level's table.
-        const uint32_t gameLod = lod;
-        if (const int finer = static_cast<int>(native_renderer::tuning().modelDetail + 0.5f); finer > 0 && lod > 0u)
-        {
-            lod = finer >= 2 ? 0u : lod - 1u;
-            if (word(header + 0x30u + lod * 4u) == 0u && word(header + 0x30u + gameLod * 4u) != 0u)
-                lod = gameLod; // no part table there: as the game has it
-        }
-        const uint32_t table = word(header + 0x30u + lod * 4u);
-        // modelDisp (0x1097118) tests the parts against the camera only when
-        // the model has bit 0 of +0x18 clear and +0x54 != 1; otherwise every
-        // packet of the LOD is drawn. The test is made here again rather than
-        // read from the parts' +0x2c: the recompiled modelDisp can come back
-        // to this hook before its test has run (a checkpoint inside
-        // manager_sub_01099A08 returns with pc there, the rest of modelDisp
-        // runs after), so +0x2c still held another instance's or an earlier
-        // frame's result (on-screen parts skipped, off-screen ones drawn).
-        const bool partCulled = (word(header + 0x18u) & 1u) == 0u && word(header + 0x54u) != 1u;
-        if (partCulled && table == 0u)
-            return; // modelDisp returns too (bVar4 stays set): nothing drawn
         // The rest is the job's (on the worker when hookjobs::g_on): what it
         // needs of this moment taken now.
         if (hookJob)
@@ -10895,20 +11000,7 @@ namespace sotc_native
             {
                 if (!ps2Lists && !check && lod == gameLod)
                     return word(node + 0x2Cu); // modelDispState's (the game's own) result
-                uint32_t all = 0x3Fu, any = 0u;
-                for (int c = 0; c < 8; ++c)
-                {
-                    const float x = real(node + ((c & 1) ? 0x10u : 0u)), y = real(node + ((c & 2) ? 0x14u : 4u)), z = real(node + ((c & 4) ? 0x18u : 8u));
-                    float v[4];
-                    for (int r = 0; r < 4; ++r)
-                        v[r] = clip[r] * x + clip[4 + r] * y + clip[8 + r] * z + clip[12 + r];
-                    const float w = std::fabs(v[3]);
-                    const uint32_t flags = (v[0] > w ? 1u : 0u) | (v[0] < -w ? 2u : 0u) | (v[1] > w ? 4u : 0u) | (v[1] < -w ? 8u : 0u) | (v[2] > w ? 16u : 0u) |
-                                           (v[2] < -w ? 32u : 0u);
-                    all &= flags;
-                    any |= flags;
-                }
-                return all ? 1u : (any ? 0u : 2u);
+                return nodeClipTest(node, clip);
             };
             // manager_sub_01099A08: a node takes its parent's result unless
             // that is 0 (partly inside), then it is tested; +0x20 / +0x24 the
@@ -11374,7 +11466,7 @@ namespace sotc_native
                 if (found != g_skinnedPackets.end())
                     skinnedPacket = &found->second;
             }
-            const bool twoPasses = (info ? info->texMode : word(s + 0x1Cu)) == 2u;
+            const bool twoPasses = detailTexturesOn() && ((info ? info->texMode : word(s + 0x1Cu)) == 2u);
             const bool needsBuild = !skinnedPacket && ((!(known && e->ready) && !native_renderer::hasMesh(id)) ||
                                                        (twoPasses && !(known && e->readyTwo) && !native_renderer::hasMesh(id ^ (1ull << 61))));
             // Round 27: the terrain's packets (layers 1-3) are built here, up
@@ -11759,7 +11851,7 @@ namespace sotc_native
             // being 0x20; the splash rings drawn after on the surface stay visible.
             if (((full ? static_cast<uint32_t>(full->flags) : word(s + 0x18u)) & 0x2200u) == 0x2200u)
                 state.noDepthWrite = true;
-            const bool twoTextures = (full ? full->texMode : word(s + 0x1Cu)) == 2u && !posed && !state.debugColour;
+            const bool twoTextures = detailTexturesOn() && ((full ? full->texMode : word(s + 0x1Cu)) == 2u) && !posed && !state.debugColour;
             // SOTC_LOG_HEADER=<hex> (debugging, round 38): that model's surfaces as drawn.
             static const uint32_t logHeader = std::getenv("SOTC_LOG_HEADER") ? static_cast<uint32_t>(std::strtoul(std::getenv("SOTC_LOG_HEADER"), nullptr, 16)) : 0u;
             if (logHeader && header == logHeader && g_frame % 30u == 0u)
@@ -11775,7 +11867,7 @@ namespace sotc_native
                 noteRead((s + 0x18u) & ~7u, 8u), std::memcpy(&sflags, g_ram + ((s + 0x18u) & 0x1FFFFF8u), 8);
             const bool layer14 = ((sflags >> 25) & 1u) != 0;
             const bool reflective = (layer14 || (sflags & 0x2200u) == 0x2200u) && !noReflect && !state.debugColour;
-            if (runs && e && e->resolved && !posed && !twoTextures && !reflective && info && info->texMode != 2u && mesh == id)
+            if (runs && e && e->resolved && !posed && !twoTextures && !reflective && info && (!detailTexturesOn() || info->texMode != 2u) && mesh == id)
             {
                 // The first packet of a run (planPackets adds the next ones).
                 g_planRun.flush();

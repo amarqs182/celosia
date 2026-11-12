@@ -357,6 +357,11 @@ namespace native_renderer
 #else
         bool glSort87 = false;
 #endif
+#if defined(__linux__) && !defined(__vita__)
+        bool glInstancing = true;
+#else
+        bool glInstancing = false;
+#endif
         // Round 87 (GPU, console A/B candidate): the shadow volumes' stencil
         // count drawn with the fragment program disabled (GXM's depth /
         // stencil-only primitives: the ISP alone, no USSE program, no blend)
