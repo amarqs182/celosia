@@ -471,12 +471,23 @@ uniform vec4 uMisc;  // lit, opacity, uv offset
 uniform vec4 uFogB;  // size, vertex fog, base
 uniform vec4 uFogC;  // scale, lod K, lod scale, max lod
 uniform vec4 uGuard; // x > 0: layer 1's near plane (see Renderer::guardFor): what lies nearer than w = y cut
+uniform vec4 uInstanceClips[64];
+uniform int uInstanceCount;
 out highp vec4 vUV;        // uv, w, fog x w (the fog factor is linear on the screen, as the GS's)
 out mediump vec4 vColor;
 out highp vec4 vScreen;    // clip x, y, w
 void main()
 {
-    vec4 c = uClip[0] * aPos.x + uClip[1] * aPos.y + uClip[2] * aPos.z + uClip[3];
+    vec4 c;
+    if (uInstanceCount > 1)
+    {
+        int base = gl_InstanceID * 4;
+        c = uInstanceClips[base] * aPos.x + uInstanceClips[base + 1] * aPos.y + uInstanceClips[base + 2] * aPos.z + uInstanceClips[base + 3];
+    }
+    else
+    {
+        c = uClip[0] * aPos.x + uClip[1] * aPos.y + uClip[2] * aPos.z + uClip[3];
+    }
     // Depth from w, near plane at w = 0.1: depth = 1 - 0.1 / w.
     gl_Position = vec4(c.x, c.y, c.w - 0.2, c.w);
     float fog = uFogB.z > 0.5 ? clamp(uFogB.w + uFogC.x / max(c.w, 1e-3), 0.0, 255.0) / 255.0 : 1.0;
@@ -2189,6 +2200,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             uint8_t maxAlpha = 0xFF;   // round 45: the greatest (0xFF: not known)
             float minW = -1.0f;        // round 75: a background draw's least clip w over its mesh(es)' bounds (-1: not known)
             float maxW = -1.0f;        // round 98: a draw's greatest clip w over its mesh(es)' bounds (-1: not known; nofog98)
+            uint32_t instances = 1;    // instanced draws: count of instances (0: merged into an earlier instance)
+            uint32_t instanceOffset = 0; // offset into instanceClips
         };
         std::vector<Planned> plan;
         // Merged runs whose meshes lie apart in the pools: their vertices
@@ -2271,12 +2284,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         void sortFree(); // round 87 (Tuning glSort87)
         struct SortKey87
         {
-            uint64_t tex, state, where;
+            uint64_t tex, state, where, clip;
             uint32_t k;
         };
         std::vector<SortKey87> sortKeys;
         std::vector<uint64_t> sortOrder;
         std::vector<Planned> sortPlan;
+        std::vector<float> instanceClips;
         struct
         {
             uint64_t frames = 0, draws = 0, free = 0, segments = 0, moved = 0;
@@ -2301,6 +2315,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         struct
         {
             uint64_t frames = 0, draws = 0, calls = 0, merged = 0, ranges = 0, indexed = 0, noDiscard = 0, bufferSwitches = 0;
+            uint64_t instancedDraws = 0, instancedMerged = 0;
             uint64_t progOff = 0, progZero = 0; // SOTC_GL_PROG_CHECK=1: draws with another GL program bound than the cache says / none
             uint64_t alphaSecond = 0; // the alpha test's second passes (round 38)
             uint64_t cut = 0, cutDepth = 0, soft = 0; // round 75: GL calls with discard (with depth writes), through the SOFT programs
@@ -2441,6 +2456,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             int lastCount[kMainUniforms] = {};
             GLint palette = -1;
             uint64_t paletteSent = ~0ull; // frame << 32 | handle: what its palette holds
+            GLint locInstanceClips = -1;
+            GLint locInstanceCount = -1;
+            int lastInstanceCount = 1;
         };
         // Round 45: slot 10 the shadow volumes' program (kVolumeFragment).
         // Round 73: 11-18 the lean ones reading a one-level texture without a
@@ -3148,6 +3166,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                         glUniform1i(at, unit);
                 }
                 m.palette = glGetUniformLocation(p, "uPalette");
+                m.locInstanceClips = glGetUniformLocation(p, "uInstanceClips");
+                m.locInstanceCount = glGetUniformLocation(p, "uInstanceCount");
+                m.lastInstanceCount = 1;
+                if (m.locInstanceCount >= 0)
+                    glUniform1i(m.locInstanceCount, 1);
             }
             if (skinProgram && mains[1].palette < 0)
             {
@@ -5477,9 +5500,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 std::fprintf(stderr, "[gl:pools] %u pools of %u vertices: %.1f%% free; meshes %u (%.1f MB)\n", live, kPoolVertices,
                              live ? 100.0 * free / (live * double(kPoolVertices)) : 0.0, static_cast<unsigned>(meshes.size()), meshBytes / 1048576.0);
                 const double f = 300.0;
-                std::fprintf(stderr, "[gl:draws] per frame: draws %.0f, GL draw calls %.0f (all passes), merged away %.0f in %.0f ranges + %.0f run copies, "
+                std::fprintf(stderr, "[gl:draws] per frame: draws %.0f, GL draw calls %.0f (all passes), merged away %.0f (ranges %.0f, copies %.0f, instanced %.0f in %.0f batches), "
                                      "no-discard %.0f, discard %.0f (%.0f writing depth), soft cut %.0f, vertex buffer switches %.0f | pools %u, run copies %u (%.0f KB) | program off %.0f, none %.0f\n",
                              drawStats.draws / f, drawStats.calls / f, drawStats.merged / f, drawStats.ranges / f, drawStats.indexed / f,
+                             drawStats.instancedMerged / f, drawStats.instancedDraws / f,
                              drawStats.noDiscard / f, drawStats.cut / f, drawStats.cutDepth / f, drawStats.soft / f, drawStats.bufferSwitches / f, static_cast<unsigned>(pools.size()), static_cast<unsigned>(runs.size()),
                              runVertices * sizeof(native_renderer::Vertex) / 1024.0, drawStats.progOff / f, drawStats.progZero / f);
                 std::fprintf(stderr, "[gl:cut] per frame: vertices through discard %.0f, soft cut %.0f, no cut %.0f, the full program %.0f | the full program's calls by textured 0-5: %.0f %.0f %.0f %.0f %.0f %.0f | depth-writing discards: alpha test %.0f, layer 1's near plane %.0f, least alpha not known: frame mesh %.0f, fresnel %.0f, other %.0f; under 0.03 %.0f | layer 1's near plane: %.0f draws, %.0f wholly past it\n",
@@ -5570,6 +5594,54 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             }
             k = end;
         }
+        if (native_renderer::tuning().glInstancing)
+        {
+            instanceClips.clear();
+            for (size_t k = 0; k < n; )
+            {
+                Planned &leadPlan = plan[k];
+                if (leadPlan.run != 1 || !leadPlan.mesh || leadPlan.mesh->skinned || leadPlan.mesh->dynamic || leadPlan.mesh->indexed || leadPlan.mesh->pool < 0)
+                {
+                    ++k;
+                    continue;
+                }
+                const Draw &leadDraw = drawAt(k);
+                if (leadDraw.state.shadowVolume)
+                {
+                    ++k;
+                    continue;
+                }
+                size_t end = k + 1;
+                constexpr size_t kMaxInstances = 16;
+                while (end < n && (end - k) < kMaxInstances)
+                {
+                    const Planned &oPlan = plan[end];
+                    if (oPlan.run != 1 || oPlan.mesh != leadPlan.mesh || oPlan.tex != leadPlan.tex)
+                        break;
+                    const Draw &oDraw = drawAt(end);
+                    if (!sameState(leadDraw, oDraw))
+                        break;
+                    ++end;
+                }
+                const uint32_t count = static_cast<uint32_t>(end - k);
+                if (count > 1)
+                {
+                    leadPlan.instances = count;
+                    leadPlan.instanceOffset = static_cast<uint32_t>(instanceClips.size());
+                    for (size_t j = k; j < end; ++j)
+                    {
+                        const Draw &d = drawAt(j);
+                        instanceClips.insert(instanceClips.end(), d.clip, d.clip + 16);
+                        if (j > k)
+                        {
+                            plan[j].run = 0;
+                            plan[j].instances = 0;
+                        }
+                    }
+                }
+                k = end;
+            }
+        }
         mergeStats();
     }
 
@@ -5649,27 +5721,23 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         auto hashState = [&](const Draw &d) -> uint64_t
         {
             const native_renderer::DrawState &x = d.state;
-            uint64_t h = 0xcbf29ce484222325ull;
-            auto mix = [&h](uint64_t v) { h = (h ^ v) * 0x100000001b3ull; h ^= h >> 31; };
-            uint32_t words[16];
-            std::memcpy(words, d.clip, sizeof words);
-            for (uint32_t w : words)
-                mix(w);
-            uint32_t f[6];
-            std::memcpy(f, &x.opacity, sizeof f);
-            for (uint32_t w : f)
-                mix(w);
-            mix(static_cast<uint64_t>(x.clamp) | static_cast<uint64_t>(x.blend) << 8 | static_cast<uint64_t>(x.background) << 16 | static_cast<uint64_t>(x.backgroundFge) << 17 |
-                static_cast<uint64_t>(x.fogged) << 18 | static_cast<uint64_t>(x.writeDepth) << 19 | static_cast<uint64_t>(x.lit) << 20 |
-                static_cast<uint64_t>(x.skinPalette) << 32);
-            if (x.lit)
-            {
-                uint32_t l[32];
-                std::memcpy(l, x.light, sizeof l);
-                for (uint32_t w : l)
-                    mix(w);
-            }
-            return h;
+            const uint32_t stateBits = static_cast<uint32_t>(x.clamp) |
+                                      (static_cast<uint32_t>(x.blend) << 4) |
+                                      (static_cast<uint32_t>(x.alphaTest) << 8) |
+                                      (x.lit ? (1u << 24) : 0u) |
+                                      (x.writeDepth ? (1u << 25) : 0u);
+            return static_cast<uint64_t>(stateBits);
+        };
+        auto hashClip = [&](const Draw &d) -> uint64_t
+        {
+            uint32_t clipBits[6];
+            clipBits[0] = *reinterpret_cast<const uint32_t *>(&d.clip[0]);
+            clipBits[1] = *reinterpret_cast<const uint32_t *>(&d.clip[5]);
+            clipBits[2] = *reinterpret_cast<const uint32_t *>(&d.clip[10]);
+            clipBits[3] = *reinterpret_cast<const uint32_t *>(&d.clip[12]);
+            clipBits[4] = *reinterpret_cast<const uint32_t *>(&d.clip[13]);
+            clipBits[5] = *reinterpret_cast<const uint32_t *>(&d.clip[14]);
+            return static_cast<uint64_t>(clipBits[0] ^ (clipBits[1] * 31u) ^ (clipBits[2] * 57u) ^ (clipBits[3] * 101u) ^ (clipBits[4] * 151u) ^ (clipBits[5] * 233u));
         };
         size_t k = 0;
         while (k < n)
@@ -5691,8 +5759,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     const Draw &d = drawAt(j);
                     const Mesh *m = plan[j].mesh;
                     const uint64_t where = (m->skinned ? 1ull << 63 : 0ull) | (m->indexed ? 1ull << 62 : 0ull) | (m->dynamic ? 1ull << 61 : 0ull) |
-                                           (static_cast<uint64_t>(static_cast<uint32_t>(m->pool + 1) & 0xFFFFu) << 32) | m->first;
-                    sortKeys.push_back({d.state.texture, hashState(d), where, static_cast<uint32_t>(j)});
+                                           (static_cast<uint64_t>(static_cast<uint32_t>(m->pool + 1) & 0xFFFFu) << 32) | (static_cast<uint64_t>(m->first) << 16) | (m->count & 0xFFFFu);
+                    sortKeys.push_back({d.state.texture, hashState(d), where, hashClip(d), static_cast<uint32_t>(j)});
                 }
                 std::sort(sortKeys.begin(), sortKeys.end(), [](const auto &a, const auto &b)
                 {
@@ -5702,6 +5770,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                         return a.state < b.state;
                     if (a.where != b.where)
                         return a.where < b.where;
+                    if (a.clip != b.clip)
+                        return a.clip < b.clip;
                     return a.k < b.k;
                 });
                 sortOrder.clear();
@@ -6914,8 +6984,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 if (leanOn && !d.state.shadowVolume && textured <= 1 && !d.state.debugColour && !tintThis)
                 {
                     bool cut = true;
-                    if (noDiscard && leastAlpha >= 0.0f && !(guard[0] > 0.0f))
-                        cut = !(leastAlpha >= 0.03f) || atSecond || atAllUnder; // the cut-out is at 0.02
+                    if (noDiscard && !(guard[0] > 0.0f))
+                    {
+                        if (d.state.blend == native_renderer::Blend::Opaque && !(d.state.alphaTest & 1u))
+                            cut = false; // Opaque draws without alpha test never discard: enables Mali FPK & Early-Z
+                        else if (leastAlpha >= 0.0f)
+                            cut = !(leastAlpha >= 0.03f) || atSecond || atAllUnder; // the cut-out is at 0.02
+                    }
                     // Round 73 (Tuning glPlainReads): a texture of one level read with no LOD.
                     // Round 98 (Tuning glLod0_98): a mipped texture drawn at level 0
                     // (the draw's maxLod <= 0: the LOD program's lod is 0) read as a
@@ -6992,6 +7067,20 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     }
                 };
                 sendPalette();
+                MainSlot &m = mains[mainSlot];
+                if (m.locInstanceCount >= 0)
+                {
+                    const int count = planned.instances > 1 ? static_cast<int>(planned.instances) : 1;
+                    if (m.lastInstanceCount != count)
+                    {
+                        glUniform1i(m.locInstanceCount, count);
+                        m.lastInstanceCount = count;
+                    }
+                    if (count > 1 && m.locInstanceClips >= 0)
+                    {
+                        glUniform4fv(m.locInstanceClips, count * 4, instanceClips.data() + planned.instanceOffset);
+                    }
+                }
                 uniform4(uClip, d.clip, 4);
                 if (d.state.lit || d.state.fresnel) // read by the vertex program only then
                 {
@@ -7406,7 +7495,18 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     }
                 }
 #endif
-                if (planned.run > 1)
+                if (planned.instances > 1)
+                {
+                    drawStats.instancedDraws += 1;
+                    drawStats.instancedMerged += planned.instances - 1u;
+#if !defined(PS2X_NATIVE_VITA)
+                    glDrawArraysInstanced(GL_TRIANGLES, firstVertex, static_cast<GLsizei>(diagHalf(mesh.count)), static_cast<GLsizei>(planned.instances));
+#else
+                    for (uint32_t inst = 0; inst < planned.instances; ++inst)
+                        drawMesh(mesh, firstVertex);
+#endif
+                }
+                else if (planned.run > 1)
                 {
                     drawStats.merged += planned.run - 1u;
                     ++(planned.runPool >= 0 ? drawStats.indexed : drawStats.ranges);
@@ -7421,7 +7521,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     h112.newVarUs += took;
                     h112.newVarMaxUs = std::max(h112.newVarMaxUs, took);
                 }
-                stats.vertices += planned.run > 1 ? planned.mergedCount : mesh.count;
+                stats.vertices += planned.instances > 1 ? (mesh.count * planned.instances) : (planned.run > 1 ? planned.mergedCount : mesh.count);
                 if (phases.on)
                 {
                     const uint64_t took = native_renderer::nowUs() - callStart;
