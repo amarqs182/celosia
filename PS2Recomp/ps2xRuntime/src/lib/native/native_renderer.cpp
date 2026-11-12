@@ -90,6 +90,11 @@ namespace native_renderer
         // frame that takes a little over 33 ms is shown at 30 / 20 steadily
         // instead of alternating 60 / 30 / 20 shows.
         d.frameCap30 = false;
+        // Optimization sacrifices for low-power handheld SoC (Cortex-A35 / Mali-G31)
+        d.sacCamColl = true;
+        d.sacFarChara = true;
+        d.sacFxHalf = true;
+        d.sacDrawDist = true;
         // Round 37 had the body shadows off by default here until measured;
         // round 38 turns them on (Tuning::bodyShadows' default, a menu item).
         // Round 36: the particle sacrifice on by default (half the emitters'

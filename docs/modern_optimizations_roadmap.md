@@ -98,6 +98,12 @@ A GPU ARM Mali-G31 possui o dobro de unidades aritméticas para dados de 16-bit 
 
 * **v1.0.0 (Novembro 2026)**:
   * Diagnóstico do gargalo de reflexão e refração (1.400 draws removidos do templo).
+  * Remoção do tonemapper fotográfico e restauração de passthrough 1:1 com cores fiéis ao PS2.
+  * Implementação da Fase 1: Clamping dinâmico de *fur shells* (`furShells = 4`) para alívio do tile overdraw na GPU Mali-G31.
+  * Implementação da Fase 2 & 5: Ativação global de shaders FP16 (`mediump float`) e state sorting / merging de draws (`glSort87`).
+  * Implementação da Fase 6: Ativação por padrão de `sacCamColl`, `sacFarChara`, `sacFxHalf` e `sacDrawDist` para eliminar micro-stutters de raycast de câmera.
+  * Implementação da Fase 9: Calibração de resposta e zona morta radial dos analógicos (`axisToByte` com ponto neutro 128 exato e curva exponencial suave `PS2X_STICK_CURVE=1.25`).
+
   * Reversão do shader fotográfico para passthrough limpo 1:1 (`raylib_linux.cpp`).
   * Ativação dos perfis de alívio de geometria do altar (`SOTC_SAC_LOD=1`, `SOTC_SAC_DRAWDIST=1`).
   * Documentação e roadmap consolidados.
