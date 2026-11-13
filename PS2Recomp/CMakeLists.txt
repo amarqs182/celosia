@@ -21,6 +21,8 @@ option(PS2X_BUILD_RUNTIME "Build ps2xRuntime" ON)
 option(PS2X_BUILD_ANALYZER "Build ps2xAnalyzer" ON)
 option(PS2X_BUILD_TEST "Build ps2xTest" ON)
 option(PS2X_BUILD_STUDIO "Build ps2xStudio" ON)
+option(PS2X_ARM64_ENABLE_CRYPTO "Enable ARMv8 Crypto instructions (target CPU must support them)" OFF)
+option(PS2X_ARM64_ENABLE_CRC "Enable ARMv8 CRC instructions (target CPU must support them)" OFF)
 
 if(ANDROID)
     message(STATUS "Android target detected, building runtime only")
@@ -68,17 +70,16 @@ if(PS2X_IS_ARM_TARGET)
     elseif(PS2X_IS_AARCH64_TARGET)
         # Linux ARM64 - add NEON flags
         message(STATUS "Non-Apple ARM64 - adding NEON compiler flags")
-        add_compile_options(-march=armv8-a+fp+simd)
-
-        # Try to enable crypto and CRC extensions if supported
-        include(CheckCXXCompilerFlag)
-        check_cxx_compiler_flag("-march=armv8-a+fp+simd+crypto+crc" COMPILER_SUPPORTS_CRYPTO_CRC)
-        if(COMPILER_SUPPORTS_CRYPTO_CRC)
-            set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=armv8-a+fp+simd+crypto+crc")
-            message(STATUS "Crypto and CRC extensions enabled")
-        else()
-            add_compile_options(-march=armv8-a+fp+simd)
+        # Optional ARMv8 extensions must be enabled only after checking the
+        # target CPU. A successful compiler-flag check cannot detect CPU support.
+        set(PS2X_AARCH64_MARCH "-march=armv8-a+fp+simd")
+        if(PS2X_ARM64_ENABLE_CRYPTO)
+            string(APPEND PS2X_AARCH64_MARCH "+crypto")
         endif()
+        if(PS2X_ARM64_ENABLE_CRC)
+            string(APPEND PS2X_AARCH64_MARCH "+crc")
+        endif()
+        add_compile_options("${PS2X_AARCH64_MARCH}")
     endif()
 endif()
 
