@@ -10186,9 +10186,6 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 m_sema105 = sceKernelCreateSema("RenderWake", 0, 0, 1, nullptr);
             }
 #endif
-            if (makeCurrent)
-                makeCurrent();
-            const bool ok = !initThere || r->init();
             bool ok = false;
             {
                 Lock gl;
