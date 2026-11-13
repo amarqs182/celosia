@@ -574,7 +574,8 @@ void main()
         oColor = vec4(uDebug.rgb, uDebug.w > 1.5 ? alpha : 1.0);
         return;
     }
-    vec3 rgb = clamp(t.rgb * vColor.rgb, 0.0, 1.0);
+    mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
+    mediump vec3 rgb = raw / (vec3(1.0) + raw * 0.35);
     rgb = mix(uFogColour.rgb, rgb, vUV.w / vUV.z);
     if (uFogA.w > 0.5)
     {
@@ -621,7 +622,8 @@ void main()
     if (alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y)) // the cut-out, the GS alpha test's side (DrawState::alphaTest)
         discard;
 #endif
-    vec3 rgb = clamp(t.rgb * vColor.rgb, 0.0, 1.0);
+    mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
+    mediump vec3 rgb = raw / (vec3(1.0) + raw * 0.35);
     rgb = mix(uFogColour.rgb, rgb, vUV.w / vUV.z);
 #if BG
     if (uFogA.w > 0.5)
