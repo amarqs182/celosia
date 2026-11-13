@@ -483,7 +483,12 @@ add_library(ps2_runtime STATIC
 # SOTC_NATIVE_GL=1, the Vita through vitaGL).
 target_sources(ps2_runtime PRIVATE src/lib/native/native_renderer.cpp src/lib/native/native_renderer_gl.cpp src/lib/native/native_recorder.cpp)
 # The scene recorder's blocks are zlib-compressed (the Vita SDK has libz).
-target_link_libraries(ps2_runtime PUBLIC z ${CMAKE_DL_LIBS})
+find_package(ZLIB QUIET)
+if(TARGET ZLIB::ZLIB)
+    target_link_libraries(ps2_runtime PUBLIC ZLIB::ZLIB ${CMAKE_DL_LIBS})
+else()
+    target_link_libraries(ps2_runtime PUBLIC z ${CMAKE_DL_LIBS})
+endif()
 
 # GPU GS rasterizer (Metal) on macOS, the default there (PS2X_GS_GPU=0 = CPU).
 if(NOT APPLE)
