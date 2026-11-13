@@ -9547,9 +9547,15 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         void endFrame(uint32_t width, uint32_t height) override
         {
             const bool timed = native_renderer::tuning().frameTiming();
+            const bool threaded = native_renderer::tuning().renderThread;
+            static const bool tripleBuf = [] {
+                const char *e = std::getenv("SOTC_GL_TRIPLE_BUF");
+                return !e || std::atoi(e) != 0;
+            }();
             const uint64_t start = timed ? native_renderer::nowUs() : 0u;
             std::unique_lock<std::mutex> lock(m_mutex);
-            waitData(lock);
+            if (!threaded || !tripleBuf)
+                waitData(lock);
             // The render thread waits: what it holds changes hands. What the
             // last frame drawn cost goes into this frame's counters.
             if (timed)
@@ -9606,20 +9612,29 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     waitIdle(lock);
                 return;
             }
-            std::swap(r->draws, m_rec.draws);
-            std::swap(r->extraMeshes, m_rec.extraMeshes);
-            std::swap(r->arena, m_rec.arena);
-            std::swap(r->indexArena, m_rec.indexArena);
-            std::swap(r->palettes, m_rec.palettes);
-            std::swap(r->blurs, m_rec.blurs);
-            r->uploads.swap(m_rec.uploads); // the render thread left its list empty
-            r->frameMeshes.swap(m_rec.frameMeshes);
-            r->fog = m_rec.fog;
-            r->bloom = m_rec.bloom;
-            r->bloomGameFrame = ps2_stats::vif1Chains.load(std::memory_order_relaxed);
-            r->glow = m_rec.glow;
-            r->dof = m_rec.dof;
-            r->hold = m_rec.hold;
+            if (m_queued && !m_pending.uploads.empty())
+            {
+                m_pending.uploads.insert(m_pending.uploads.end(),
+                                         std::make_move_iterator(m_rec.uploads.begin()),
+                                         std::make_move_iterator(m_rec.uploads.end()));
+                m_rec.uploads.clear();
+            }
+            else
+            {
+                m_pending.uploads.swap(m_rec.uploads);
+            }
+            std::swap(m_pending.draws, m_rec.draws);
+            std::swap(m_pending.extraMeshes, m_rec.extraMeshes);
+            std::swap(m_pending.arena, m_rec.arena);
+            std::swap(m_pending.indexArena, m_rec.indexArena);
+            std::swap(m_pending.palettes, m_rec.palettes);
+            std::swap(m_pending.blurs, m_rec.blurs);
+            m_pending.frameMeshes.swap(m_rec.frameMeshes);
+            m_pending.fog = m_rec.fog;
+            m_pending.bloom = m_rec.bloom;
+            m_pending.glow = m_rec.glow;
+            m_pending.dof = m_rec.dof;
+            m_pending.hold = m_rec.hold;
             m_rec.hold = false;
             clearFrame();
             m_rec.uploads.clear();
@@ -9638,7 +9653,6 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             m_queued = true;
             m_work.notify_one();
             wake105();
-            const bool threaded = native_renderer::tuning().renderThread;
             if (!threaded)
                 waitIdle(lock);
             if (timed)
@@ -10228,6 +10242,32 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 r->paceSeq = m_paceSeq; // round 110 (read here: a deferred present runs after the next hand-over may begin)
                 const bool uploadsOnly = m_uploadsOnly; // flushUploads (SOTC_GL_FLUSH_WAIT)
                 m_uploadsOnly = false;
+                if (!uploadsOnly)
+                {
+                    std::swap(r->draws, m_pending.draws);
+                    std::swap(r->extraMeshes, m_pending.extraMeshes);
+                    std::swap(r->arena, m_pending.arena);
+                    std::swap(r->indexArena, m_pending.indexArena);
+                    std::swap(r->palettes, m_pending.palettes);
+                    std::swap(r->blurs, m_pending.blurs);
+                    r->uploads.swap(m_pending.uploads);
+                    r->frameMeshes.swap(m_pending.frameMeshes);
+                    r->fog = m_pending.fog;
+                    r->bloom = m_pending.bloom;
+                    r->bloomGameFrame = ps2_stats::vif1Chains.load(std::memory_order_relaxed);
+                    r->glow = m_pending.glow;
+                    r->dof = m_pending.dof;
+                    r->hold = m_pending.hold;
+                    m_pending.draws.clear();
+                    m_pending.extraMeshes.clear();
+                    m_pending.arena.clear();
+                    m_pending.indexArena.clear();
+                    m_pending.palettes.clear();
+                    m_pending.blurs.clear();
+                    m_pending.uploads.clear();
+                    m_pending.frameMeshes.clear();
+                    m_pending.hold = false;
+                }
                 lock.unlock();
                 if (uploadsOnly)
                 {
@@ -10327,6 +10367,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         Renderer *r;
         // The game thread's.
         Recording m_rec;
+        Recording m_pending; // Triple-buffered staging slot (protected by m_mutex)
         native_renderer::IdSet m_knownMeshes, m_knownTextures; // what hasMesh / hasTexture answer
         uint64_t m_meshEvictions = 0;                          // meshEvictions
         size_t m_pendingFirst = 0, m_pendingIndexFirst = 0;
