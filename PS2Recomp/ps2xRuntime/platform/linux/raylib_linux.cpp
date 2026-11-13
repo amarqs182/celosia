@@ -434,6 +434,19 @@ namespace
 
     void audioThunk(void *, Uint8 *stream, int bytes)
     {
+#if defined(__linux__)
+        static bool s_audioAffSet = false;
+        if (!s_audioAffSet)
+        {
+            s_audioAffSet = true;
+            cpu_set_t cpuset;
+            CPU_ZERO(&cpuset);
+            CPU_SET(1, &cpuset);
+            CPU_SET(2, &cpuset);
+            CPU_SET(3, &cpuset);
+            pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
+        }
+#endif
         const unsigned int frames = static_cast<unsigned int>(bytes) / 4u; // s16 stereo
         if (AudioCallback callback = g_audioCallback.load(std::memory_order_acquire))
             callback(stream, frames);
