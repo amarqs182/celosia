@@ -528,7 +528,7 @@ void main()
 {
     if (vScreen.w < 0.0) // layer 1 nearer than its near plane (uGuard)
         discard;
-    float textured = uFogColour.w;
+    mediump float textured = uFogColour.w;
     highp vec2 screen = vScreen.xy / vScreen.z * 0.5 + 0.5;
     highp float depth = vUV.z;
     // Textured 5 and 4 sample pictures this renderer drew (y-up in GL) at
@@ -564,7 +564,7 @@ void main()
         oColor = vec4(clamp(texture(uReflection, uv).rgb * uDebug.rgb * vColor.rgb, 0.0, 1.0), clamp(vColor.a * -uDebug.w, 0.0, 1.0));
         return;
     }
-    highp float lod = uFogC.w > 0.0 ? clamp(log2(max(depth, 1e-3)) * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
+    mediump float lod = uFogC.w > 0.0 ? clamp(log2(max(depth, 1e-3)) * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
     mediump vec4 t = textured > 0.5 ? textureLod(uTex, vUV.xy, lod) : vec4(vec3(128.0 / 255.0), 1.0); // untextured: the GS takes the vertex colour as is (255 = white)
     mediump float alpha = clamp(t.a * (textured > 0.5 ? 2.0 : 1.0) * vColor.a, 0.0, 1.0);
     if (alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y)) // the cut-out, the GS alpha test's side (DrawState::alphaTest)
@@ -579,7 +579,7 @@ void main()
     rgb = mix(uFogColour.rgb, rgb, vUV.w / vUV.z);
     if (uFogA.w > 0.5)
     {
-        highp float f = clamp((depth - uFogA.x) / uFogA.y, 0.0, 1.0);
+        mediump float f = clamp((depth - uFogA.x) / uFogA.y, 0.0, 1.0);
         if (uFogA.z > 0.0)
             f = floor(f * uFogA.z) / uFogA.z;
         rgb = mix(rgb, texture(uBackground, screen).rgb, f);
@@ -611,9 +611,9 @@ uniform vec4 uAlpha;     // alpha test: cut under x (at least 0.02), and at / ov
 out vec4 oColor;
 void main()
 {
-    float textured = uFogColour.w;
+    mediump float textured = uFogColour.w;
     highp float depth = vUV.z;
-    highp float lod = uFogC.w > 0.0 ? clamp(log2(max(depth, 1e-3)) * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
+    mediump float lod = uFogC.w > 0.0 ? clamp(log2(max(depth, 1e-3)) * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
     mediump vec4 t = textured > 0.5 ? textureLod(uTex, vUV.xy, lod) : vec4(vec3(128.0 / 255.0), 1.0); // untextured: the GS takes the vertex colour as is (255 = white)
     mediump float alpha = clamp(t.a * (textured > 0.5 ? 2.0 : 1.0) * vColor.a, 0.0, 1.0);
 #if CUT
@@ -629,7 +629,7 @@ void main()
     if (uFogA.w > 0.5)
     {
         highp vec2 screen = vScreen.xy / vScreen.z * 0.5 + 0.5;
-        highp float f = clamp((depth - uFogA.x) / uFogA.y, 0.0, 1.0);
+        mediump float f = clamp((depth - uFogA.x) / uFogA.y, 0.0, 1.0);
         if (uFogA.z > 0.0)
             f = floor(f * uFogA.z) / uFogA.z;
         rgb = mix(rgb, texture(uBackground, screen).rgb, f);
@@ -909,7 +909,7 @@ float4 main(float4 vUV : TEXCOORD0, float4 vColor : TEXCOORD1, float4 vScreen : 
 {
     if (vScreen.w < 0.0) // layer 1 nearer than its near plane (uGuard)
         discard;
-    float textured = uFogColour.w;
+    mediump float textured = uFogColour.w;
     float2 screen = vScreen.xy / vScreen.z * 0.5 + 0.5;
     float depth = vUV.z;
     // Textured 5 and 4 sample pictures this renderer drew (y-up) at the
@@ -977,7 +977,7 @@ float4 main(float4 vUV : TEXCOORD0, float4 vColor : TEXCOORD1,
 #endif
             uniform float4 uFogC, uniform float4 uFogColour) : COLOR
 {
-    float textured = uFogColour.w;
+    mediump float textured = uFogColour.w;
     float depth = vUV.z;
 #if UNTEX
     // Round 98 (Tuning glUntex98): an untextured draw: the LOD program's own
