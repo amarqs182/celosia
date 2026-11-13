@@ -56,11 +56,6 @@
 // See ps2FpuDivideNearest (ps2_runtime_macros.h).
 bool g_ps2FpuSetcsrNearest = false;
 
-// iosRecvMsg / iosSendMsg loop iteration counters (defined in EeScheduler.cpp,
-// read here for the [stats] diagnostic line). Counters only.
-extern std::atomic<uint64_t> g_eeRecvIters;
-extern std::atomic<uint64_t> g_eeSendIters;
-
 #if defined(__vita__)
 #include <psp2/kernel/processmgr.h>
 #endif
@@ -3836,8 +3831,6 @@ void PS2Runtime::run()
                       << " prims(pt,ln,lstrip,tri,tstrip,tfan,sprite)=";
             for (int i = 0; i < 7; ++i)
                 std::cerr << ps2_stats::gsPrims[i].exchange(0) << (i < 6 ? "," : "");
-            std::cerr << " profRecv=" << g_eeRecvIters.load(std::memory_order_relaxed)
-                      << " profSend=" << g_eeSendIters.load(std::memory_order_relaxed);
             lastStatChains = statChains;
             lastHostFrames = hostFrames;
             hostFrames = 0; // reset the 5 s window that hostFps= above reports
