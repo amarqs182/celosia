@@ -10839,6 +10839,21 @@ namespace sotc_native
         else
             for (int i = 0; i < 16; ++i)
                 camera[i] = real(g_cameraContext + 0x5A0u + i * 4u);
+#if defined(__aarch64__)
+        const float32x4_t c0 = vld1q_f32(camera);
+        const float32x4_t c1 = vld1q_f32(camera + 4);
+        const float32x4_t c2 = vld1q_f32(camera + 8);
+        const float32x4_t c3 = vld1q_f32(camera + 12);
+        for (int c = 0; c < 4; ++c)
+        {
+            const float32x4_t m = vld1q_f32(model + c * 4);
+            float32x4_t res = vmulq_laneq_f32(c0, m, 0);
+            res = vfmaq_laneq_f32(res, c1, m, 1);
+            res = vfmaq_laneq_f32(res, c2, m, 2);
+            res = vfmaq_laneq_f32(res, c3, m, 3);
+            vst1q_f32(clip + c * 4, res);
+        }
+#else
         for (int c = 0; c < 4; ++c)
             for (int r = 0; r < 4; ++r)
             {
@@ -10847,6 +10862,7 @@ namespace sotc_native
                     sum += camera[k * 4 + r] * model[c * 4 + k];
                 clip[c * 4 + r] = sum;
             }
+#endif
 
         uint32_t gl = static_cast<uint32_t>((lw >> 40) & 7u);
         if ((word(h + 0x18u) & 1u) && gl >= word(h + 0x1Cu) && word(h + 0x1Cu) != 0u)
