@@ -1,5 +1,7 @@
 #if defined(__APPLE__)
 #include "GLFW/glfw3.h"
+#elif defined(__linux__) && !defined(PS2X_LINUX_SDL2_SHIM)
+#include <EGL/egl.h>
 #endif
 #include "runtime/ps2_diag.h"
 #include "runtime/gs/gs_hw_backend.h"
@@ -1101,6 +1103,64 @@ bool PS2Runtime::initialize(const char *title)
         native_renderer::setGlContext([] {});
 #elif defined(PS2X_LINUX_SDL2_SHIM)
         native_renderer::setGlContext([] {});
+#elif defined(__linux__)
+        {
+            EGLDisplay dpy = eglGetCurrentDisplay();
+            EGLContext mainCtx = eglGetCurrentContext();
+            if (dpy != EGL_NO_DISPLAY && mainCtx != EGL_NO_CONTEXT)
+            {
+                EGLConfig cfg = nullptr;
+                EGLint numCfg = 0;
+                EGLint cfgId = 0;
+                if (eglQueryContext(dpy, mainCtx, EGL_CONFIG_ID, &cfgId))
+                {
+                    const EGLint byId[] = {EGL_CONFIG_ID, cfgId, EGL_NONE};
+                    eglChooseConfig(dpy, byId, &cfg, 1, &numCfg);
+                }
+                if (numCfg == 0)
+                {
+                    const EGLint fallbackCfg[] = {
+                        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+                        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+                        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+                        EGL_NONE};
+                    eglChooseConfig(dpy, fallbackCfg, &cfg, 1, &numCfg);
+                }
+                if (numCfg > 0 && cfg)
+                {
+                    eglBindAPI(EGL_OPENGL_ES_API);
+                    const EGLint ctxAttribs3[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
+                    EGLContext nativeCtx = eglCreateContext(dpy, cfg, EGL_NO_CONTEXT, ctxAttribs3);
+                    if (nativeCtx == EGL_NO_CONTEXT)
+                    {
+                        const EGLint ctxAttribs2[] = {EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE};
+                        nativeCtx = eglCreateContext(dpy, cfg, EGL_NO_CONTEXT, ctxAttribs2);
+                    }
+                    if (nativeCtx != EGL_NO_CONTEXT)
+                    {
+                        const EGLint pbAttribs[] = {EGL_WIDTH, 16, EGL_HEIGHT, 16, EGL_NONE};
+                        EGLSurface pbSurf = eglCreatePbufferSurface(dpy, cfg, pbAttribs);
+                        native_renderer::setGlContext([dpy, pbSurf, nativeCtx]
+                                                      {
+                            eglBindAPI(EGL_OPENGL_ES_API);
+                            if (!eglMakeCurrent(dpy, pbSurf, pbSurf, nativeCtx))
+                                std::cerr << "[native] eglMakeCurrent failed: 0x" << std::hex << eglGetError() << std::dec << std::endl; });
+                    }
+                    else
+                    {
+                        std::cerr << "[native] eglCreateContext failed: 0x" << std::hex << eglGetError() << std::dec << std::endl;
+                    }
+                }
+                else
+                {
+                    std::cerr << "[native] eglChooseConfig failed: 0x" << std::hex << eglGetError() << std::dec << std::endl;
+                }
+            }
+            else
+            {
+                std::cerr << "[native] no current EGL display/context for native renderer" << std::endl;
+            }
+        }
 #endif
         ps2_stats::bootMark("window and renderers up");
         hostmenu::load();

@@ -1328,7 +1328,11 @@ namespace native_renderer
     bool available()
     {
         if (!g_tried && wantGl())
+#if defined(__linux__)
+            return true; // PS2Runtime::run() sets the GL context before EeScheduler::run()
+#else
             return static_cast<bool>(g_glMakeCurrent); // not created here: this may not be the game thread
+#endif
         return backend() != nullptr;
     }
     FrameCounters &frameCounters()

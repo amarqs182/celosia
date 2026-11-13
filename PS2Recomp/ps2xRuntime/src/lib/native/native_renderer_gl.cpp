@@ -2243,7 +2243,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         // that do not last): after an area change the new area's runs were
         // drawn one by one for 4 frames, the render thread 170-190 ms each
         // against ~88 once copied (calibrated Vita3K, 240 MHz).
-        static constexpr uint32_t kRunFrames = 16;
+        static constexpr uint32_t kRunFrames = 1;
         static constexpr uint64_t kRunBudget0 = 0x30000; // ~7 MB (round 118: runBudget, SOTC_RUNBUDGET118_KB)
         IdMap<RunCopy> runs;
         uint64_t runVertices = 0;

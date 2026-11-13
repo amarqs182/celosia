@@ -973,7 +973,7 @@ namespace
     //    and a timed wait on the host scheduler; T2 stays stopped.
     namespace sysnative
     {
-        PS2Runtime::RecompiledFunction g_initIntr = nullptr, g_dmaSendPath1 = nullptr, g_copyFrameBuffer = nullptr;
+        PS2Runtime::RecompiledFunction g_initIntr = nullptr, g_dmaSendPath1 = nullptr, g_copyFrameBuffer = nullptr, g_iosSyncPath = nullptr;
 
         void returnTo(R5900Context *ctx) { ctx->pc = GPR_U32(ctx, 31); }
         uint64_t busTicks(PS2Runtime *runtime) { return runtime->eeScheduler().eeCycle() / 2u; }
@@ -1165,6 +1165,20 @@ namespace
             SET_GPR_U64(ctx, 2, runtime->memory().hostDrawPathsIdle() ? 1u : 0u);
             returnTo(ctx);
         }
+        void syncPath(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            if (GPR_U32(ctx, 4) == 0u && (ctx->vu0_vpu_stat & 0x100u) == 0u)
+            {
+                runtime->memory().syncVu1();
+                if (runtime->memory().hostDrawPathsIdle())
+                {
+                    SET_GPR_U64(ctx, 2, 0u);
+                    returnTo(ctx);
+                    return;
+                }
+            }
+            g_iosSyncPath(rdram, ctx, runtime);
+        }
         void copyFrameBuffer(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             if (!runtime->memory().hostDrawPathsIdle())
@@ -1268,6 +1282,7 @@ namespace
                 {0x001AD958u, copyViaSpr, nullptr},
                 {0x001C2570u, dmaSendPath1, &g_dmaSendPath1},
                 {0x001C2A78u, checkDrawFinish, nullptr},
+                {0x001C0FE0u, syncPath, &g_iosSyncPath},
                 {0x001C19C0u, copyFrameBuffer, &g_copyFrameBuffer},
             };
             const char *skip = std::getenv("SOTC_SYSTEM_SKIP"); // debugging: "0x1c2570,0x1c2a78" left to the game
