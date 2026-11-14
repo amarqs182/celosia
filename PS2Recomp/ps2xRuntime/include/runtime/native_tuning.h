@@ -468,7 +468,7 @@ namespace native_renderer
         // its colour premultiplied on the CPU: one texture read and one
         // multiply a pixel over the whole picture instead of ~14 operations
         // and a dependent read. SOTC_GL_POST93=0/1; A/B `post93`.
-#if defined(__vita__)
+#if defined(__vita__) || defined(__linux__)
         bool glMirror93 = true;
         bool glAtOpaque93 = true;
         bool glPost93 = true;
