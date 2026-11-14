@@ -4337,6 +4337,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 std::memcpy(src + offset, vertices, bytes);
 #else
             glBufferSubData(GL_ARRAY_BUFFER, static_cast<GLintptr>(offset), static_cast<GLsizeiptr>(bytes), vertices);
+            if (uint8_t *src = pools[static_cast<size_t>(pool)].source)
+                std::memcpy(src + offset, vertices, bytes);
 #endif
         }
         else
@@ -4523,7 +4525,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 
     void Renderer::poolCompact()
     {
+#if defined(PS2X_NATIVE_GLES)
+        // On ARM libmali (GLES), poolCompact issues glCopyBufferSubData into shared Pool VBOs
+        // that may still be referenced by in-flight GPU frames, stalling the render thread.
+        static const bool on = std::getenv("SOTC_GL_POOL_COMPACT") && std::atoi(std::getenv("SOTC_GL_POOL_COMPACT")) != 0;
+#else
         static const bool on = !std::getenv("SOTC_GL_POOL_COMPACT") || std::atoi(std::getenv("SOTC_GL_POOL_COMPACT")) != 0;
+#endif
         if (!on || !native_renderer::tuning().glMeshPools)
             return;
         constexpr uint32_t kMoveBudget = 0x4000u; // vertices a frame (~0.6 MB)
@@ -5547,7 +5555,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     // Round 116: a member after another of its record merges
                     // as that one did (the same state and matrix bit for bit);
                     // the record's first comparison is made in full.
+                    // Without run copies (bit 1 off or dynamic meshes), break on any
+                    // non-contiguous pool/vertex boundary so contiguous sub-spans merge.
                     if (!plainMesh(o) || o->dynamic != m->dynamic || total + o->count > 0xC000u || plan[end].tex != plan[k].tex ||
+                        ((!(mode & 2) || m->dynamic) && (o->pool != m->pool || o->first != m->first + total)) ||
                         !((!shareOff && end - 1u > k && recAt(end) == recAt(end - 1u)) || sameDraw(lead, drawAt(end))))
                         break;
                     total += o->count;
@@ -5581,14 +5592,48 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                         if (copy->used != arenaFrame) // (the same run twice in a frame counts once)
                             copy->frames = copy->used + 1u == arenaFrame ? copy->frames + 1u : 1u;
                         copy->used = arenaFrame;
-                        // SOTC_GL_RUN_FRAMES=<n>: frames in a row before the copy (kRunFrames).
-                        static const uint32_t runFrames = std::getenv("SOTC_GL_RUN_FRAMES") ? std::max(1, std::atoi(std::getenv("SOTC_GL_RUN_FRAMES"))) : kRunFrames;
+                        // SOTC_GL_RUN_FRAMES=<n>: frames in a row before the copy (kRunFrames; 2 on GLES to skip 1-frame churn).
+#if defined(PS2X_NATIVE_GLES)
+                        constexpr uint32_t kDefaultRunFrames = 2;
+#else
+                        constexpr uint32_t kDefaultRunFrames = kRunFrames;
+#endif
+                        static const uint32_t runFrames = std::getenv("SOTC_GL_RUN_FRAMES") ? std::max(1, std::atoi(std::getenv("SOTC_GL_RUN_FRAMES"))) : kDefaultRunFrames;
                         if (copy->pool < 0 && copy->frames >= runFrames && !copyRun(k, end, total, *copy))
                             copy->frames = 0; // no room: tried again later
                     }
                     if (!copy || copy->pool < 0 || copy->count != total)
                     {
-                        k = end; // drawn one by one
+                        if (mode & 1)
+                        {
+                            for (size_t s = k; s < end; )
+                            {
+                                const Mesh *sm = plan[s].mesh;
+                                uint32_t subTotal = sm->count;
+                                size_t se = s + 1;
+                                while (se < end && plan[se].mesh->pool == sm->pool && plan[se].mesh->first == sm->first + subTotal)
+                                {
+                                    subTotal += plan[se].mesh->count;
+                                    ++se;
+                                }
+                                if (se - s > 1)
+                                {
+                                    Planned &sp = plan[s];
+                                    for (size_t j = s + 1; j < se; ++j)
+                                    {
+                                        sp.minAlpha = std::min(sp.minAlpha, plan[j].minAlpha);
+                                        sp.maxAlpha = std::max(sp.maxAlpha, plan[j].maxAlpha);
+                                        sp.minW = std::min(sp.minW, plan[j].minW);
+                                        sp.maxW = (sp.maxW < 0.0f || plan[j].maxW < 0.0f) ? -1.0f : std::max(sp.maxW, plan[j].maxW);
+                                        plan[j].run = 0;
+                                    }
+                                    sp.mergedCount = subTotal;
+                                    sp.run = static_cast<uint32_t>(se - s);
+                                }
+                                s = se;
+                            }
+                        }
+                        k = end; // drawn by contiguous sub-spans (or one by one)
                         continue;
                     }
                     p.runPool = copy->pool;
@@ -5609,29 +5654,112 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         if (native_renderer::tuning().glInstancing)
         {
             instanceClips.clear();
+            static const bool sortAggressive = []() {
+                const char *e = std::getenv("SOTC_SORT_OPAQUE");
+                return !e || std::atoi(e) != 0;
+            }();
+            auto isOpaquePlan = [&](const Planned &p, const Draw &d) -> bool
+            {
+                const native_renderer::DrawState &st = d.state;
+                if (st.background || st.overlay || st.screen || st.screenDepthTest || st.noDepthWrite || st.shadowVolume ||
+                    st.reflectionSource || st.reflectionSample || st.refractionSample || st.screenCopy || st.previousFrame ||
+                    st.fresnel || st.debugColour)
+                    return false;
+                if (st.texture && !p.tex)
+                    return false;
+                if (sortAggressive)
+                    return st.opacity >= 0.95f && (st.blend == native_renderer::Blend::Opaque || st.blend == native_renderer::Blend::Normal);
+                if ((st.alphaTest & 1u) != 0u)
+                    return false;
+                if (st.blend == native_renderer::Blend::Opaque)
+                    return true;
+                if (st.blend != native_renderer::Blend::Normal || !p.minAlpha)
+                    return false;
+                float least = static_cast<float>(p.minAlpha) / 128.0f * st.opacity;
+                if (p.tex)
+                    least *= static_cast<float>(p.tex->minAlpha) / 255.0f * 2.0f;
+                return least >= 1.0f;
+            };
+            constexpr size_t kMaxInstances = 16;
+            std::vector<std::pair<const Mesh *, size_t>> instScratch;
             for (size_t k = 0; k < n; )
             {
                 Planned &leadPlan = plan[k];
-                if (leadPlan.run != 1 || !leadPlan.mesh || leadPlan.mesh->skinned || leadPlan.mesh->dynamic || leadPlan.mesh->indexed || leadPlan.mesh->pool < 0)
-                {
-                    ++k;
-                    continue;
-                }
                 const Draw &leadDraw = drawAt(k);
                 if (leadDraw.state.shadowVolume)
                 {
                     ++k;
                     continue;
                 }
+                // For opaque depth-writing (tex, state) blocks, scan the entire
+                // contiguous same-(tex, state) group in O(B log B) so sorting by
+                // (tex, state, clip, where) can merge multi-mesh objects by clip
+                // without sacrificing instancing of identical single meshes.
+                if (isOpaquePlan(leadPlan, leadDraw))
+                {
+                    size_t blockEnd = k + 1;
+                    while (blockEnd < n && plan[blockEnd].tex == leadPlan.tex &&
+                           sameState(leadDraw, drawAt(blockEnd)) &&
+                           drawAt(blockEnd).state.alphaTest == leadDraw.state.alphaTest &&
+                           isOpaquePlan(plan[blockEnd], drawAt(blockEnd)))
+                        ++blockEnd;
+                    if (blockEnd - k > 1)
+                    {
+                        instScratch.clear();
+                        for (size_t s = k; s < blockEnd; ++s)
+                        {
+                            const Planned &op = plan[s];
+                            if (op.run == 1 && op.mesh && !op.mesh->skinned && !op.mesh->dynamic && !op.mesh->indexed && op.mesh->pool >= 0)
+                                instScratch.push_back({op.mesh, s});
+                        }
+                        if (instScratch.size() > 1)
+                        {
+                            std::sort(instScratch.begin(), instScratch.end());
+                            for (size_t i = 0; i < instScratch.size(); )
+                            {
+                                size_t j = i + 1;
+                                while (j < instScratch.size() && (j - i) < kMaxInstances && instScratch[j].first == instScratch[i].first)
+                                    ++j;
+                                const uint32_t count = static_cast<uint32_t>(j - i);
+                                if (count > 1)
+                                {
+                                    const size_t leadIdx = instScratch[i].second;
+                                    Planned &lp = plan[leadIdx];
+                                    lp.instances = count;
+                                    lp.instanceOffset = static_cast<uint32_t>(instanceClips.size());
+                                    for (size_t idx = i; idx < j; ++idx)
+                                    {
+                                        const size_t s = instScratch[idx].second;
+                                        const Draw &d = drawAt(s);
+                                        instanceClips.insert(instanceClips.end(), d.clip, d.clip + 16);
+                                        lp.maxW = (lp.maxW < 0.0f || plan[s].maxW < 0.0f) ? -1.0f : std::max(lp.maxW, plan[s].maxW);
+                                        if (idx > i)
+                                        {
+                                            plan[s].run = 0;
+                                            plan[s].instances = 0;
+                                        }
+                                    }
+                                }
+                                i = j;
+                            }
+                        }
+                    }
+                    k = blockEnd;
+                    continue;
+                }
+                if (leadPlan.run != 1 || !leadPlan.mesh || leadPlan.mesh->skinned || leadPlan.mesh->dynamic || leadPlan.mesh->indexed || leadPlan.mesh->pool < 0)
+                {
+                    ++k;
+                    continue;
+                }
                 size_t end = k + 1;
-                constexpr size_t kMaxInstances = 16;
                 while (end < n && (end - k) < kMaxInstances)
                 {
                     const Planned &oPlan = plan[end];
                     if (oPlan.run != 1 || oPlan.mesh != leadPlan.mesh || oPlan.tex != leadPlan.tex)
                         break;
                     const Draw &oDraw = drawAt(end);
-                    if (!sameState(leadDraw, oDraw))
+                    if (!sameState(leadDraw, oDraw) || oDraw.state.alphaTest != leadDraw.state.alphaTest)
                         break;
                     ++end;
                 }
@@ -5644,6 +5772,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     {
                         const Draw &d = drawAt(j);
                         instanceClips.insert(instanceClips.end(), d.clip, d.clip + 16);
+                        leadPlan.maxW = (leadPlan.maxW < 0.0f || plan[j].maxW < 0.0f) ? -1.0f : std::max(leadPlan.maxW, plan[j].maxW);
                         if (j > k)
                         {
                             plan[j].run = 0;
@@ -5733,12 +5862,26 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         auto hashState = [&](const Draw &d) -> uint64_t
         {
             const native_renderer::DrawState &x = d.state;
-            const uint32_t stateBits = static_cast<uint32_t>(x.clamp) |
-                                      (static_cast<uint32_t>(x.blend) << 4) |
-                                      (static_cast<uint32_t>(x.alphaTest) << 8) |
-                                      (x.lit ? (1u << 24) : 0u) |
-                                      (x.writeDepth ? (1u << 25) : 0u);
-            return static_cast<uint64_t>(stateBits);
+            uint64_t h = static_cast<uint64_t>(static_cast<uint32_t>(x.clamp) |
+                                               (static_cast<uint32_t>(x.blend) << 4) |
+                                               (static_cast<uint32_t>(x.alphaTest) << 8) |
+                                               (x.lit ? (1u << 24) : 0u) |
+                                               (x.writeDepth ? (1u << 25) : 0u) |
+                                               (x.noDepthWrite ? (1u << 26) : 0u) |
+                                               (x.fogged ? (1u << 27) : 0u) |
+                                               (x.fresnel ? (1u << 28) : 0u));
+            uint32_t fb[6];
+            std::memcpy(fb, &x.opacity, sizeof(fb));
+            for (int i = 0; i < 6; ++i)
+                h = (h ^ (fb[i] == 0x80000000u ? 0u : fb[i])) * 0x9E3779B97F4A7C15ull;
+            if (x.lit || x.fresnel)
+            {
+                uint32_t lb[sizeof(x.light) / sizeof(uint32_t)];
+                std::memcpy(lb, x.light, sizeof(lb));
+                for (uint32_t v : lb)
+                    h = (h ^ v) * 0x9E3779B97F4A7C15ull;
+            }
+            return h ^ (h >> 32);
         };
         auto hashClip = [&](const Draw &d) -> uint64_t
             {
@@ -5780,10 +5923,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                         return a.tex < b.tex;
                     if (a.state != b.state)
                         return a.state < b.state;
-                    if (a.where != b.where)
-                        return a.where < b.where;
                     if (a.clip != b.clip)
                         return a.clip < b.clip;
+                    if (a.where != b.where)
+                        return a.where < b.where;
                     return a.k < b.k;
                 });
                 sortOrder.clear();
@@ -5996,7 +6139,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     // drawn one by one).
     bool Renderer::runSourceOn()
     {
-#if defined(PS2X_NATIVE_VITA)
+#if defined(PS2X_NATIVE_VITA) || defined(PS2X_NATIVE_GLES)
         static const bool on = !std::getenv("SOTC_RUNSRC118") || std::atoi(std::getenv("SOTC_RUNSRC118")) != 0;
         return on;
 #else
@@ -6009,7 +6152,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         p.sourceBlock = -1;
         if (!runSourceOn())
             return;
-#if defined(PS2X_NATIVE_VITA)
+#if defined(PS2X_NATIVE_VITA) || defined(PS2X_NATIVE_GLES)
         static const uint64_t limit = static_cast<uint64_t>(std::getenv("SOTC_RUNSRC118_MB") ? std::max(0, std::atoi(std::getenv("SOTC_RUNSRC118_MB"))) : 64) << 20;
         const size_t bytes = poolSourceSize(p);
         if (!sourceSpares.empty()) // a pool let go left its block (a new one costs a kernel call and its pages)
@@ -6024,6 +6167,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             ++h118.sourceFails;
             return;
         }
+#if defined(PS2X_NATIVE_VITA)
         const SceUID block = sceKernelAllocMemBlock("sotc_poolsrc", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, bytes, nullptr);
         void *base = nullptr;
         if (block < 0 || sceKernelGetMemBlockBase(block, &base) < 0 || !base)
@@ -6035,6 +6179,16 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         }
         p.source = static_cast<uint8_t *>(base);
         p.sourceBlock = block;
+#else
+        void *base = std::malloc(bytes);
+        if (!base)
+        {
+            ++h118.sourceFails;
+            return;
+        }
+        p.source = static_cast<uint8_t *>(base);
+        p.sourceBlock = 0;
+#endif
         sourceBytes += bytes;
         ++h118.sourceBlocks;
 #endif
@@ -6049,6 +6203,17 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             else
             {
                 sceKernelFreeMemBlock(p.sourceBlock);
+                sourceBytes -= poolSourceSize(p);
+            }
+        }
+#elif defined(PS2X_NATIVE_GLES)
+        if (p.source)
+        {
+            if (sourceSpares.size() < 4u)
+                sourceSpares.push_back({0, p.source});
+            else
+            {
+                std::free(p.source);
                 sourceBytes -= poolSourceSize(p);
             }
         }
@@ -6090,13 +6255,20 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     ++h118.noSource;
                     return false;
                 }
-        // Round 112 (SOTC_RUNCOPY112_KB, default 1024; 0: no limit): the
+        // Round 112 (SOTC_RUNCOPY112_KB, default 1024; 384 on GLES): the
         // copies one frame makes, at most this much; the runs past it are
         // drawn one by one this frame (the same vertices in the same order,
         // as when the copies' budget has no room) and copied in the next
         // frames, so a camera turn that brings hundreds of new runs spreads
         // the copying instead of stalling one frame.
-        static const uint64_t frameLimit = static_cast<uint64_t>(std::getenv("SOTC_RUNCOPY112_KB") ? std::max(0, std::atoi(std::getenv("SOTC_RUNCOPY112_KB"))) : 1024) * 1024u;
+#if defined(PS2X_NATIVE_GLES)
+        constexpr int kDefaultRunCopyKB = 384;
+        constexpr uint64_t kDefaultRunBudget = 0x60000;
+#else
+        constexpr int kDefaultRunCopyKB = 1024;
+        constexpr uint64_t kDefaultRunBudget = kRunBudget0;
+#endif
+        static const uint64_t frameLimit = static_cast<uint64_t>(std::getenv("SOTC_RUNCOPY112_KB") ? std::max(0, std::atoi(std::getenv("SOTC_RUNCOPY112_KB"))) : kDefaultRunCopyKB) * 1024u;
         const uint64_t bytes = static_cast<uint64_t>(total) * sizeof(native_renderer::Vertex);
         if (frameLimit && frameCopyBytes && frameCopyBytes + bytes > frameLimit)
         {
@@ -6105,10 +6277,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         }
         frameCopyBytes += bytes;
         // Round 118 (SOTC_RUNBUDGET118_KB): the copies' budget (default
-        // 0x30000 vertices, ~6.75 MB of GPU memory).
+        // 0x30000 vertices, ~6.75 MB of GPU memory; 0x60000 on GLES).
         static const uint64_t envBudget = std::getenv("SOTC_RUNBUDGET118_KB")
                                               ? static_cast<uint64_t>(std::max(256, std::atoi(std::getenv("SOTC_RUNBUDGET118_KB")))) * 1024u / sizeof(native_renderer::Vertex)
-                                              : kRunBudget0;
+                                              : kDefaultRunBudget;
         runBudget = envBudget;
         const uint64_t kRunBudget = runBudget;
         if (runVertices + total > kRunBudget)
@@ -6156,9 +6328,6 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         if (!poolAlloc(total, pool, first))
             return false;
         constexpr size_t stride = sizeof(native_renderer::Vertex);
-#if !defined(PS2X_NATIVE_VITA)
-        glBindBuffer(GL_COPY_WRITE_BUFFER, pools[static_cast<size_t>(pool)].buffer);
-#endif
         uint32_t at = first;
 #if defined(PS2X_NATIVE_VITA)
         // Round 112: meshes lying one after the other in the same pool go in
@@ -6207,14 +6376,86 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             ++h112.copies;
         }
 #else
-        for (size_t j = from; j < to; ++j)
+        if (fromSource)
         {
-            const Mesh *o = plan[j].mesh;
-            const Pool &src = pools[static_cast<size_t>(o->pool)];
-            glBindBuffer(GL_COPY_READ_BUFFER, src.buffer);
-            glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, static_cast<GLintptr>(o->first) * stride, static_cast<GLintptr>(at) * stride,
-                                static_cast<GLsizeiptr>(o->count) * stride);
-            at += o->count;
+            thread_local std::vector<uint8_t> stage;
+            Pool &dstPool = pools[static_cast<size_t>(pool)];
+            uint8_t *dstPtr = nullptr;
+            if (dstPool.source)
+                dstPtr = dstPool.source + static_cast<size_t>(first) * stride;
+            else
+            {
+                stage.resize(static_cast<size_t>(total) * stride);
+                dstPtr = stage.data();
+            }
+            const uint8_t *const uploadSrc = dstPtr;
+            int spanPool = -1;
+            uint32_t spanFirst = 0, spanCount = 0;
+            uint8_t *spanDst = dstPtr;
+            auto flushCpu = [&]
+            {
+                if (!spanCount)
+                    return;
+                const Pool &src = pools[static_cast<size_t>(spanPool)];
+                std::memcpy(spanDst, src.source + static_cast<size_t>(spanFirst) * stride, static_cast<size_t>(spanCount) * stride);
+                ++ramCopies118;
+            };
+            for (size_t j = from; j < to; ++j)
+            {
+                const Mesh *o = plan[j].mesh;
+                if (spanCount && o->pool == spanPool && o->first == spanFirst + spanCount)
+                    spanCount += o->count;
+                else
+                {
+                    flushCpu();
+                    spanPool = o->pool;
+                    spanFirst = o->first;
+                    spanCount = o->count;
+                    spanDst = dstPtr;
+                }
+                dstPtr += static_cast<size_t>(o->count) * stride;
+            }
+            flushCpu();
+            glBindBuffer(GL_ARRAY_BUFFER, dstPool.buffer);
+            glBufferSubData(GL_ARRAY_BUFFER, static_cast<GLintptr>(static_cast<size_t>(first) * stride),
+                            static_cast<GLsizeiptr>(static_cast<size_t>(total) * stride), uploadSrc);
+            cache.buffer = ~0u;
+        }
+        else
+        {
+            glBindBuffer(GL_COPY_WRITE_BUFFER, pools[static_cast<size_t>(pool)].buffer);
+            int spanPool = -1;
+            uint32_t spanFirst = 0, spanCount = 0, spanAt = first;
+            GLuint boundRead = ~0u;
+            auto flush = [&]
+            {
+                if (!spanCount)
+                    return;
+                const Pool &src = pools[static_cast<size_t>(spanPool)];
+                if (src.buffer != boundRead)
+                {
+                    glBindBuffer(GL_COPY_READ_BUFFER, src.buffer);
+                    boundRead = src.buffer;
+                }
+                glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, static_cast<GLintptr>(spanFirst) * stride,
+                                    static_cast<GLintptr>(spanAt) * stride, static_cast<GLsizeiptr>(spanCount) * stride);
+            };
+            for (size_t j = from; j < to; ++j)
+            {
+                const Mesh *o = plan[j].mesh;
+                if (spanCount && o->pool == spanPool && o->first == spanFirst + spanCount)
+                    spanCount += o->count;
+                else
+                {
+                    flush();
+                    spanPool = o->pool;
+                    spanFirst = o->first;
+                    spanCount = o->count;
+                    spanAt = at;
+                }
+                at += o->count;
+            }
+            flush();
         }
 #endif
         copy.pool = pool;
@@ -7078,21 +7319,23 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                         m.paletteSent = key;
                     }
                 };
-                sendPalette();
-                MainSlot &m = mains[mainSlot];
-                if (m.locInstanceCount >= 0)
+                auto sendInstances = [&]
                 {
-                    const int count = planned.instances > 1 ? static_cast<int>(planned.instances) : 1;
-                    if (m.lastInstanceCount != count)
+                    MainSlot &m = mains[mainSlot];
+                    if (m.locInstanceCount >= 0)
                     {
-                        glUniform1i(m.locInstanceCount, count);
-                        m.lastInstanceCount = count;
+                        const int count = planned.instances > 1 ? static_cast<int>(planned.instances) : 1;
+                        if (m.lastInstanceCount != count)
+                        {
+                            glUniform1i(m.locInstanceCount, count);
+                            m.lastInstanceCount = count;
+                        }
+                        if (count > 1 && m.locInstanceClips >= 0)
+                            glUniform4fv(m.locInstanceClips, count * 4, instanceClips.data() + planned.instanceOffset);
                     }
-                    if (count > 1 && m.locInstanceClips >= 0)
-                    {
-                        glUniform4fv(m.locInstanceClips, count * 4, instanceClips.data() + planned.instanceOffset);
-                    }
-                }
+                };
+                sendPalette();
+                sendInstances();
                 uniform4(uClip, d.clip, 4);
                 if (d.state.lit || d.state.fresnel) // read by the vertex program only then
                 {
@@ -7555,6 +7798,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                         // Round 75: through the SOFT program (its own uniforms).
                         useProgram(softSecond);
                         sendPalette();
+                        sendInstances();
                         uniform4(uClip, d.clip, 4);
                         if (d.state.lit || d.state.fresnel)
                         {
@@ -7599,7 +7843,16 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     if (px98.frame)
                         px98Add(less98 ? "pass-less" : passKind, target, k, mainSlot, static_cast<int>(d.state.blend), 2, !softSecond && !cutUsed);
                     const uint64_t secondStart = phases.on ? native_renderer::nowUs() : 0u;
-                    if (planned.run > 1)
+                    if (planned.instances > 1)
+                    {
+#if !defined(PS2X_NATIVE_VITA)
+                        glDrawArraysInstanced(GL_TRIANGLES, firstVertex, static_cast<GLsizei>(diagHalf(mesh.count)), static_cast<GLsizei>(planned.instances));
+#else
+                        for (uint32_t inst = 0; inst < planned.instances; ++inst)
+                            drawMesh(mesh, firstVertex);
+#endif
+                    }
+                    else if (planned.run > 1)
                         glDrawArrays(GL_TRIANGLES, firstVertex, static_cast<GLsizei>(diagHalf(planned.mergedCount)));
                     else
                         drawMesh(mesh, firstVertex);
@@ -7611,7 +7864,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                         phases.calls += took, ++phases.count;
                         stats.callUs += took, ++stats.calls;
                     }
-                    stats.vertices += planned.run > 1 ? planned.mergedCount : mesh.count;
+                    stats.vertices += planned.instances > 1 ? (mesh.count * planned.instances) : (planned.run > 1 ? planned.mergedCount : mesh.count);
                     ++drawStats.alphaSecond;
                     ++shadowStats.alphaSecond;
                 }

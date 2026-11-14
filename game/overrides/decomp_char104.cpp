@@ -88,7 +88,9 @@ namespace char104
         // jobs where their own account is negative: altar +0.74, route 6 +0.34, attract riding +0.45. 1.
         // Round 121: the console's in-run A/B (r117 err.txt, ab116.py --from 2500) has char104 losing 0.4-1.1 ms a frame
         // on the real Vita: 0 on the Vita build (SOTC_CHAR104=1 still turns the jobs on), 1 elsewhere.
-#if defined(__vita__)
+        // R36S (4x Cortex-A35 aarch64 Linux) has the same worker wakeup cost (0.09-0.19 ms) and gate waits
+        // (6.37 ms/frame in joins + 1.70 ms/frame handover overhead in Pass 4): default 0 there too.
+#if defined(__vita__) || (defined(__linux__) && defined(__aarch64__))
         constexpr int kChar104Default = 0;
 #else
         constexpr int kChar104Default = 1;
