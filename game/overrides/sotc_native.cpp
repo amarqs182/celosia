@@ -7166,9 +7166,11 @@ namespace sotc_native
         ++g_frameDraws;
     }
 
-    // ---- Shadows: shadowDisp -------------------------------------------------
+    // ---- Shadows: shadowDisp / shadowDraw ------------------------------------
     constexpr uint32_t kShadowDisp = 0x0109E0E8u;
+    constexpr uint32_t kShadowDraw = 0x0109D320u;
     PS2Runtime::RecompiledFunction g_shadowDisp = nullptr;
+    PS2Runtime::RecompiledFunction g_shadowDraw = nullptr;
 
     // shadowDisp(instance chain, shadow model) (0x109e0e8): microcode 8 takes
     // the shadow model's triangles (V3-32 strips, the REF at model + 0x1c)
@@ -7200,6 +7202,18 @@ namespace sotc_native
             return;
         }
         g_shadowDisp(rdram, ctx, runtime);
+    }
+
+    void shadowDrawHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        syncFrame(rdram);
+        if (nativeDraws() && !native_renderer::tuning().shadows)
+        {
+            std::memset(rdram + 0x0118C080u, 0, 4);
+            ctx->pc = GPR_U32(ctx, 31);
+            return;
+        }
+        g_shadowDraw(rdram, ctx, runtime);
     }
 
     void shadowCapture(uint32_t chain, uint32_t model, bool skinnedShadow)
@@ -12381,6 +12395,11 @@ void installSotcNative(PS2Runtime &runtime)
     {
         g_shadowDisp = runtime.lookupFunction(kShadowDisp);
         runtime.registerFunction(kShadowDisp, shadowDispHook);
+    }
+    if (runtime.hasFunction(kShadowDraw))
+    {
+        g_shadowDraw = runtime.lookupFunction(kShadowDraw);
+        runtime.registerFunction(kShadowDraw, shadowDrawHook);
     }
     if (runtime.hasFunction(kPtclEnv) && runtime.hasFunction(kPtclVtx))
     {

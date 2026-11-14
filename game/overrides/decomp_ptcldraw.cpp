@@ -20,6 +20,8 @@
 
 #include "ps2_runtime_macros.h"
 #include "runtime/ps2_memory.h"
+#include "runtime/native_tuning.h"
+#include "runtime/native_renderer.h"
 
 #include <cstring>
 
@@ -30,6 +32,7 @@ namespace decomp_math
 
 namespace sotc_native
 {
+    bool nativeDraws();
     bool ptclDirect103(uint32_t data, uint32_t count, uint32_t blend, uint32_t vec, uint32_t type, const float mat[16], uint32_t lightAt, uint32_t shadeAt,
                        float fade);
 }
@@ -154,6 +157,8 @@ namespace decomp_ptcldraw
 
     void draw(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        if (sotc_native::nativeDraws() && !native_renderer::tuning().particles)
+            return sotc_decomp::returnTo(ctx);
         const Ram ram{rdram};
         const uint32_t s2 = GPR_U32(ctx, 4), fp = GPR_U32(ctx, 5), s4 = GPR_U32(ctx, 6);
         const uint32_t sp0 = GPR_U32(ctx, 29), sp1 = sp0 - 0xF0u;
