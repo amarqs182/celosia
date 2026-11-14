@@ -106,6 +106,7 @@ namespace
         CTRL_START = 1u << 13,
         CTRL_L3 = 1u << 14,
         CTRL_R3 = 1u << 15,
+        CTRL_GUIDE = 1u << 16,
     };
 
     struct PadState
@@ -324,6 +325,7 @@ namespace
             set(CTRL_START, button(SDL_CONTROLLER_BUTTON_START));
             set(CTRL_L3, button(SDL_CONTROLLER_BUTTON_LEFTSTICK));
             set(CTRL_R3, button(SDL_CONTROLLER_BUTTON_RIGHTSTICK));
+            set(CTRL_GUIDE, button(SDL_CONTROLLER_BUTTON_GUIDE));
             auto pick = [](unsigned char current, int16_t value)
             {
                 const unsigned char next = axisToByte(value);
@@ -1185,6 +1187,7 @@ bool IsGamepadButtonDown(int gamepad, int button)
     case GAMEPAD_BUTTON_LEFT_TRIGGER_2: return b & CTRL_L2;
     case GAMEPAD_BUTTON_RIGHT_TRIGGER_2: return b & CTRL_R2;
     case GAMEPAD_BUTTON_MIDDLE_LEFT: return b & CTRL_SELECT;
+    case GAMEPAD_BUTTON_MIDDLE: return b & CTRL_GUIDE;
     case GAMEPAD_BUTTON_MIDDLE_RIGHT: return b & CTRL_START;
     case GAMEPAD_BUTTON_LEFT_THUMB: return b & CTRL_L3;
     case GAMEPAD_BUTTON_RIGHT_THUMB: return b & CTRL_R3;
