@@ -549,6 +549,8 @@ xychart-beta
 | `SOTC_INPUT_REPLAY=<file>` | (input replay) plays a recording back: the recorded timer count, pad state, disc read timing and VBlank count in each logic frame (any frame rate); `[rstate]` lines to compare; `tools/replay_compare.sh <file>` does the three replays and the page |
 | `SOTC_REPLAY_SHOTS=-6,-3,0,3,6`, `SOTC_REPLAY_SHOT_TICKS=t,t,...` | (input replay) the frames pictured: offsets around each mark, and absolute ticks; the Mac saves `snap_<tick>.png` (and `native_snap_<tick>.png` with `SOTC_NATIVE=2`) in `PS2X_SNAPSHOT_DIR`, the Vita holds the frame `SOTC_REPLAY_HOLD_MS` (1500) with `[replay] hold <tick>` in the log for a window capture (`SOTC_REPLAY_FB=1`: the display buffer to a file too, console only) |
 | `SOTC_REPLAY_EXIT=1`, `SOTC_REPLAY_TRACE=1`, `SOTC_INPUT_STATE_EVERY=<n>` | (input replay) leave at the recording's end; a `[rtick]` line per frame; the state check every n frames (30) |
+| `SOTC_FPS_CAP=n` | (R36S / Linux SDL2, default `60`, `0` uncapped) software frame limiter using `CLOCK_MONOTONIC` / `clock_nanosleep` in `EndDrawing`; paired with `PS2X_SWAP_INTERVAL` defaulting to `0` on Linux (VSync off) so KMSDRM / libmali does not stall below target FPS |
+| `SOTC_CAM_INVERT_X=0/1` | (R36S / Linux SDL2, default `1`) invert the gamepad right-stick horizontal axis before PS2 pad packing so right-stick right pans the camera right (`0` restores original PS2 SCUS-97472 horizontal camera; menus and Y axis unchanged) |
 
 With `SOTC_FRAME_LOG=1` the `[frame]` lines also end in `| sync ... | joins ...`: the game
 thread's work at the frame's change by part (the join, endFrame, the frame log, the sound log,

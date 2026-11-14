@@ -13,9 +13,12 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cerrno>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <map>
 #include <mutex>
 #include <vector>
@@ -40,8 +43,9 @@ namespace
     std::recursive_mutex g_glMutex;
     int g_glLockDepth = 0;
     std::mutex g_inputMutex;
-    std::atomic<int> g_swapInterval{1};
-    int g_appliedSwapInterval = 1;
+    std::atomic<int> g_swapInterval{0};
+    std::atomic<int> g_targetFps{60};
+    int g_appliedSwapInterval = -999;
 }
 
 void ps2xLinuxGlLock()
@@ -333,7 +337,15 @@ namespace
             };
             merged.lx = pick(merged.lx, SDL_GameControllerGetAxis(ctrl, SDL_CONTROLLER_AXIS_LEFTX));
             merged.ly = pick(merged.ly, SDL_GameControllerGetAxis(ctrl, SDL_CONTROLLER_AXIS_LEFTY));
-            merged.rx = pick(merged.rx, SDL_GameControllerGetAxis(ctrl, SDL_CONTROLLER_AXIS_RIGHTX));
+            static const bool invertCamX = []
+            {
+                const char *e = std::getenv("SOTC_CAM_INVERT_X");
+                return !e || std::atoi(e) != 0;
+            }();
+            int16_t rxRaw = SDL_GameControllerGetAxis(ctrl, SDL_CONTROLLER_AXIS_RIGHTX);
+            if (invertCamX)
+                rxRaw = (rxRaw == -32768) ? 32767 : static_cast<int16_t>(-rxRaw);
+            merged.rx = pick(merged.rx, rxRaw);
             merged.ry = pick(merged.ry, SDL_GameControllerGetAxis(ctrl, SDL_CONTROLLER_AXIS_RIGHTY));
         }
         g_pad = merged;
@@ -715,6 +727,14 @@ void InitWindow(int width, int height, const char *title)
     // quad program's vertex shader; there is no fixed-function state here.
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    {
+        const int wantSwap = std::getenv("PS2X_SWAP_INTERVAL") ? std::atoi(std::getenv("PS2X_SWAP_INTERVAL")) : 0;
+        g_swapInterval.store(wantSwap, std::memory_order_relaxed);
+        const int setRc = SDL_GL_SetSwapInterval(wantSwap);
+        const int actualSwap = SDL_GL_GetSwapInterval();
+        g_appliedSwapInterval = wantSwap;
+        std::fprintf(stderr, "[linux] swap interval req=%d setRc=%d actual=%d\n", wantSwap, setRc, actualSwap);
+    }
     SDL_GL_MakeCurrent(g_window, nullptr);
     bootMark("window: GLES up");
 
@@ -773,9 +793,12 @@ void CloseWindow(void)
 bool WindowShouldClose(void) { return g_quit; }
 bool IsWindowReady(void) { return g_glReady; }
 void SetConfigFlags(unsigned int) {}
-// Presentation follows the display's vsync: 30 or less shows each picture
-// for at least two vblanks (interval 2), else every vblank.
-void SetTargetFPS(int fps) { g_swapInterval.store(fps > 0 && fps <= 30 ? 2 : 1, std::memory_order_relaxed); }
+// Software frame limiter target (PS2X_SWAP_INTERVAL defaults to 0 on Linux so
+// presentation does not block on KMSDRM/libmali VSync; EndDrawing paces via CLOCK_MONOTONIC).
+void SetTargetFPS(int fps)
+{
+    g_targetFps.store(fps > 0 ? fps : 0, std::memory_order_relaxed);
+}
 int GetFPS(void) { return g_fps; }
 
 double GetTime(void)
@@ -833,16 +856,18 @@ void EndDrawing(void)
 {
     if (g_glReady && g_window)
     {
-        int wantSwap = g_swapInterval.load(std::memory_order_relaxed);
+        int wantSwap = 0;
         if (const char *envSwap = std::getenv("PS2X_SWAP_INTERVAL"))
-        {
             wantSwap = std::atoi(envSwap);
-        }
         if (wantSwap != g_appliedSwapInterval)
         {
-            SDL_GL_SetSwapInterval(wantSwap);
+            const int setRc = SDL_GL_SetSwapInterval(wantSwap);
+            const int actualSwap = SDL_GL_GetSwapInterval();
             g_appliedSwapInterval = wantSwap;
+            std::fprintf(stderr, "[linux] swap interval req=%d setRc=%d actual=%d\n", wantSwap, setRc, actualSwap);
         }
+        static constexpr GLenum kDefaultDiscard[2] = {GL_DEPTH, GL_STENCIL};
+        glInvalidateFramebuffer(GL_FRAMEBUFFER, 2, kDefaultDiscard);
         SDL_GL_SwapWindow(g_window);
     }
     static bool firstShown = false;
@@ -852,8 +877,65 @@ void EndDrawing(void)
         bootMark("first picture on screen");
     }
     ps2xLinuxGlUnlock();
-    std::fflush(stdout);
-    std::fflush(stderr);
+    static const int envCapFps = std::getenv("SOTC_FPS_CAP") ? std::atoi(std::getenv("SOTC_FPS_CAP")) : 60;
+    int targetFps = envCapFps;
+    const int runtimeFps = g_targetFps.load(std::memory_order_relaxed);
+    if (targetFps > 0 && runtimeFps > 0 && runtimeFps < targetFps)
+        targetFps = runtimeFps;
+    if (targetFps > 0)
+    {
+        const int64_t periodNs = (1000000000LL + targetFps / 2) / targetFps;
+        static struct timespec s_nextDeadline{};
+        static bool s_haveDeadline = false;
+        auto addNs = [](struct timespec &ts, int64_t ns)
+        {
+            ts.tv_nsec += ns;
+            while (ts.tv_nsec >= 1000000000LL)
+            {
+                ts.tv_nsec -= 1000000000LL;
+                ++ts.tv_sec;
+            }
+        };
+        auto diffNs = [](const struct timespec &a, const struct timespec &b) -> int64_t
+        {
+            return static_cast<int64_t>(a.tv_sec - b.tv_sec) * 1000000000LL +
+                   static_cast<int64_t>(a.tv_nsec - b.tv_nsec);
+        };
+        struct timespec now{};
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if (!s_haveDeadline)
+        {
+            s_nextDeadline = now;
+            addNs(s_nextDeadline, periodNs);
+            s_haveDeadline = true;
+        }
+        else
+        {
+            const int64_t remNs = diffNs(s_nextDeadline, now);
+            if (remNs > 500000LL)
+            {
+                struct timespec wakeAt = s_nextDeadline;
+                wakeAt.tv_nsec -= 250000LL;
+                if (wakeAt.tv_nsec < 0)
+                {
+                    wakeAt.tv_nsec += 1000000000LL;
+                    --wakeAt.tv_sec;
+                }
+                while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &wakeAt, nullptr) == EINTR)
+                {
+                }
+                clock_gettime(CLOCK_MONOTONIC, &now);
+            }
+            while (diffNs(s_nextDeadline, now) > 0)
+                clock_gettime(CLOCK_MONOTONIC, &now);
+            addNs(s_nextDeadline, periodNs);
+            if (diffNs(s_nextDeadline, now) < 0)
+            {
+                s_nextDeadline = now;
+                addNs(s_nextDeadline, periodNs);
+            }
+        }
+    }
     ++g_framesThisSecond;
     const double now = GetTime();
     if (now - g_fpsWindowStart >= 1.0)
@@ -861,6 +943,10 @@ void EndDrawing(void)
         g_fps = g_framesThisSecond;
         g_framesThisSecond = 0;
         g_fpsWindowStart = now;
+#if !SOTC_RELEASE
+        std::fflush(stdout);
+        std::fflush(stderr);
+#endif
     }
 }
 

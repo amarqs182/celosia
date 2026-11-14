@@ -574,12 +574,16 @@ namespace cam126
         if (!ctlOn() || !okAddr(h) || !okAddr(h + 0xCC0u))
             return sotc_decomp::recompiled(kMvhist)(rdram, ctx, runtime);
         const uint32_t ra = GPR_U32(ctx, 31), sp = GPR_U32(ctx, 29);
-        const Saved saved(ctx);
-        SET_GPR_U64(ctx, 4, GPR_U64(ctx, 5));
-        sotc_decomp::callGuest(rdram, ctx, runtime, kGetLayoutClass, 0x013A7500u, sp - 0x10u);
-        saved.restore(ctx);
+        uint32_t cls = 0u;
+        if (ps2_worker::isShell(runtime) || !sotc_decomp::layoutClassPlainOnly(rdram, GPR_U32(ctx, 5), cls))
+        {
+            const Saved saved(ctx);
+            SET_GPR_U64(ctx, 4, GPR_U64(ctx, 5));
+            sotc_decomp::callGuest(rdram, ctx, runtime, kGetLayoutClass, 0x013A7500u, sp - 0x10u);
+            saved.restore(ctx);
+            cls = GPR_U32(ctx, 2);
+        }
         (void)ra;
-        const uint32_t cls = GPR_U32(ctx, 2);
         const uint32_t idx = rd32(rdram, h + 0xCB8u);
         if (!okAddr(cls) || idx >= 90u)
         {

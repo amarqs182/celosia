@@ -1801,7 +1801,31 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         // rest of that frame (pictureSwapped, undone when the frame is done).
         Target blurOut, blurOutPlain;
         bool pictureSwapped = false;
+        GLuint shadowMaskDepth = 0, glowLayerDepth = 0, blurOutDepth = 0;
         uint64_t blurApartCount = 0; // frames that drew their blur that way (the [gl:events] lines)
+        void syncDepthStencil(Target &t, GLuint depthTex, GLuint &boundDepth)
+        {
+            if (!t.fbo || !depthTex || boundDepth == depthTex)
+                return;
+            glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
+            attachDepthStencil(depthTex);
+            boundDepth = depthTex;
+            boundFbo = t.fbo;
+        }
+#if defined(PS2X_NATIVE_GLES)
+        void invalidateTarget(const Target &t, GLenum att0, GLenum att1 = GL_NONE)
+        {
+            if (!t.fbo || !native_renderer::tuning().glDepthKeep)
+                return;
+            if (boundFbo != t.fbo)
+            {
+                glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
+                boundFbo = t.fbo;
+            }
+            const GLenum atts[2] = {att0, att1};
+            glInvalidateFramebuffer(GL_FRAMEBUFFER, att1 != GL_NONE ? 2 : 1, atts);
+        }
+#endif
         void swapPicture()
         {
             std::swap(color.fbo, blurOut.fbo);
@@ -1831,6 +1855,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             // The rest of the frame is drawn on the picture's depth.
             glBindFramebuffer(GL_FRAMEBUFFER, blurOut.fbo);
             attachDepthStencil(color.depth);
+            blurOutDepth = color.depth;
 #endif
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
             boundFbo = ~0u;
@@ -3721,9 +3746,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #endif
                 makeTarget(shadowMask, w, h, false);
             makeTarget(previous, w, h, false);
-#if defined(PS2X_NATIVE_VITA)
-            // Round 73: the second picture; the host's copies made at their
-            // first use only when the picture is shown as drawn (glFewScenes).
+#if defined(PS2X_NATIVE_VITA) || defined(PS2X_NATIVE_GLES)
+            // Round 73 / Mali-G31 TBDR: the second picture; the host's copies
+            // made at their first use only when the picture is shown as drawn (glFewScenes).
             makeColorAlt(w, h);
             if (!native_renderer::tuning().glFewScenes)
 #endif
@@ -3781,9 +3806,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             // The shadow mask pass tests the main picture's stencil.
             glBindFramebuffer(GL_FRAMEBUFFER, shadowMask.fbo);
             attachDepthStencil(color.depth);
+            shadowMaskDepth = color.depth;
             // Layer 8 drawn apart on the picture's depth.
             glBindFramebuffer(GL_FRAMEBUFFER, glowLayer.fbo);
             attachDepthStencil(color.depth);
+            glowLayerDepth = color.depth;
 #endif
             if (blurOut.texture)
                 makeBlurOut(w, h); // (the Vita's were let go above: made again at first use)
@@ -3943,6 +3970,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         {
             gpu86::label("q%d", mode);
             bindTarget(target);
+#if defined(PS2X_NATIVE_GLES)
+            if (!corners && blend == QuadBlend::None && !target.depth)
+                invalidateTarget(target, GL_COLOR_ATTACHMENT0);
+#endif
             useQuad(mode);
             glDisable(GL_DEPTH_TEST);
             glDepthMask(GL_FALSE); // vitaGL still writes depth with the test off (GXM: always pass)
@@ -6702,9 +6733,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         // Round 73 (Tuning glFewScenes): the two pictures in turn (switched
         // either way, so that the frame after one shown as drawn never draws
         // into it: it is feedbackBlur's last frame).
-#if defined(PS2X_NATIVE_VITA)
+#if defined(PS2X_NATIVE_VITA) || defined(PS2X_NATIVE_GLES)
         const bool fewScenes = native_renderer::tuning().glFewScenes;
-        if (colorAlt.fbo && native_renderer::detail::presentHook())
+        if (fewScenes && colorAlt.fbo && native_renderer::detail::presentHook())
         {
             std::swap(color, colorAlt);
             std::swap(colorPlain, colorAltPlain);
@@ -8040,6 +8071,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             ++r88Stats.mirrors;
             r88Stats.mirrorLow += mirrorTarget == &reflectionLow ? 1u : 0u;
             pass(*mirrorTarget, false, 0, ~0u, false, true);
+#if defined(PS2X_NATIVE_GLES)
+            invalidateTarget(*mirrorTarget, GL_DEPTH_ATTACHMENT, GL_STENCIL_ATTACHMENT);
+#endif
         }
         // Round 87 (Tuning glBgSmall87, a console A/B candidate). With fog on,
         // the background layer (sky and far scenery, ~450 alpha-tested draws
@@ -8090,6 +8124,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 bgFlip94 = !bgFlip94;
                 bindTexture(1, bgSource ? bgSource : backgroundSmall.texture); // (last frame's)
                 pass(into, true);
+#if defined(PS2X_NATIVE_GLES)
+                invalidateTarget(into, GL_DEPTH_ATTACHMENT, GL_STENCIL_ATTACHMENT);
+#endif
                 bgSource = into.texture;
                 ++r94Stats.bgCopy;
                 ++bgSmallFrames;
@@ -8098,6 +8135,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             {
                 bindTexture(1, backgroundSmall.texture); // (round 94: last frame's; see below)
                 pass(backgroundLow, true);
+#if defined(PS2X_NATIVE_GLES)
+                invalidateTarget(backgroundLow, GL_DEPTH_ATTACHMENT, GL_STENCIL_ATTACHMENT);
+#endif
                 copy(backgroundLow, backgroundSmall);
                 bgSource = backgroundSmall.texture;
                 ++bgSmallFrames;
@@ -8106,6 +8146,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             {
                 bindTexture(1, backgroundSmall.texture); // (round 94: last frame's; see below)
                 pass(background, true);
+#if defined(PS2X_NATIVE_GLES)
+                invalidateTarget(background, GL_DEPTH_ATTACHMENT, GL_STENCIL_ATTACHMENT);
+#endif
                 copy(background, backgroundSmall); // bgEnd: reduced to 256 x 256
                 bgSource = backgroundSmall.texture;
             }
@@ -8241,6 +8284,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             if (!vglFramebufferShareDepth(blurOut.fbo, color.fbo))
                 return false;
             keepDepth(blurOut, 3); // the picture's depth loaded; kept for the scenes after
+#else
+            syncDepthStencil(blurOut, color.depth, blurOutDepth);
 #endif
             if (hazeHere)
             {
@@ -8510,7 +8555,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 return false;
             }
 #else
-            (void)depthOf;
+            syncDepthStencil(glowLayer, depthOf.depth, glowLayerDepth);
 #endif
             pass(glowLayer, false, glow.order, glow.order + 1u, true, false, true);
             if (apartOnly)
@@ -8769,6 +8814,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             }
             if (shadowMaskOn())
             {
+#endif
+#if !defined(PS2X_NATIVE_VITA)
+            syncDepthStencil(shadowMask, color.depth, shadowMaskDepth);
 #endif
             bindTarget(shadowMask);
             glClearColor(0, 0, 0, 0);
@@ -9553,6 +9601,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         // The last one: nothing reads its depth after it (the next frame clears).
         keepDepth(color, loaded ? 1 : 0);
         pass(color, false, from, ~0u, loaded);
+#if defined(PS2X_NATIVE_GLES)
+        invalidateTarget(color, GL_DEPTH_ATTACHMENT, GL_STENCIL_ATTACHMENT);
+#endif
         const bool bloomAdd = keepAlpha;
         keepAlpha = false;
         if (bloomAdd)
@@ -9578,7 +9629,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         }
         // Round 45 (Tuning glFewCopies, the Vita): the host's copy below is the
         // last frame shown; without such a host (the Mac's read-back) a copy of its own.
-#if defined(PS2X_NATIVE_VITA)
+#if defined(PS2X_NATIVE_VITA) || defined(PS2X_NATIVE_GLES)
         const bool previousIsShown = native_renderer::tuning().glFewCopies && static_cast<bool>(native_renderer::detail::presentHook());
 #else
         const bool previousIsShown = false;

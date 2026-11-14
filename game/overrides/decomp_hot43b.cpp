@@ -370,7 +370,7 @@ namespace decomp_hot43b
             ctx->pc = static_cast<uint32_t>(ra);
         };
 
-        callGuest(rdram, ctx, runtime, kGetLayoutClass, 0x010F4D7Cu, sp);
+        sotc_decomp::layoutClassFast(rdram, ctx, runtime, GPR_U32(ctx, 4), 0x010F4D7Cu, sp);
         const uint32_t s3 = GPR_U32(ctx, 2);
         const uint32_t light = READ32(s3 + 0x144u);
         SET_GPR_S32(ctx, 3, light);
@@ -382,8 +382,7 @@ namespace decomp_hot43b
         const uint32_t block = READ32(s3 + 0x140u);
         SET_GPR_S32(ctx, 2, block);
         WRITE32(sp, block);
-        SET_GPR_U64(ctx, 4, obj);
-        callGuest(rdram, ctx, runtime, kGetLayoutClass, 0x010F4DA8u, sp);
+        sotc_decomp::layoutClassFast(rdram, ctx, runtime, static_cast<uint32_t>(obj), 0x010F4DA8u, sp);
 
         // The attachment walk.
         const uint32_t s5 = GPR_U32(ctx, 2);
@@ -403,15 +402,9 @@ namespace decomp_hot43b
                 SET_GPR_S32(ctx, 4, static_cast<uint32_t>(cls) + 0xC0u);
                 callGuest(rdram, ctx, runtime, kGetGeometryPointerObject, 0x010F4DECu, sp);
                 const uint64_t parent = GPR_U64(ctx, 2);
-                SET_GPR_U64(ctx, 4, current);
-                callGuest(rdram, ctx, runtime, kGetCharacterClass, 0x010F4DF8u, sp);
-                const uint64_t currentChara = GPR_U64(ctx, 2);
-                SET_GPR_U64(ctx, 4, parent);
-                callGuest(rdram, ctx, runtime, kGetCharacterClass, 0x010F4E04u, sp);
-                const uint64_t parentChara = GPR_U64(ctx, 2);
-                SET_GPR_U64(ctx, 4, parent);
-                callGuest(rdram, ctx, runtime, kGetLayoutClass, 0x010F4E10u, sp);
-                cls = GPR_U64(ctx, 2);
+                const uint64_t currentChara = static_cast<uint64_t>(static_cast<int32_t>(sotc_decomp::characterClassFast(rdram, ctx, runtime, static_cast<uint32_t>(current), 0x010F4DF8u, sp)));
+                const uint64_t parentChara = static_cast<uint64_t>(static_cast<int32_t>(sotc_decomp::characterClassFast(rdram, ctx, runtime, static_cast<uint32_t>(parent), 0x010F4E04u, sp)));
+                cls = static_cast<uint64_t>(static_cast<int32_t>(sotc_decomp::layoutClassFast(rdram, ctx, runtime, static_cast<uint32_t>(parent), 0x010F4E10u, sp)));
                 if (parentChara == 0u || cls == 0u)
                 {
                     WRITE32(s5 + 0x198u, static_cast<uint32_t>(attachment));
