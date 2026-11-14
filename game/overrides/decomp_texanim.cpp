@@ -120,13 +120,15 @@ namespace decomp_texanim
         const uint32_t r = s3 + 0x20u; // s0
         const bool inlineId = sotc_decomp::jalTarget(rdram, 0x010AA2ACu) == kGetWorkBufId;
         const uint32_t s1 = plain(s3, 0xA0u) ? ram.u32(s3 + 0xCu) : 0u;
-        bool ok = plain(GPR_U32(ctx, 4) + 0x20u, 4u) && plain(s3, 0xA0u) && inlineId && plain(s1, 0x60u);
+        bool ok = plain(GPR_U32(ctx, 4) + 0x20u, 4u) && plain(s3, 0xA0u) && plain(s1, 0x60u);
         if (ok)
         {
-            const uint32_t id = ram.u32(0x002132F0u);
             const int32_t count = ram.s32(kSizes + (ram.u32(s3 + 0x1Cu) & 0x3Fu) * 4u);
-            ok = id < 4u && count >= 0 && count <= 1024 && plain(ram.u32(s1 + 0x40u), 4u * 1024u) &&
-                 plain(ram.u32(s1 + 0x44u + id * 4u), 4u * 1024u);
+            const bool hasPalAnim = count > 0 && ram.u32(r + 0x4Cu) != 0u;
+            const uint32_t id = ram.u32(0x002132F0u);
+            ok = count >= 0 && count <= 1024 &&
+                 (!hasPalAnim || (inlineId && id < 4u && plain(ram.u32(s1 + 0x40u), 4u * 1024u) &&
+                                  plain(ram.u32(s1 + 0x44u + id * 4u), 4u * 1024u)));
         }
         if (!ok)
         {
@@ -493,23 +495,25 @@ namespace decomp_texanim
         const uint32_t s1 = ld32(R + 0xCu);
         const uint32_t format = ld32(R + 0x1Cu) & 0x3Fu;
         const uint32_t size = ld32(rdram + kSizes + format * 4u);
+        const bool hasPalAnim = size > 0u && ld32(r + 0x4Cu) != 0u;
         const uint32_t id = ld32(rdram + 0x002132F0u);
-        if (__builtin_expect(!inRam(s1, 0x60u) || id >= 4u || size > 1024u || (ld32(r + 0x10u) | ld32(r + 0x14u)) != 0u ||
-                                 sotc_decomp::jalTarget(rdram, 0x010AA2ACu) != kGetWorkBufId,
+        if (__builtin_expect(!inRam(s1, 0x60u) || size > 1024u || (ld32(r + 0x10u) | ld32(r + 0x14u)) != 0u ||
+                                 (hasPalAnim && (id >= 4u || sotc_decomp::jalTarget(rdram, 0x010AA2ACu) != kGetWorkBufId)),
                              0))
             return texAnimExact(rdram, ctx, runtime);
         uint8_t *const S = rdram + s1;
-        const uint32_t src = ld32(S + 0x40u), dst = ld32(S + 0x44u + id * 4u);
+        const uint32_t src = ld32(S + 0x40u), dst = hasPalAnim ? ld32(S + 0x44u + id * 4u) : 0u;
         const bool csm = format == 0x13u || format == 0x1Bu;
         // The palette bytes read / written: entries 0..size-1, and through
         // the swizzle (a byte) up to entry 255.
-        const uint32_t palBytes = 4u * ((csm && size < 256u) ? 256u : size);
+        const uint32_t palBytes = hasPalAnim ? 4u * ((csm && size < 256u) ? 256u : size) : 0u;
         constexpr uint32_t kTables = kSizes, kTablesEnd = kSwizzle + 0x400u;
-        if (__builtin_expect(!inRam(src, 4096u) || !inRam(dst, 4096u) || overlap(s3, 0xA0u, s1, 0x60u) ||
+        if (__builtin_expect(overlap(s3, 0xA0u, s1, 0x60u) ||
                                  overlap(s3, 0xA0u, kTables, kTablesEnd - kTables) || overlap(s1, 0x60u, kTables, kTablesEnd - kTables) ||
-                                 overlap(s3, 0xA0u, 0x002132F0u, 4u) || overlap(s1, 0x60u, 0x002132F0u, 4u) ||
-                                 overlap(dst, palBytes, s3, 0xA0u) || overlap(dst, palBytes, s1, 0x60u) || overlap(dst, palBytes, src, palBytes) ||
-                                 overlap(dst, palBytes, kTables, kTablesEnd - kTables) || overlap(dst, palBytes, 0x002132F0u, 4u),
+                                 (hasPalAnim && (!inRam(src, 4096u) || !inRam(dst, 4096u) ||
+                                                 overlap(s3, 0xA0u, 0x002132F0u, 4u) || overlap(s1, 0x60u, 0x002132F0u, 4u) ||
+                                                 overlap(dst, palBytes, s3, 0xA0u) || overlap(dst, palBytes, s1, 0x60u) || overlap(dst, palBytes, src, palBytes) ||
+                                                 overlap(dst, palBytes, kTables, kTablesEnd - kTables) || overlap(dst, palBytes, 0x002132F0u, 4u))),
                              0))
             return texAnimExact(rdram, ctx, runtime);
 
