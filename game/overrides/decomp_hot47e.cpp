@@ -56,6 +56,11 @@
 
 #include <cstring>
 
+namespace sotc_native
+{
+    bool nativeDraws();
+}
+
 namespace decomp_hot47e
 {
     using sotc_decomp::callGuest;
@@ -649,6 +654,11 @@ namespace decomp_hot47e
         };
         SET_GPR_S32(ctx, 2, 0x01190000u);
         WRITE32(kCleared, 0u);
+        if (sotc_native::nativeDraws() && !native_renderer::tuning().particles)
+        {
+            SET_GPR_S32(ctx, 20, 0u);
+            return;
+        }
         for (int32_t s4 = 4; s4 >= 0; --s4)
         {
             SET_GPR_S32(ctx, 20, static_cast<uint32_t>(s4));
@@ -994,7 +1004,7 @@ namespace decomp_hot47e
             Job91 &j = g_job91;
             j.freed.clear();
             j.clipped.clear();
-            j.clip95 = mode91 == 1 && sotc_decomp::join95On() && !g_early95;
+            j.clip95 = mode91 == 1 && sotc_decomp::join95On() && !g_early95 && !(sotc_native::nativeDraws() && !native_renderer::tuning().particles);
             j.env = env;
             j.frame = sp;
             // The geodisps with an emitter attached to a geometry pointer (its

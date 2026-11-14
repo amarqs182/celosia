@@ -180,6 +180,13 @@ static PS2_FORCE_INLINE uint32_t ps2_plzcw32(uint32_t x)
 #else
 #define PS2X_VU_NEON_A32 0
 #endif
+// Clamp-free / FTZ NEON fast-paths (ARMv7 NEON always runs FTZ; AArch64 EE
+// threads enable FPCR.FZ + RTZ via ps2SetEeFloatingPointMode()).
+#if PS2X_VU_NEON_A32 || (defined(__aarch64__) && defined(__ARM_NEON) && defined(USE_SSE2NEON))
+#define PS2X_VU_NEON_FAST 1
+#else
+#define PS2X_VU_NEON_FAST 0
+#endif
 
 #if PS2X_VU_NEON_A32 && !PS2X_VU_MACROS_OLD && defined(__GNUC__) && !defined(__clang__)
 // GCC (ARMv7) with sse2neon: _mm_blendv_ps shifted the generated code's

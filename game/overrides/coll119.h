@@ -148,7 +148,7 @@ namespace coll119
     // only write), 0 it goes on, -1 not known this way (the call decides).
     inline int clipRejects(const G g, View &v, int32_t k, uint32_t a1, uint32_t a2)
     {
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
         const uint32_t nm = entry(g, v, k);
         if (nm == 0u || g.rdram[v.flag[k]] == 0u)
             return -1;

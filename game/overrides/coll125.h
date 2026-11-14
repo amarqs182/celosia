@@ -676,7 +676,7 @@ namespace coll125
         const __m128 vf0 = ctx->vu0_vf[0];
         float d0, d1;
         const float zero = 0.0f;
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
         bool small = false;
         const uint64_t dBits = fast::planeDistances(e.n, vf0, a, b, small);
         if (__builtin_expect(!small, 0))
@@ -1075,7 +1075,7 @@ namespace coll125
             return -1;
         {
             // clipKeep's first test (its round 49 NEON form) on the kept plane
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
             __m128 pa;
             std::memcpy(&pa, rdram + (point & ~0xFu), 16);
             bool small = false;

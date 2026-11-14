@@ -4553,7 +4553,12 @@ namespace decomp_walk
             {
                 const uint32_t gdc91 = geoDispClass(m, s3);
                 const uint32_t update91 = m.u32(gdc91 + 0xD8u);
-                if (defer91 && update91 >= 0x01139CA0u && update91 < 0x01147530u)
+                if (sotc_native::nativeDraws() && !native_renderer::tuning().particles &&
+                    m.u8(s3 + 8u) == 0x24u && update91 == 0x0113F530u)
+                {
+                    set(16, gdc91);
+                }
+                else if (defer91 && update91 >= 0x01139CA0u && update91 < 0x01147530u)
                 {
                     set(16, gdc91);
                     deferred91.push_back(s3);

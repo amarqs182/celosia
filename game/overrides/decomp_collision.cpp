@@ -323,7 +323,7 @@ namespace decomp_collision
 
     uint32_t boundary(const G g, uint32_t cls, uint32_t index, uint32_t surface, uint32_t ra, uint32_t sp);
 
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
     // ---- round 28: VU0 chains without their clamps, on the Vita ---------------
     // On ARMv7 NEON a VU0 add / sub / mul (vu::*N, PS2_V*) is the NEON op
     // (flush-to-zero in and out, round to nearest) and the result's clamp
@@ -543,8 +543,9 @@ namespace decomp_collision
                 const float32x4_t bq = vld1q_f32(reinterpret_cast<const float *>(table + static_cast<uint32_t>(surface) * 16u));
                 const float32x4_t b = vsetq_lane_f32(1.0f, bq, 3);
                 const float32x2_t lo = vget_low_f32(b), hi = vget_high_f32(b);
-                float32x4_t c = vmlaq_lane_f32(vmulq_lane_f32(r0, lo, 0), r1, lo, 1);
-                c = vaddq_f32(vmlaq_lane_f32(c, r2, hi, 0), r3);
+                // Match applySmall's unfused vmul + vadd rounding on both ARMv7 and AArch64.
+                float32x4_t c = vaddq_f32(vmulq_lane_f32(r0, lo, 0), vmulq_lane_f32(r1, lo, 1));
+                c = vaddq_f32(vaddq_f32(c, vmulq_lane_f32(r2, hi, 0)), r3);
                 const uint32x4_t sm = vcaltq_f32(b, limit);
                 const float32x2_t cl = vget_low_f32(c);
                 const float32x2_t sq = vmul_f32(cl, cl);
@@ -578,7 +579,7 @@ namespace decomp_collision
     // vmulax / vmadday / vmaddaz / vmaddw.xyzw: v by the four rows at m.
     inline __attribute__((always_inline)) __m128 transform(const G g, uint32_t m, __m128 v)
     {
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
         // Round 119 (SOTC_PART119): the rows as they are when every lane and v's are small (finite,
         // below 2^61): the clamp of a small lane is that lane, a denormal the signed zero NEON reads
         // anyway (round 49's argument), so the chain gives the clamped rows' bits without the four clamps.
@@ -611,7 +612,7 @@ namespace decomp_collision
         }
 #endif
         const vu::Rows rows{{vu::clamp(g.q(m)), vu::clamp(g.q(m + 0x10u)), vu::clamp(g.q(m + 0x20u)), vu::clamp(g.q(m + 0x30u))}};
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
         // Round 28: the chain without its clamps when nothing is large (fast::).
         bool small;
         const __m128 r = fast::transformSmallImpl(rows, v, small);
@@ -647,7 +648,7 @@ namespace decomp_collision
         if (k.epoch != runsOf(g.runtime) || k.at != m)
         {
             k.rows = {{vu::clamp(g.q(m)), vu::clamp(g.q(m + 0x10u)), vu::clamp(g.q(m + 0x20u)), vu::clamp(g.q(m + 0x30u))}};
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
             k.small = fast::allSmall(k.rows);
 #endif
             k.epoch = runsOf(g.runtime);
@@ -657,7 +658,7 @@ namespace decomp_collision
     inline __attribute__((always_inline)) __m128 transformKept(const G g, Kept40 &k, uint32_t m, __m128 v)
     {
         keepRows(g, k, m);
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
         if (__builtin_expect(k.small, 1))
         {
             uint32x2_t sm;
@@ -1006,7 +1007,7 @@ namespace decomp_collision
         // The same operations with each operand clamped once (the clamp is
         // idempotent; x 1.0 of a clamped value is that value).
         (void)vf7;
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
         bool smallF = false;
         uint64_t dBitsF = 0u;
         if constexpr (Fast)
@@ -1062,7 +1063,7 @@ namespace decomp_collision
         };
         const float zero = 0.0f;
         float d0, d1;
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
         bool small = smallF;
         // (Fast: round 49's values above, the same as these; the rest as before)
         const uint64_t dBits = Fast ? dBitsF : fast::planeDistances(n, vf0c, g.q(a1), g.q(a2), small);
@@ -1302,7 +1303,7 @@ namespace decomp_collision
             return x(vu::addN(vu::addN(acc, lane<2>(prod)), lane<3>(n)));
         };
         float d;
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
         // Round 49 (SOTC_FASTNATIVE, Vita): the distance as clipDB's
         // (fast::planeDistances' lane 0: the same chain, vf0.x + n.x a.x +
         // n.y a.y + n.z a.z + n.w, without its clamps when everything is
@@ -1345,7 +1346,7 @@ namespace decomp_collision
     // form, small), 0 <= d - keep. False: not known that way (the call is made). Nothing written.
     inline bool keepEarlyAt(const G g, uint32_t normal, uint32_t flag, uint32_t point, float keep)
     {
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
         if (g.rdram[flag] == 0u || !G::plain(point & ~0xFu, 16u))
             return false;
         const __m128 pa = g.q(point);
@@ -1361,7 +1362,7 @@ namespace decomp_collision
         return false;
 #endif
     }
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
     inline bool keepFastOk() { return sotc_decomp::fastNativeOn() && !fast::check49(); }
 #else
     inline bool keepFastOk() { return false; } // (the fast natives are NEON only)
@@ -1523,7 +1524,7 @@ namespace decomp_collision
             return false;
         const uint32_t normal = g.u32(s2c + 0x14u) + surface * 16u;
         const __m128 vf0 = g.ctx->vu0_vf[0];
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
         {
             bool small;
             const uint64_t d = fast::planeDistances(g.q(normal), vf0, g.q(a1), g.q(a2), small);
@@ -1567,7 +1568,7 @@ namespace decomp_collision
         vu::Rows rows{};
         uint32_t rowsAt = 0xFFFFFFFFu;
         uint64_t rowsRuns = 0;
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
         bool rowsSmall = false, lastFast = false;
         float lastCy = 0.0f; // the last fast rejection's c.y: f0 = c.y^2 if it was the last surface
 #endif
@@ -1593,7 +1594,7 @@ namespace decomp_collision
             rows = keptM2.rows;
             rowsAt = m2;
             rowsRuns = runsOf(g.runtime);
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
             rowsSmall = keptM2.small;
 #endif
         }
@@ -1628,7 +1629,7 @@ namespace decomp_collision
         const __m128 wOne = _mm_castsi128_ps(_mm_set_epi32(0x3F800000, 0, 0, 0));
         uint64_t bEpoch = ~0ull;
         uint32_t bClsAt = 0u, bFlags = 0u, bTable = 0u;
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
         const bool check49 = Fast && fast::check49();
 #endif
         // Round 63: the plane test first (see coll63On); the object's layout
@@ -1639,7 +1640,7 @@ namespace decomp_collision
         for (; count != 0u; --count, ids += 2u)
         {
             pendingSkip = false;
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
             if constexpr (Fast)
             {
                 // Round 49: the surfaces round 28's NEON test rejects, in
@@ -1728,11 +1729,11 @@ namespace decomp_collision
                 rows = {{vu::clamp(g.q(m2)), vu::clamp(g.q(m2 + 0x10u)), vu::clamp(g.q(m2 + 0x20u)), vu::clamp(g.q(m2 + 0x30u))}};
                 rowsAt = m2;
                 rowsRuns = runsOf(g.runtime);
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
                 rowsSmall = fast::allSmall(rows);
 #endif
             }
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
             // Round 28: the cylinder's transform and its x^2 + y^2 rejection
             // in NEON alone (see fast::cylinderOutside): no lane goes through
             // the VFP or a core register unless the test says no.
@@ -1936,7 +1937,7 @@ namespace decomp_collision
             g.put32(s.a0 + 4u, idHi);
             g.put(sp + 0x10u, point);
         }
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
         if (lastFast)
             g.f0(lastCy * lastCy); // as the plain rejection below leaves it
 #endif
@@ -2743,7 +2744,7 @@ namespace decomp_collision
     constexpr FinderSites kFinderA{0x01115798u, 0x0111581Cu, 0x01115870u, 0x011159DCu, 0x01115A0Cu, 0x011158BCu, 0x01115950u};
     constexpr FinderSites kFinderB{0x01115A50u, 0x01115ACCu, 0x01115B20u, 0x01115C8Cu, 0x01115CBCu, 0x01115B6Cu, 0x01115C00u};
 
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
     // Round 49 (SOTC_FASTNATIVE, Vita): the finder leaf's run of surfaces
     // whose boundary sphere misses the query's (round 28's NEON squared
     // distance, its compare on the bits), in one tight loop: ids (u16, count
@@ -2881,14 +2882,14 @@ namespace decomp_collision
         const __m128 vf0 = ctx->vu0_vf[0];
         const __m128 vf7one = PS2_VADD(vf0, lane<3>(vf0));
         const float zero = 0.0f;
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
         const bool fastOn = sotc_decomp::fastNativeOn(), check49 = fastOn && fast::check49();
 #endif
         const bool coll71 = sotc_decomp::coll71On();
         (void)coll71;
         for (; count != 0u; --count, ids += 2u)
         {
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
             if (fastOn)
             {
                 // Round 49: the surfaces that miss, in finderScan's loop (the
@@ -2919,7 +2920,7 @@ namespace decomp_collision
             f0 = FPU_MUL_S(f0, f0);
             const __m128 c = g.q(center);
             g.f0(f0);
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
             // Round 28: the squared distance without its clamps (fast::), one
             // NEON -> ARM move, the compare on the bits.
             bool small;
@@ -2993,7 +2994,7 @@ namespace decomp_collision
             };
             (void)vf7one;
             float dist;
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
             // Round 71 (SOTC_COLL71, with SOTC_FASTNATIVE): the plane's
             // distance as clipKeep's (round 49: the same chain without its
             // clamps when every operand is small, the same bits).
@@ -3705,7 +3706,7 @@ namespace decomp_collision
     bool cylinder(const G g, __m128 c, float r, float length, bool sumInF0)
     {
         g_countCylinder.hit();
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
         // Round 49 (SOTC_FASTNATIVE, Vita): the plain rejection below in NEON,
         // one move to a core register (no VFP compares and flag moves).
         // NEON flushes denormals, the VFP code below need not: a flushed
@@ -3780,7 +3781,7 @@ namespace decomp_collision
     void matrixProduct(const G g, uint32_t out, uint32_t by, uint32_t m)
     {
         __m128 r[4];
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
         // Round 119 (SOTC_PART119): transform()'s raw-row form for each row of m (the same bits).
         if (sotc_decomp::switchOn(sotc_decomp::kPart119) && !fast::checkOn() && G::plain(by & ~0xFu, 0x40u))
         {
@@ -4307,7 +4308,7 @@ namespace decomp_collision
     // are identities and these are transform()'s bits, round 119's part119 argument), else transform().
     inline __attribute__((always_inline)) __m128 xf125(const G g, uint32_t m, __m128 v)
     {
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
         const uint32_t a = m & ~0xFu;
         if (__builtin_expect(G::plain(a, 0x40u), 1))
         {
@@ -4917,7 +4918,7 @@ namespace decomp_collision
         COLL_STAT(direct);
         Kept40 k40;
         const bool obj101 = sotc_decomp::obj101On();
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
         const bool skin101 = sotc_decomp::skin101On();
 #endif
         const uint32_t ra = GPR_U32(ctx, 31), spIn = GPR_U32(ctx, 29), sp = spIn - 0x270u;
@@ -5202,7 +5203,7 @@ namespace decomp_collision
                                             g.put32(sp + 0x1ECu, g.u32(g.u32(sp + 0x1C4u) + 8u));
                                             uint32_t s4 = g.u32(s7 + 0x54u);
                                             g.put32(sp + 0x1F0u, g.u32(g.u32(sp + 0x1C4u) + 0x14u));
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
                                             // Round 101 (skin101): a cached surface the plain
                                             // rejection throws out (x^2 + y^2 above r2 (1 + 2^-19)
                                             // in NEON, every lane small: then the exact test's sum
@@ -5232,7 +5233,7 @@ namespace decomp_collision
                                                 const uint32_t s0 = g.u32(s4);
                                                 const uint32_t t3 = g.u32(g.u32(sp + 0x1C4u) + 0x18u) + s0 * 64u;
                                                 const uint32_t s1 = g.u32(s3 + 0x14u) + s0 * 16u;
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
                                                 if (skin101 && (s1 & 0xFu) == 0u && G::plain(s1, 16u) && g.u8(g.u32(s3 + 8u) + s0) != 0u)
                                                 {
                                                     keepRows(g, k40, sp + 0x40u);
@@ -5335,7 +5336,7 @@ namespace decomp_collision
                                                     g.put(sp + 0x150u, point);
                                                 }
                                             }
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
                                             skinFlush();
 #endif
                                             if (g.u32(sp + 0x1E8u) != 0u)
