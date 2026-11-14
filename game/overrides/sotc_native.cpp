@@ -7193,6 +7193,8 @@ namespace sotc_native
     // shadowDisp that the recompiled code makes as a direct C++ call, so a
     // hook on shadowDisp itself never saw them (only the sword's rigid
     // shadow, a guest call from 010F3A08, was drawn).
+    bool nativeDraws();
+
     void shadowDispHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         syncFrame(rdram);
