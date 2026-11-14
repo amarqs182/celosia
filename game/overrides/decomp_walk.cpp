@@ -2109,7 +2109,8 @@ namespace decomp_walk
             const uint32_t lodRecord = m.u32(m.u32(m.u32(m.u32(s1 + 0x144u)) + 0x20u) + 8u);
             return lodRecord != 0u && m.u32(lodRecord + 0x3Cu) != 0u;
         };
-        if (s0 == 0u && sotc_decomp::solid103On() && sotc_native::nativeDraws() && m.u32(m.u32(s1 + 0x144u) + 0x280u) == 0u && !lensScaled())
+        if (s0 == 0u && sotc_decomp::solid103On() && sotc_native::nativeDraws() &&
+            (m.u32(m.u32(s1 + 0x144u) + 0x280u) == 0u || !native_renderer::tuning().shadows) && !lensScaled())
         {
             const int32_t s2 = m.s16(s1 + 0x1B4u);
             SET_GPR_S32(ctx, 18, s2);
@@ -2270,7 +2271,7 @@ namespace decomp_walk
         geo = m.u32(s1 + 0x144u);
         v0 = static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(geo)));
         const uint32_t shadow = m.u32(geo + 0x280u);
-        if (shadow == 0u)
+        if (shadow == 0u || (sotc_native::nativeDraws() && !native_renderer::tuning().shadows))
             return finish(v0);
         g.a(4, shadow);
         g.callRel(0x010F3C88u, sp);
@@ -3582,6 +3583,8 @@ namespace decomp_walk
 
     void strips(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        if (sotc_native::nativeDraws() && !native_renderer::tuning().heatHaze)
+            return returnTo(ctx);
         // Round 134: prof129 zones (0x2010 set-up / tail, 0x2011 a segment's math, 0x2012 its two quads): the
         // console's 3.2% at pc 0x10f4020 (this loop after glZOffset's return) told apart.
         const ps2_load::GameZone zone134(0x2010u);
@@ -3997,7 +4000,8 @@ namespace decomp_walk
             g.a(5, s0);
             g.a(6, s1);
             g.call(kSkinPalette, 0x010F5974u, sp);
-            if (s1 != 0u && m.s8(s1 + 0x10A5u) != 0 && m.u32(kStripsOff) == 0u)
+            if (s1 != 0u && m.s8(s1 + 0x10A5u) != 0 && m.u32(kStripsOff) == 0u &&
+                !(sotc_native::nativeDraws() && !native_renderer::tuning().heatHaze))
             {
                 const uint32_t cameraClass = layoutClass(g, camera, 0x010F599Cu, sp);
                 g.a(5, s1);

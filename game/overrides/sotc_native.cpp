@@ -7194,6 +7194,11 @@ namespace sotc_native
     void shadowDispHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         syncFrame(rdram);
+        if (nativeDraws() && !native_renderer::tuning().shadows)
+        {
+            ctx->pc = GPR_U32(ctx, 31);
+            return;
+        }
         g_shadowDisp(rdram, ctx, runtime);
     }
 
