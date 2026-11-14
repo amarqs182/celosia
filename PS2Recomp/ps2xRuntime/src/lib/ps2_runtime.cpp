@@ -4113,6 +4113,7 @@ void PS2Runtime::run()
     {
         gameThread.join();
     }
+    native_renderer::shutdown();
 
     if (m_debugUiInitialized && m_debugUiShutdownCallback)
     {

@@ -9624,14 +9624,18 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             const unsigned int stackDefault = _pthread_stack_default_user;
             _pthread_stack_default_user = 512u * 1024u;
 #endif
-            std::thread([this, makeCurrent = std::move(makeCurrent), initThere] { loop(makeCurrent, initThere); }).detach();
+            m_thread = std::thread([this, makeCurrent = std::move(makeCurrent), initThere] { loop(makeCurrent, initThere); });
 #if defined(PS2X_NATIVE_VITA)
             _pthread_stack_default_user = stackDefault;
 #endif
             std::unique_lock<std::mutex> lock(m_mutex);
             while (!m_started)
                 m_idle.wait_for(lock, kRecheck);
-            return m_initOk;
+            const bool ok = m_initOk;
+            lock.unlock();
+            if (!ok && m_thread.joinable())
+                m_thread.join();
+            return ok;
         }
 
         bool hasMesh(uint64_t id) override { return m_knownMeshes.count(id) != 0; }
@@ -9933,6 +9937,17 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         {
             std::unique_lock<std::mutex> lock(m_mutex);
             waitIdle(lock);
+        }
+        void shutdown() override
+        {
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_stop = true;
+                m_work.notify_all();
+                wake105();
+            }
+            if (m_thread.joinable())
+                m_thread.join();
         }
         bool timesItself() override { return true; }
         void holdFrame() override { m_rec.hold = true; }
@@ -10457,7 +10472,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             for (;;)
             {
                 std::unique_lock<std::mutex> lock(m_mutex);
-                while (!m_queued && m_side.empty())
+                while (!m_stop && !m_queued && m_side.empty())
                 {
 #if defined(__vita__)
                     // Round 105 (render105): idle on a kernel semaphore that
@@ -10479,6 +10494,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #endif
                     m_work.wait_for(lock, kRecheck);
                 }
+                if (m_stop)
+                    break;
                 // Flushed uploads first (they were asked for before this frame's).
                 if (!m_side.empty())
                 {
@@ -10763,7 +10780,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 }
         }
         bool m_presenting = false; // round 86: the render thread in a deferred present
-        bool m_started = false, m_initOk = false;
+        bool m_started = false, m_initOk = false, m_stop = false;
+        std::thread m_thread;
         bool m_queued = false; // a frame handed over, not started yet
         bool m_busy = false;   // the render thread drawing
         uint64_t m_handOvers = 0; // round 73 (SOTC_GL_FREEZE)

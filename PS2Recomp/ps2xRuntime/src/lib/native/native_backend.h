@@ -82,6 +82,8 @@ namespace native_renderer::detail
         // A backend that draws on a thread of its own: returns once every
         // frame handed over is drawn.
         virtual void finishFrames() {}
+        // Stops any background render thread before the GL context / window is destroyed.
+        virtual void shutdown() {}
         // It fills the frame log's render / present times itself (else the
         // front times endFrame).
         virtual bool timesItself() { return false; }

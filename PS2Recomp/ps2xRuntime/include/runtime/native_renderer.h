@@ -424,6 +424,8 @@ namespace native_renderer
     // Returns once every frame handed to a backend's own thread is drawn
     // (the recorder's replay reads each picture back right after).
     void finishFrames();
+    // Stops any backend worker thread cleanly before destroying the GL context.
+    void shutdown();
 
     // Shown instead of the emulated picture (the emulator's present path asks).
     void setShown(bool shown);

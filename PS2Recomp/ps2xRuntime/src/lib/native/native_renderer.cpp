@@ -3029,6 +3029,11 @@ namespace native_renderer
         if (g_backend)
             g_backend->finishFrames();
     }
+    void shutdown()
+    {
+        if (g_backend)
+            g_backend->shutdown();
+    }
     void setShown(bool shown) { g_shown.store(shown, std::memory_order_relaxed); }
     bool shown() { return g_shown.load(std::memory_order_relaxed); }
     bool latestFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height)
