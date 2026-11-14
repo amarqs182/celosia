@@ -45,6 +45,10 @@ namespace decomp_hot47e
 {
     void blend(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
 }
+namespace sotc_native
+{
+    bool nativeDraws();
+}
 
 namespace coll115t
 {
@@ -1436,6 +1440,7 @@ namespace decomp_ptclupdate
                 }
                 f1 = f1r;
             }
+            const bool noVisualPtcl = sotc_native::nativeDraws() && !native_renderer::tuning().particles && !decomp_particles::damageWanted(rdram, Mr);
             if (m.u32(K + 0x10u) == 0u)
             {
                 particles(0x0113BEB0u, false);
@@ -1452,7 +1457,8 @@ namespace decomp_ptclupdate
                         {
                             if (!FPU_C_LE_S(f21, f20))
                                 break;
-                            spawn(0x0113BFC8u);
+                            if (!noVisualPtcl)
+                                spawn(0x0113BFC8u);
                             st.spawned += st.on;
                             m.put32(E + 0x120u, m.u32(E + 0x120u) + 1u);
                             s0 = static_cast<uint64_t>(i + 1);
@@ -1472,7 +1478,7 @@ namespace decomp_ptclupdate
             else
             {
                 particles(0x0113C040u, false);
-                if (s3 == 1u)
+                if (!noVisualPtcl && s3 == 1u)
                 {
                     const int32_t want = static_cast<int32_t>(liveCap() - m.u32(E + 0x124u));
                     s2 = static_cast<uint64_t>(static_cast<int64_t>(want));
