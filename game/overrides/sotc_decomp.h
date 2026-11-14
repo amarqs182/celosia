@@ -57,6 +57,15 @@ namespace sotc_decomp
         // label inside the function (a return address after a call that can
         // sleep) where the sub-thread is resumed by pc.
         bool coroutine = false, resume = false;
+        // Decomp D1: a function tools/lift_d1.py lifted (SOTC_LIFTD1): put in place only while that switch is on; an
+        // A/B window that turns it off puts the recompiled function back in the table (no check in the function).
+        bool lift = false;
+        // The generated function a lifted one stands for: installed only while the table still holds it (a hook
+        // installed before, a sysnative / Vita runtime override, keeps its place).
+        PS2Runtime::RecompiledFunction original = nullptr;
+        // Decomp D2: the switch a lifted function belongs to (-1: kLiftD1, D1's; kLiftD2 for decomp_liftd2_*.cpp,
+        // kLiftD3 for decomp_liftd3_*.cpp, kLiftD4 for decomp_liftd4_*.cpp, kLiftD5 for decomp_liftd5_*.cpp).
+        int liftSwitch = -1;
     };
 
     std::vector<Function> &registry();
@@ -232,10 +241,18 @@ namespace sotc_decomp
     struct Registrar
     {
         Registrar(uint32_t address, const char *name, PS2Runtime::RecompiledFunction native, bool returnsFloat = false, bool switches = false,
-                  bool once = false, bool ab = false, bool coroutine = false, bool resume = false)
+                  bool once = false, bool ab = false, bool coroutine = false, bool resume = false, bool lift = false,
+                  PS2Runtime::RecompiledFunction original = nullptr, int liftSwitch = -1)
         {
-            registry().push_back({address, name, native, returnsFloat, switches, once, ab, coroutine, resume});
+            registry().push_back({address, name, native, returnsFloat, switches, once, ab, coroutine, resume, lift, original, liftSwitch});
         }
+    };
+
+    // Decomp D4 (test): the alternative copies of lifted functions (SOTC_DECOMP_LIFT_ALT), by guest address.
+    std::vector<std::pair<uint32_t, PS2Runtime::RecompiledFunction>> &liftAlts();
+    struct LiftAltRegistrar
+    {
+        LiftAltRegistrar(uint32_t address, PS2Runtime::RecompiledFunction fn) { liftAlts().push_back({address, fn}); }
     };
 
     // Puts the registered functions in place (and the checks SOTC_DIFFTEST asks for).
@@ -250,6 +267,9 @@ namespace sotc_decomp
     // SignalSema's uncontended case in the table (decomp_sema.cpp, round 43;
     // SOTC_SEMA_FAST=0: the stub stays). Called by install().
     void installSemaFast(PS2Runtime &runtime);
+    // Round 139 (sem139, decomp_sema.cpp): GetThreadId / PollSema for the natives, the scheduler's fast paths when they apply.
+    void getThreadId139(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void pollSema139(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     // SOTC_AB=<frames>: every that many game frames the "new" set (the
     // functions registered with SOTC_DECOMP_AB_FUNCTION, the runtime's
     // ps2_fast_paths) goes off or back on; "[ab] frame F: new | old" at each
@@ -617,11 +637,26 @@ namespace sotc_decomp
         kEuler136,    // round 136: GetEulerYXZFromQuaternion in plain floats (not bit-exact: quat122's tolerance; decomp_quat, decomp_char122)
         kPf135,       // round 135: cache lines asked for ahead in the finder leaf's boundary scan (the next surfaces' records and flags) and obj125's part loop (the next part's record and matrix) (exact; decomp_collision)
         kFin138,      // round 138: fin125's validation reads the chain's links at their kept addresses, all asked for at once (PLD), the next entry's ahead (exact; coll125.h)
+        kSub139,      // round 139: the sub-threads' register frames keep only the registers that live across the switch (the ABI's callee-saved, v0's lo1, the waker's a0-a3) (port; decomp_subthread)
+        kRnd139, // round 139: iosGetRandom's VU0 R steps in a host register (exact; decomp_r139)
+        kGc139, // round 139: the garbage pass's blocks with nothing to move walked in host locals (exact; decomp_gctick)
+        kSort140,  // round 140: the display walk's sort lists cleared / scanned as host words (exact; decomp_walk)
+        kQuad140,  // round 140: the strips' quads (quad117) with their per-vertex helpers inlined (exact; decomp_walk)
+        kClip140,  // round 140: the walk's layout objects' ClipLayoutObjModel run ahead on the walk helper threads (exact; decomp_walk)
+        kPf141,    // round 141: the characters' noted memory asked for (PLD) one script-pass segment ahead on a helper thread (prefetch only; decomp_pf141)
+        kPfc141,   // round 141: pf141's notes from the collision natives too (the objects / parts / kept surfaces each segment's tests read; prefetch only)
+        kLiftD1,   // decomp D1: the functions tools/lift_d1.py lifted to host locals (exact: the recompiler's semantics; decomp_liftd1_*.cpp)
+        kLiftD2,   // decomp D2: the next batch tools/lift_d1.py lifted, by game-thread time (exact; decomp_liftd2_*.cpp)
+        kLiftD3,   // decomp D3: D2's call-heavy functions lifted with the 64-bit entry-value fix (exact; decomp_liftd3_*.cpp)
+        kLiftD4,   // decomp D4: the next batch, lifted with the callee summaries (exact; decomp_liftd4_*.cpp)
+        kLiftD5,   // decomp D5: the next batch, functions the Mac runs reach (exact; decomp_liftd5_*.cpp)
+        kLiftAlt,  // decomp D4 (test): off puts each lifted function's alternative copy (SOTC_DECOMP_LIFT_ALT: another lifter
+                   // version of the same function, decomp_liftalt_*.cpp in test builds only) in its place: an A/B of two lifters
         kSwitchCount
     };
     inline const char *const kSwitchEnv[kSwitchCount] = {"SOTC_CAMCOLL", "SOTC_COLLPROBE", "SOTC_MOTION", "SOTC_LEAVES", "SOTC_HOTLIST", "SOTC_HOTLIST44", "SOTC_HOTLIST46", "SOTC_HOTLIST47",
-                                                         "SOTC_SCRIPTVM", "SOTC_ISYS", "SOTC_HOTLIST48", "SOTC_FASTNATIVE", "SOTC_FASTNATIVE2", "SOTC_FASTNATIVE3", "SOTC_PTCL62", "SOTC_COLL63", "SOTC_TEX64", "SOTC_WALK67", "SOTC_PREF69", "SOTC_COLL71", "SOTC_CHARLOD78", "SOTC_PTCL79", "SOTC_SEG80", "SOTC_POSE82", "SOTC_WALK83", "SOTC_PTCL83", "SOTC_PROBE84", "SOTC_FIND84", "SOTC_GROUND85", "SOTC_PTCL89", "SOTC_PTCL91", "SOTC_JOIN95", "SOTC_DRAW95", "SOTC_EARLY95", "SOTC_OBJ96", "SOTC_SEL96", "SOTC_SEL97", "SOTC_LINKS97", "SOTC_PATH97", "SOTC_PLAN97", "SOTC_WALK101", "SOTC_SKIN101", "SOTC_LEAF101", "SOTC_OBJ101", "SOTC_SW102", "SOTC_PTCL103", "SOTC_SOLID103", "SOTC_GRP106", "SOTC_OAN106", "SOTC_AI106", "SOTC_COLL115", "SOTC_PKT117", "SOTC_GLV117", "SOTC_DRAW117", "SOTC_LEAF117", "SOTC_SYM120", "SOTC_HEAP120", "SOTC_FLUSH119", "SOTC_WALK119", "SOTC_PART119", "SOTC_VIEW119", "SOTC_PTCL123", "SOTC_BLEND123", "SOTC_SEG123", "SOTC_GAZE122", "SOTC_CLOTH122", "SOTC_QUAT122", "SOTC_KEYS122", "SOTC_FIN125", "SOTC_OBJ125", "SOTC_SCROLL127", "SOTC_GEO126", "SOTC_CTL126", "SOTC_IMM128", "SOTC_TEXR128", "SOTC_PF134", "SOTC_CLIP134", "SOTC_POSE136", "SOTC_KEY136", "SOTC_EULER136", "SOTC_PF135", "SOTC_FIN138"};
-    inline signed char g_switch[kSwitchCount] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1}; // -1: not read yet
+                                                         "SOTC_SCRIPTVM", "SOTC_ISYS", "SOTC_HOTLIST48", "SOTC_FASTNATIVE", "SOTC_FASTNATIVE2", "SOTC_FASTNATIVE3", "SOTC_PTCL62", "SOTC_COLL63", "SOTC_TEX64", "SOTC_WALK67", "SOTC_PREF69", "SOTC_COLL71", "SOTC_CHARLOD78", "SOTC_PTCL79", "SOTC_SEG80", "SOTC_POSE82", "SOTC_WALK83", "SOTC_PTCL83", "SOTC_PROBE84", "SOTC_FIND84", "SOTC_GROUND85", "SOTC_PTCL89", "SOTC_PTCL91", "SOTC_JOIN95", "SOTC_DRAW95", "SOTC_EARLY95", "SOTC_OBJ96", "SOTC_SEL96", "SOTC_SEL97", "SOTC_LINKS97", "SOTC_PATH97", "SOTC_PLAN97", "SOTC_WALK101", "SOTC_SKIN101", "SOTC_LEAF101", "SOTC_OBJ101", "SOTC_SW102", "SOTC_PTCL103", "SOTC_SOLID103", "SOTC_GRP106", "SOTC_OAN106", "SOTC_AI106", "SOTC_COLL115", "SOTC_PKT117", "SOTC_GLV117", "SOTC_DRAW117", "SOTC_LEAF117", "SOTC_SYM120", "SOTC_HEAP120", "SOTC_FLUSH119", "SOTC_WALK119", "SOTC_PART119", "SOTC_VIEW119", "SOTC_PTCL123", "SOTC_BLEND123", "SOTC_SEG123", "SOTC_GAZE122", "SOTC_CLOTH122", "SOTC_QUAT122", "SOTC_KEYS122", "SOTC_FIN125", "SOTC_OBJ125", "SOTC_SCROLL127", "SOTC_GEO126", "SOTC_CTL126", "SOTC_IMM128", "SOTC_TEXR128", "SOTC_PF134", "SOTC_CLIP134", "SOTC_POSE136", "SOTC_KEY136", "SOTC_EULER136", "SOTC_PF135", "SOTC_FIN138", "SOTC_SUB139", "SOTC_RND139", "SOTC_GC139", "SOTC_SORT140", "SOTC_QUAD140", "SOTC_CLIP140", "SOTC_PF141", "SOTC_PFC141", "SOTC_LIFTD1", "SOTC_LIFTD2", "SOTC_LIFTD3", "SOTC_LIFTD4", "SOTC_LIFTD5", "SOTC_LIFTALT"};
+    inline signed char g_switch[kSwitchCount] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1}; // -1: not read yet
     inline bool switchOn(int which)
     {
         signed char v = g_switch[which];
@@ -676,7 +711,17 @@ namespace sotc_decomp
         }
         return v != 0;
     }
-    inline void setSwitch(int which, bool on) { g_switch[which] = on ? 1 : 0; }
+    // Called when a switch changes at run time (an A/B window): decomp D1's lifted functions are swapped in the table.
+    inline void (*g_switchChanged)(int which, bool on) = nullptr;
+    inline void setSwitch(int which, bool on)
+    {
+        const signed char v = on ? 1 : 0;
+        if (g_switch[which] == v)
+            return;
+        g_switch[which] = v;
+        if (g_switchChanged)
+            g_switchChanged(which, on);
+    }
 
     // Round 39's natives (the camera's collision path: its wrappers, filters
     // and the segment's matrix, decomp_camcoll.cpp / decomp_collision.cpp /
@@ -777,6 +822,14 @@ namespace sotc_decomp
     inline bool pf134On() { return switchOn(kPf134); }
     inline bool clip134On() { return switchOn(kClip134); }
     inline bool pf135On() { return switchOn(kPf135); }
+    inline bool gc139On() { return switchOn(kGc139); } // round 139
+    inline bool sort140On() { return switchOn(kSort140); } // round 140
+    inline bool quad140On() { return switchOn(kQuad140); } // round 140
+    inline bool clip140On() { return switchOn(kClip140); } // round 140
+    inline bool pf141On() { return switchOn(kPf141); } // round 141
+    inline bool pfc141On() { return switchOn(kPfc141); } // round 141
+    inline bool rnd139On() { return switchOn(kRnd139); } // round 139
+    inline bool sub139On() { return switchOn(kSub139); } // round 139 (decomp_subthread)
     inline bool draw117On() { return switchOn(kDraw117); }
     inline bool leaf117On() { return switchOn(kLeaf117); }
     // Round 91 (sotc_worker): SOTC_PTCL91=1 the particle step on the worker beside the walk's group pass,
@@ -912,6 +965,29 @@ namespace sotc_decomp
 // WaitSema would block for good): installed like a coroutine, never checked.
 #define SOTC_DECOMP_UNCHECKED(address, name, fn) \
     static const ::sotc_decomp::Registrar sotc_decomp_registrar_##name{address, #name, fn, false, false, false, false, true, false}
+// Decomp D1: a lifted function (tools/lift_d1.py), in the table while SOTC_LIFTD1 is on.
+#define SOTC_DECOMP_LIFT_FUNCTION(address, name, fn, original) \
+    static const ::sotc_decomp::Registrar sotc_decomp_registrar_##name{address, #name, fn, false, false, false, false, false, false, true, original}
+// Decomp D2: a lifted function of D2's batch, in the table while SOTC_LIFTD2 is on.
+#define SOTC_DECOMP_LIFT_FUNCTION_D2(address, name, fn, original) \
+    static const ::sotc_decomp::Registrar sotc_decomp_registrar_##name{address, #name, fn, false, false, false, false, false, false, true, original, ::sotc_decomp::kLiftD2}
+// Decomp D3: a lifted function of D3's batch, in the table while SOTC_LIFTD3 is on.
+#define SOTC_DECOMP_LIFT_FUNCTION_D3(address, name, fn, original) \
+    static const ::sotc_decomp::Registrar sotc_decomp_registrar_##name{address, #name, fn, false, false, false, false, false, false, true, original, ::sotc_decomp::kLiftD3}
+// Decomp D4: a lifted function of D4's batch, in the table while SOTC_LIFTD4 is on.
+#define SOTC_DECOMP_LIFT_FUNCTION_D4(address, name, fn, original) \
+    static const ::sotc_decomp::Registrar sotc_decomp_registrar_##name{address, #name, fn, false, false, false, false, false, false, true, original, ::sotc_decomp::kLiftD4}
+// Decomp D5: a lifted function of D5's batch, in the table while SOTC_LIFTD5 is on.
+#define SOTC_DECOMP_LIFT_FUNCTION_D5(address, name, fn, original) \
+    static const ::sotc_decomp::Registrar sotc_decomp_registrar_##name{address, #name, fn, false, false, false, false, false, false, true, original, ::sotc_decomp::kLiftD5}
+// Decomp D5: a lifted copy of a function a native replaces (its slot holds the native): what sotc_decomp::recompiled()
+// gives the natives (their fallbacks to the original code) while SOTC_LIFTD5 is on. Registered as "<name>_fb", so
+// SOTC_DECOMP_SKIP=<name> (the native left out) puts the copy in the table, where the difftest can check it.
+#define SOTC_DECOMP_LIFT_FALLBACK(address, name, fn, original) \
+    static const ::sotc_decomp::Registrar sotc_decomp_registrar_##name##_fb{address, #name "_fb", fn, false, false, false, false, false, false, true, original, ::sotc_decomp::kLiftD5}
+// Decomp D4 (test builds): another lifter version of a lifted function, in its place while liftalt is off.
+#define SOTC_DECOMP_LIFT_ALT(address, name, fn) \
+    static const ::sotc_decomp::LiftAltRegistrar sotc_decomp_liftalt_##name{address, fn}
 // A context switch that returns to its caller after a round trip (wake).
 #define SOTC_DECOMP_SWITCH_FUNCTION(address, name, fn) \
     static const ::sotc_decomp::Registrar sotc_decomp_registrar_##name{address, #name, fn, false, true, false}

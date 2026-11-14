@@ -5,6 +5,7 @@
 #include "ps2_syscalls.h"
 #include "ps2_log.h"
 #include <algorithm>
+#include <cstdio>
 #include <cctype>
 #include <filesystem>
 #include <iostream>
@@ -141,6 +142,27 @@ namespace ps2_game_overrides
         size_t appliedCount = 0;
         for (const Descriptor &descriptor : descriptors)
         {
+            // DIAG (teto: 10 descritores): loga o resultado da comparacao sem
+            // alterar nenhuma condicao/retorno/estado (somente leitura).
+            {
+                static int matchLogN = 0;
+                if (matchLogN < 10)
+                {
+                    ++matchLogN;
+                    bool matched = true;
+                    if (descriptor.elfName && descriptor.elfName[0] != '\0' && !equalsIgnoreCaseAscii(descriptor.elfName, elfName))
+                        matched = false;
+                    if (descriptor.entry != 0u && descriptor.entry != entry)
+                        matched = false;
+                    if (descriptor.crc32 != 0u && (!fileCrcValid || fileCrc32 != descriptor.crc32))
+                        matched = false;
+                    const char *dbgName = (descriptor.name && descriptor.name[0] != '\0') ? descriptor.name : "unnamed";
+                    std::fprintf(stderr, "[ovr] match check name=%s id=%s crc=%08x elfPath=%s -> %s\n",
+                                 dbgName, descriptor.elfName ? descriptor.elfName : "",
+                                 static_cast<unsigned>(descriptor.crc32), elfPath.c_str(),
+                                 matched ? "matched" : "not");
+                }
+            }
             if (!descriptor.apply)
             {
                 continue;

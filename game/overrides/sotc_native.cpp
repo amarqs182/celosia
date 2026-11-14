@@ -28,6 +28,7 @@
 #include "runtime/native_recorder.h"
 #include "runtime/host_menu.h"
 #include "runtime/native_renderer.h"
+#include "meshoptimizer.h"
 #include "runtime/ps2_diag.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/ps2_gs_psmct32.h"
@@ -41,6 +42,9 @@
 #include "sotc_prof.h"
 #include "sotc_decomp.h"
 #include "sotc_worker.h"
+#if defined(__GNUC__)
+extern "C" void __gcov_dump() __attribute__((weak));
+#endif
 namespace char104 // round 104 (decomp_char104.cpp)
 {
     void install(PS2Runtime &runtime);
@@ -50,6 +54,11 @@ namespace char104 // round 104 (decomp_char104.cpp)
     void setAb109(bool anime, bool open, bool obj); // round 109
     void setAb111(bool hold, bool delta);            // round 111
     void setAb114(bool gain, bool net);              // round 114
+}
+namespace ps2_log
+{
+    void log_entry(const char *) {}
+    void log_exit(const char *) {}
 }
 #include "lines67.h"
 #include "lean_hot.h"
@@ -91,6 +100,7 @@ namespace char104 // round 104 (decomp_char104.cpp)
 extern "C" unsigned int _pthread_stack_default_user; // ps2_vita_runtime.cpp
 extern "C" void ps2x_vita_pace_ab(int on);                // raylib_vita.cpp (round 110)
 extern "C" void ps2x_vita_pace132_ab(int on);             // raylib_vita.cpp (round 132)
+extern "C" void ps2x_vita_pace143_ab(int on);             // raylib_vita.cpp (round 143)
 #endif
 #include <vector>
 
@@ -315,6 +325,16 @@ namespace sotc_native
 
     // A vertex as the batch gives it: model space, or bind pose with up to
     // three bones (palette matrices) and weights.
+    inline bool detailTexturesOn()
+    {
+        static const bool on = []() {
+            if (const char *e = std::getenv("SOTC_DETAIL_TEX"))
+                return std::atoi(e) != 0;
+            return true;
+        }();
+        return on;
+    }
+
     struct BatchVertex
     {
         float x, y, z;
@@ -529,6 +549,116 @@ namespace sotc_native
                     out.push_back(v);
                 }
             }
+        }
+    }
+
+    inline int meshoptMode()
+    {
+        static const int mode = []() {
+            const char *e = std::getenv("SOTC_MESHOPT");
+            if (!e) return 2; // Default to 2: overdraw-optimized triangle stream into batching pools
+            return std::atoi(e);
+        }();
+        return mode;
+    }
+
+    inline bool optStaticMeshWithMeshopt(
+        const std::vector<native_renderer::Vertex> &in_vertices,
+        std::vector<native_renderer::Vertex> &out_vertices,
+        std::vector<uint32_t> &out_indices)
+    {
+        if (meshoptMode() == 0 || in_vertices.size() < 3 || (in_vertices.size() % 3) != 0)
+            return false;
+
+        const size_t vertex_count = in_vertices.size();
+        std::vector<unsigned int> remap(vertex_count);
+        const size_t unique_verts = meshopt_generateVertexRemap(
+            remap.data(),
+            nullptr,
+            vertex_count,
+            in_vertices.data(),
+            vertex_count,
+            sizeof(native_renderer::Vertex)
+        );
+
+        if (unique_verts == 0 || unique_verts > vertex_count)
+            return false;
+
+        out_vertices.resize(unique_verts);
+        out_indices.resize(vertex_count);
+
+        meshopt_remapVertexBuffer(
+            out_vertices.data(),
+            in_vertices.data(),
+            vertex_count,
+            sizeof(native_renderer::Vertex),
+            remap.data()
+        );
+
+        meshopt_remapIndexBuffer(
+            out_indices.data(),
+            nullptr,
+            vertex_count,
+            remap.data()
+        );
+
+        meshopt_optimizeVertexCache(
+            out_indices.data(),
+            out_indices.data(),
+            vertex_count,
+            unique_verts
+        );
+
+        meshopt_optimizeOverdraw(
+            out_indices.data(),
+            out_indices.data(),
+            vertex_count,
+            &out_vertices[0].x,
+            unique_verts,
+            sizeof(native_renderer::Vertex),
+            1.05f
+        );
+
+        meshopt_optimizeVertexFetch(
+            out_vertices.data(),
+            out_indices.data(),
+            vertex_count,
+            out_vertices.data(),
+            unique_verts,
+            sizeof(native_renderer::Vertex)
+        );
+
+        return true;
+    }
+
+    inline void uploadOptimizedStaticMesh(uint64_t id, const std::vector<native_renderer::Vertex> &verts)
+    {
+        const int mode = meshoptMode();
+        if (mode == 0)
+        {
+            native_renderer::uploadMesh(id, verts.data(), static_cast<uint32_t>(verts.size()));
+            return;
+        }
+        std::vector<native_renderer::Vertex> opt_verts;
+        std::vector<uint32_t> opt_indices;
+        if (optStaticMeshWithMeshopt(verts, opt_verts, opt_indices))
+        {
+            if (mode == 1)
+            {
+                native_renderer::uploadIndexedMesh(id, opt_verts.data(), static_cast<uint32_t>(opt_verts.size()),
+                                                   opt_indices.data(), static_cast<uint32_t>(opt_indices.size()));
+            }
+            else // mode 2: overdraw-optimized triangle stream into batching pools
+            {
+                std::vector<native_renderer::Vertex> reordered(opt_indices.size());
+                for (size_t i = 0; i < opt_indices.size(); ++i)
+                    reordered[i] = opt_verts[opt_indices[i]];
+                native_renderer::uploadMesh(id, reordered.data(), static_cast<uint32_t>(reordered.size()));
+            }
+        }
+        else
+        {
+            native_renderer::uploadMesh(id, verts.data(), static_cast<uint32_t>(verts.size()));
         }
     }
 
@@ -2795,6 +2925,15 @@ namespace sotc_native
             e.slot = surfaceSlot(e.s);
             p.pk.push_back(e);
         }
+        // Group packets of the same layer and surface contiguously to maximize
+        // PlanRun / drawMulti batching and eliminate Mali-G31 draw call bottlenecks.
+        std::stable_sort(p.pk.begin(), p.pk.end(), [header](const PlanPacket &a, const PlanPacket &b) {
+            const uint32_t layerA = surfaceLayer(header, a.s, false);
+            const uint32_t layerB = surfaceLayer(header, b.s, false);
+            if (layerA != layerB)
+                return layerA < layerB;
+            return a.s < b.s;
+        });
         p.surfaceRecords.clear();
         for (const PlanPacket &e : p.pk)
             if (std::find(p.surfaceRecords.begin(), p.surfaceRecords.end(), e.s) == p.surfaceRecords.end())
@@ -3214,7 +3353,7 @@ namespace sotc_native
         constexpr size_t kTuningCount = sizeof(kTuningFlags) / sizeof(kTuningFlags[0]);
         static int tuningAt[kTuningCount];
         // The decomp rounds' subsystem switches (sotc_decomp.h's table).
-        static const char *const switchNames[sotc_decomp::kSwitchCount] = {"camcoll", "collprobe", "motion", "leaves", "hotlist", "hotlist44", "hotlist46", "hotlist47", "scriptvm", "isys", "hotlist48", "fastnative", "fastnative2", "fastnative3", "ptcl62", "coll63", "tex64", "walk67", "pref69", "coll71", "charlod78", "ptcl79", "seg80", "pose82", "walk83", "ptcl83", "probe84", "find84", "ground85", "ptcl89", "ptcl91", "join95", "draw95", "early95", "obj96", "sel96", "sel97", "links97", "path97", "plan97", "walk101", "skin101", "leaf101", "obj101", "sw102", "ptcl103", "solid103", "grp106", "oan106", "ai106", "coll115", "pkt117", "glv117", "draw117", "leaf117", "sym120", "heap120", "flush119", "walk119", "part119", "view119", "ptcl123", "blend123", "seg123", "gaze122", "cloth122", "quat122", "keys122", "fin125", "obj125", "scroll127", "geo126", "ctl126", "imm128", "texr128", "pf134", "clip134", "pose136", "key136", "euler136", "pf135", "fin138"};
+        static const char *const switchNames[sotc_decomp::kSwitchCount] = {"camcoll", "collprobe", "motion", "leaves", "hotlist", "hotlist44", "hotlist46", "hotlist47", "scriptvm", "isys", "hotlist48", "fastnative", "fastnative2", "fastnative3", "ptcl62", "coll63", "tex64", "walk67", "pref69", "coll71", "charlod78", "ptcl79", "seg80", "pose82", "walk83", "ptcl83", "probe84", "find84", "ground85", "ptcl89", "ptcl91", "join95", "draw95", "early95", "obj96", "sel96", "sel97", "links97", "path97", "plan97", "walk101", "skin101", "leaf101", "obj101", "sw102", "ptcl103", "solid103", "grp106", "oan106", "ai106", "coll115", "pkt117", "glv117", "draw117", "leaf117", "sym120", "heap120", "flush119", "walk119", "part119", "view119", "ptcl123", "blend123", "seg123", "gaze122", "cloth122", "quat122", "keys122", "fin125", "obj125", "scroll127", "geo126", "ctl126", "imm128", "texr128", "pf134", "clip134", "pose136", "key136", "euler136", "pf135", "fin138", "sub139", "rnd139", "gc139", "sort140", "quad140", "clip140", "pf141", "pfc141", "liftd1", "liftd2", "liftd3", "liftd4", "liftd5", "liftalt"};
         static int switchAt[sotc_decomp::kSwitchCount];
         static bool switchStart[sotc_decomp::kSwitchCount];
         static int layerAt[32];
@@ -3226,6 +3365,9 @@ namespace sotc_native
         static int r127AllAt = -1; // round 127
         static int r126AllAt = -1; // round 126
         static int r128AllAt = -1; // round 128
+        static int sg2q139At = -1; // round 139: the sound driver's status request without the mixer's lock wait
+        static int rpc139At = -1, sem139At = -1; // round 139: the runtime's switches (ps2_stats.h stat139)
+        static int r139AllAt = -1;                // round 139: the round's six switches off together
         static int sacMaxAt = -1, sacPtclAt = -1, sacLodAt = -1; // round 77
         static const bool placesRead = [&]
         {
@@ -3259,6 +3401,10 @@ namespace sotc_native
             aud90cAt = indexOf("aud90c");
             r90AllAt = indexOf("r90all");
             chunk90At = indexOf("chunk90");
+            sg2q139At = indexOf("sg2q139");
+            rpc139At = indexOf("rpc139");
+            sem139At = indexOf("sem139");
+            r139AllAt = indexOf("r139all");
             flush90At = indexOf("revflush90");
             r92AllAt = indexOf("r92all"); // round 92: the round's GPU fixes (noscreen92) off together
             r93AllAt = indexOf("r93all"); // round 93: the round's exact GPU savings (mirror93, atop93, post93) off together
@@ -3444,6 +3590,39 @@ namespace sotc_native
             const bool off = (chunk90At >= 0 && isOffAt(chunk90At)) || (r90AllAt >= 0 && isOffAt(r90AllAt));
             as::setMix90Chunk(off ? 16 : chunkStart);
         }
+        if (rpc139At >= 0) // round 139
+        {
+            static const bool start = stat139::rpc139();
+            stat139::g_rpc139.set(isOffAt(rpc139At) ? false : start);
+        }
+        if (sem139At >= 0) // round 139
+        {
+            static const bool start = stat139::sem139();
+            stat139::g_sem139.set(isOffAt(sem139At) ? false : start);
+        }
+        if (sg2q139At >= 0) // round 139
+        {
+            namespace as = ps2x::iop::audio_stats;
+            static const bool sg2Start = as::sg2q139();
+            as::setSg2q139(isOffAt(sg2q139At) ? false : sg2Start);
+        }
+        if (r139AllAt >= 0) // round 139: `r139all` (sub139, rnd139, gc139, rpc139, sem139, sg2q139 off together)
+        {
+            namespace as = ps2x::iop::audio_stats;
+            // (the start values from the environment: the single switches' blocks above may have set them already)
+            auto envOn = [](const char *name) { const char *e = std::getenv(name); return !(e && e[0] == '0'); };
+            static const bool sg2Start = envOn("SOTC_SG2Q139"), rpcStart = envOn("SOTC_RPC139"), semStart = envOn("SOTC_SEM139");
+            const bool off = isOffAt(r139AllAt);
+            for (int i : {static_cast<int>(sotc_decomp::kSub139), static_cast<int>(sotc_decomp::kRnd139), static_cast<int>(sotc_decomp::kGc139)})
+                if (off || switchAt[i] < 0)
+                    sotc_decomp::setSwitch(i, off ? false : switchStart[i]);
+            if (off || sg2q139At < 0)
+                as::setSg2q139(off ? false : sg2Start);
+            if (off || rpc139At < 0)
+                stat139::g_rpc139.set(off ? false : rpcStart);
+            if (off || sem139At < 0)
+                stat139::g_sem139.set(off ? false : semStart);
+        }
         // Round 52: the thread switch by returning (PS2X_XFER_RETURN).
         if (g_runtimeForLog && xferAt >= 0)
         {
@@ -3513,6 +3692,12 @@ namespace sotc_native
             static const int at132 = indexOf("pace132");
             if (at132 >= 0)
                 ps2x_vita_pace132_ab(isOffAt(at132) ? 0 : 1);
+        }
+        {
+            // Round 143: `pace143` (the display's slot pulled when the render thread waits in the swap behind it) off in its windows.
+            static const int at143 = indexOf("pace143");
+            if (at143 >= 0)
+                ps2x_vita_pace143_ab(isOffAt(at143) ? 0 : 1);
         }
 #endif
         {
@@ -5799,6 +5984,10 @@ namespace sotc_native
             sotc_worker::frameTick(frame); // round 91: the guest worker joined at the frame's end, its statistics
             char104::frameTick(frame);     // round 104
             sotc_decomp::g_gameFrame = frame;
+#if defined(__GNUC__)
+            if (frame > 0 && frame % 600 == 0 && __gcov_dump)
+                __gcov_dump();
+#endif
             sotc_decomp::fastStatsTick(frame);
             ps2_lean::frameTick(frame);
             sotc_decomp::abTick(frame);
@@ -9353,6 +9542,9 @@ namespace sotc_native
         uint64_t id = 0;
         bool twoPasses = false, ok = false, isSkinned = false, isLit = false;
         std::vector<native_renderer::Vertex> vertices, second;
+        std::vector<native_renderer::Vertex> opt_verts, opt_second_verts;
+        std::vector<uint32_t> opt_indices, opt_second_indices;
+        bool indexed = false, indexed_second = false;
         SkinnedPacket packet;
         void work() override
         {
@@ -9376,8 +9568,43 @@ namespace sotc_native
                         o.nz = v.nz;
                     };
                     triangulate(strips, place, vertices);
+                    const int mode = meshoptMode();
+                    if (mode == 1)
+                    {
+                        indexed = optStaticMeshWithMeshopt(vertices, opt_verts, opt_indices);
+                    }
+                    else if (mode == 2)
+                    {
+                        if (optStaticMeshWithMeshopt(vertices, opt_verts, opt_indices))
+                        {
+                            std::vector<native_renderer::Vertex> reordered(opt_indices.size());
+                            for (size_t i = 0; i < opt_indices.size(); ++i)
+                                reordered[i] = opt_verts[opt_indices[i]];
+                            vertices = std::move(reordered);
+                            opt_verts.clear();
+                            opt_indices.clear();
+                        }
+                    }
                     if (twoPasses) // two textures: the second pass's mesh, with the second coordinates
+                    {
                         triangulate(strips, place, second, true);
+                        if (mode == 1)
+                        {
+                            indexed_second = optStaticMeshWithMeshopt(second, opt_second_verts, opt_second_indices);
+                        }
+                        else if (mode == 2)
+                        {
+                            if (optStaticMeshWithMeshopt(second, opt_second_verts, opt_second_indices))
+                            {
+                                std::vector<native_renderer::Vertex> reordered(opt_second_indices.size());
+                                for (size_t i = 0; i < opt_second_indices.size(); ++i)
+                                    reordered[i] = opt_second_verts[opt_second_indices[i]];
+                                second = std::move(reordered);
+                                opt_second_verts.clear();
+                                opt_second_indices.clear();
+                            }
+                        }
+                    }
                 }
                 ok = true;
             }
@@ -9403,9 +9630,19 @@ namespace sotc_native
                 }
                 return;
             }
+            if (indexed)
+                native_renderer::uploadIndexedMesh(id, opt_verts.data(), static_cast<uint32_t>(opt_verts.size()),
+                                                   opt_indices.data(), static_cast<uint32_t>(opt_indices.size()));
+            else
             native_renderer::uploadMesh(id, vertices.data(), static_cast<uint32_t>(vertices.size()));
             if (twoPasses)
+            {
+                if (indexed_second)
+                    native_renderer::uploadIndexedMesh(id ^ (1ull << 61), opt_second_verts.data(), static_cast<uint32_t>(opt_second_verts.size()),
+                                                       opt_second_indices.data(), static_cast<uint32_t>(opt_second_indices.size()));
+                else
                 native_renderer::uploadMesh(id ^ (1ull << 61), second.data(), static_cast<uint32_t>(second.size()));
+        }
         }
     };
     bool buildPacketAsync(uint64_t id, uint32_t data, uint32_t size, bool twoPasses)
@@ -9795,6 +10032,128 @@ namespace sotc_native
     // same state by the old code and compared (the memory it writes, the
     // CLIP register, the parts, the out-of-view decision), and the CLIP
     // records (`known`) checked against the register at the next hook.
+    inline uint32_t nodeClipTest(uint32_t node, const float clip[16])
+    {
+#if defined(__ARM_NEON) || defined(__aarch64__)
+        const float32x4_t c0 = vld1q_f32(clip + 0);
+        const float32x4_t c1 = vld1q_f32(clip + 4);
+        const float32x4_t c2 = vld1q_f32(clip + 8);
+        const float32x4_t c3 = vld1q_f32(clip + 12);
+
+        const float minX = real(node);
+        const float minY = real(node + 4u);
+        const float minZ = real(node + 8u);
+        const float maxX = real(node + 0x10u);
+        const float maxY = real(node + 0x14u);
+        const float maxZ = real(node + 0x18u);
+
+        const float32x4_t x_min = vmulq_n_f32(c0, minX);
+        const float32x4_t x_max = vmulq_n_f32(c0, maxX);
+        const float32x4_t y_min = vmulq_n_f32(c1, minY);
+        const float32x4_t y_max = vmulq_n_f32(c1, maxY);
+        const float32x4_t z_min = vmulq_n_f32(c2, minZ);
+        const float32x4_t z_max = vmulq_n_f32(c2, maxZ);
+
+        const float32x4_t xs[2] = {x_min, x_max};
+        const float32x4_t ys[2] = {y_min, y_max};
+        const float32x4_t zs[2] = {z_min, z_max};
+
+        static const uint32_t kGtMask[4] = {1, 4, 16, 0};
+        static const uint32_t kLtMask[4] = {2, 8, 32, 0};
+        const uint32x4_t vGtMask = vld1q_u32(kGtMask);
+        const uint32x4_t vLtMask = vld1q_u32(kLtMask);
+
+        uint32_t all = 0x3Fu, any = 0u;
+        for (int c = 0; c < 8; ++c)
+        {
+            float32x4_t v = vaddq_f32(c3, xs[c & 1]);
+            v = vaddq_f32(v, ys[(c >> 1) & 1]);
+            v = vaddq_f32(v, zs[(c >> 2) & 1]);
+
+            const float32x4_t w = vabsq_f32(vdupq_laneq_f32(v, 3));
+            const float32x4_t nw = vnegq_f32(w);
+
+            const uint32x4_t gt = vcgtq_f32(v, w);
+            const uint32x4_t lt = vcltq_f32(v, nw);
+
+            const uint32x4_t f_gt = vandq_u32(gt, vGtMask);
+            const uint32x4_t f_lt = vandq_u32(lt, vLtMask);
+            const uint32x4_t f_or = vorrq_u32(f_gt, f_lt);
+
+            const uint32_t flags = vgetq_lane_u32(f_or, 0) | vgetq_lane_u32(f_or, 1) | vgetq_lane_u32(f_or, 2);
+            all &= flags;
+            any |= flags;
+        }
+        if (all)
+            return 1u;
+
+        // Sub-pixel Node Culling (Bluepoint Remake technique):
+        // If the bounding box's projected screen diameter is sub-pixel (< ~1.0 px on 480p),
+        // skip this node and its sub-meshes completely.
+        static const float s_minProj = []() {
+            if (const char *e = std::getenv("SOTC_SAC_MIN_PROJECTED"))
+                return std::strtof(e, nullptr);
+            return 0.0f;
+        }();
+        if (s_minProj > 0.0f)
+        {
+            const float cx = 0.5f * (minX + maxX);
+            const float cy = 0.5f * (minY + maxY);
+            const float cz = 0.5f * (minZ + maxZ);
+            const float wc = clip[3] * cx + clip[7] * cy + clip[11] * cz + clip[15];
+            if (wc > 8.0f)
+            {
+                const float dx = maxX - minX;
+                const float dy = maxY - minY;
+                const float dz = maxZ - minZ;
+                const float diam2 = dx * dx + dy * dy + dz * dz;
+                const float limit = s_minProj * wc;
+                if (diam2 < limit * limit)
+                    return 1u; // Sub-pixel detail: culled
+            }
+        }
+        return any ? 0u : 2u;
+#else
+        uint32_t all = 0x3Fu, any = 0u;
+        for (int c = 0; c < 8; ++c)
+        {
+            const float x = real(node + ((c & 1) ? 0x10u : 0u)), y = real(node + ((c & 2) ? 0x14u : 4u)), z = real(node + ((c & 4) ? 0x18u : 8u));
+            float v[4];
+            for (int r = 0; r < 4; ++r)
+                v[r] = clip[r] * x + clip[4 + r] * y + clip[8 + r] * z + clip[12 + r];
+            const float w = std::fabs(v[3]);
+            const uint32_t flags = (v[0] > w ? 1u : 0u) | (v[0] < -w ? 2u : 0u) | (v[1] > w ? 4u : 0u) | (v[1] < -w ? 8u : 0u) | (v[2] > w ? 16u : 0u) |
+                                   (v[2] < -w ? 32u : 0u);
+            all &= flags;
+            any |= flags;
+        }
+        if (all)
+            return 1u;
+
+        static const float s_minProj = []() {
+            if (const char *e = std::getenv("SOTC_SAC_MIN_PROJECTED"))
+                return std::strtof(e, nullptr);
+            return 0.0f;
+        }();
+        if (s_minProj > 0.0f)
+        {
+            const float minX = real(node), minY = real(node + 4u), minZ = real(node + 8u);
+            const float maxX = real(node + 0x10u), maxY = real(node + 0x14u), maxZ = real(node + 0x18u);
+            const float cx = 0.5f * (minX + maxX), cy = 0.5f * (minY + maxY), cz = 0.5f * (minZ + maxZ);
+            const float wc = clip[3] * cx + clip[7] * cy + clip[11] * cz + clip[15];
+            if (wc > 8.0f)
+            {
+                const float dx = maxX - minX, dy = maxY - minY, dz = maxZ - minZ;
+                const float diam2 = dx * dx + dy * dy + dz * dz;
+                const float limit = s_minProj * wc;
+                if (diam2 < limit * limit)
+                    return 1u;
+            }
+        }
+        return any ? 0u : 2u;
+#endif
+    }
+
     namespace mdslane
     {
         enum JoinSite : int { kJClip, kJCache, kJShadow, kJHook, kJSync, kJFrame, kJSites };
@@ -9885,20 +10244,7 @@ namespace sotc_native
             {
                 if (useGame)
                     return word(node + 0x2Cu);
-                uint32_t all = 0x3Fu, any = 0u;
-                for (int c = 0; c < 8; ++c)
-                {
-                    const float x = real(node + ((c & 1) ? 0x10u : 0u)), y = real(node + ((c & 2) ? 0x14u : 4u)), z = real(node + ((c & 4) ? 0x18u : 8u));
-                    float v[4];
-                    for (int r = 0; r < 4; ++r)
-                        v[r] = clip[r] * x + clip[4 + r] * y + clip[8 + r] * z + clip[12 + r];
-                    const float w = std::fabs(v[3]);
-                    const uint32_t flags = (v[0] > w ? 1u : 0u) | (v[0] < -w ? 2u : 0u) | (v[1] > w ? 4u : 0u) | (v[1] < -w ? 8u : 0u) | (v[2] > w ? 16u : 0u) |
-                                           (v[2] < -w ? 32u : 0u);
-                    all &= flags;
-                    any |= flags;
-                }
-                return all ? 1u : (any ? 0u : 2u);
+                return nodeClipTest(node, clip);
             };
             uint32_t budget = 4096u;
             const auto visit = [&](auto &&self, uint32_t index, uint32_t inherited, int depth) -> void
@@ -10407,20 +10753,24 @@ namespace sotc_native
             return;
         // SOTC_HIDE_HEADER=<hex> (debugging, round 12): that model left out.
         static const uint32_t hideHeader = std::getenv("SOTC_HIDE_HEADER") ? static_cast<uint32_t>(std::strtoul(std::getenv("SOTC_HIDE_HEADER"), nullptr, 16)) : 0u;
-        if (hideHeader && word(word(instance) + 0x20u) == hideHeader)
+        const uint32_t h = word(word(instance) + 0x20u);
+        if (!h || (hideHeader && h == hideHeader))
             return;
-        CallRecord *record = nullptr; // this draw's, for the next frame's prefetch
-        if (g_prefetch)
-        {
-            queueNextDraw(instance);
-            const uint32_t object = word(instance);
-            CallRecord r{instance, object, word(object + 0x20u), word(instance + 0xCu)};
-            if (lean)
-                r.matrix = matrix;
-            g_calls.push_back(r);
-            if (lean)
-                record = &g_calls.back();
-        }
+
+        // Early Cull 1: Fully transparent instance
+        const float f244 = real(instance + 0x244u);
+        float opacity = 1.0f - f244;
+        if (word(h + 0xCu) != 0u)
+            opacity *= 1.0f - real(instance + 0x248u);
+        if (!(opacity > 0.0f))
+            return;
+
+        // Early Cull 2: LOD < 0 (Culled by modelClipSolid / modelClipSkin)
+        uint64_t lw;
+        std::memcpy(&lw, rdram + ((instance + 0x250u) & 0x1FFFFF8u), 8);
+        const int32_t signedLod = static_cast<int32_t>(static_cast<int64_t>(lw << 21) >> 61);
+        if (signedLod < 0)
+            return;
 
         float camera[16], clip[16];
         if (lean)
@@ -10428,6 +10778,21 @@ namespace sotc_native
         else
             for (int i = 0; i < 16; ++i)
                 camera[i] = real(g_cameraContext + 0x5A0u + i * 4u);
+#if defined(__aarch64__)
+        const float32x4_t c0 = vld1q_f32(camera);
+        const float32x4_t c1 = vld1q_f32(camera + 4);
+        const float32x4_t c2 = vld1q_f32(camera + 8);
+        const float32x4_t c3 = vld1q_f32(camera + 12);
+        for (int c = 0; c < 4; ++c)
+        {
+            const float32x4_t m = vld1q_f32(model + c * 4);
+            float32x4_t res = vmulq_laneq_f32(c0, m, 0);
+            res = vfmaq_laneq_f32(res, c1, m, 1);
+            res = vfmaq_laneq_f32(res, c2, m, 2);
+            res = vfmaq_laneq_f32(res, c3, m, 3);
+            vst1q_f32(clip + c * 4, res);
+        }
+#else
         for (int c = 0; c < 4; ++c)
             for (int r = 0; r < 4; ++r)
             {
@@ -10436,6 +10801,47 @@ namespace sotc_native
                     sum += camera[k * 4 + r] * model[c * 4 + k];
                 clip[c * 4 + r] = sum;
             }
+#endif
+
+        uint32_t gl = static_cast<uint32_t>((lw >> 40) & 7u);
+        if ((word(h + 0x18u) & 1u) && gl >= word(h + 0x1Cu) && word(h + 0x1Cu) != 0u)
+            gl = word(h + 0x1Cu) - 1u;
+        uint32_t l = gl;
+        if (const int finer = static_cast<int>(native_renderer::tuning().modelDetail + 0.5f); finer > 0 && l > 0u)
+        {
+            l = finer >= 2 ? 0u : l - 1u;
+            if (word(h + 0x30u + l * 4u) == 0u && word(h + 0x30u + gl * 4u) != 0u)
+                l = gl;
+        }
+        const uint32_t table = word(h + 0x30u + l * 4u);
+        const bool partCulled = (word(h + 0x18u) & 1u) == 0u && word(h + 0x54u) != 1u;
+        if (partCulled && table == 0u)
+            return;
+
+        // Early Cull 3: Fast Root Bounding Box Frustum Rejection
+        if (partCulled && !check)
+        {
+            const uint32_t rootTest = nodeClipTest(table, clip);
+            if (rootTest == 1u)
+            {
+                std::memcpy(const_cast<uint8_t *>(g_ram) + ((table + 0x2Cu) & 0x1FFFFFCu), &rootTest, 4);
+                return;
+            }
+        }
+
+        CallRecord *record = nullptr; // this draw's, for the next frame's prefetch
+        if (g_prefetch)
+        {
+            queueNextDraw(instance);
+            const uint32_t object = word(instance);
+            CallRecord r{instance, object, h, word(instance + 0xCu)};
+            if (lean)
+                r.matrix = matrix;
+            g_calls.push_back(r);
+            if (lean)
+                record = &g_calls.back();
+        }
+
         static const bool viewChecks = ps2_diag::env("SOTC_VIEW_CHECK") != nullptr;
         if (viewChecks)
         {
@@ -10458,12 +10864,6 @@ namespace sotc_native
         ModelPlan *gamePlan = nullptr;
         if (planOn)
         {
-            const uint32_t h = word(word(instance) + 0x20u);
-            uint64_t lw;
-            std::memcpy(&lw, rdram + ((instance + 0x250u) & 0x1FFFFF8u), 8);
-            uint32_t l = static_cast<uint32_t>((lw >> 40) & 7u);
-            if ((word(h + 0x18u) & 1u) && l >= word(h + 0x1Cu) && word(h + 0x1Cu) != 0u)
-                l = word(h + 0x1Cu) - 1u;
             gamePlan = modelPlan(h, l);
             ++g_planStats.uses;
             if (record && gamePlan)
@@ -10492,26 +10892,11 @@ namespace sotc_native
             if (laneOk)
             {
                 mdslane::Job &lj = mdslane::take(ctx);
-                const uint32_t h = word(word(instance) + 0x20u);
-                uint64_t lw;
-                std::memcpy(&lw, rdram + ((instance + 0x250u) & 0x1FFFFF8u), 8);
-                // The hook's LOD and table as it works them out below (gameLod,
-                // then "Model detail"'s finer level, tested by the hook itself).
-                uint32_t gl = static_cast<uint32_t>((lw >> 40) & 7u);
-                if ((word(h + 0x18u) & 1u) && gl >= word(h + 0x1Cu) && word(h + 0x1Cu) != 0u)
-                    gl = word(h + 0x1Cu) - 1u;
-                uint32_t l = gl;
-                if (const int finer = static_cast<int>(native_renderer::tuning().modelDetail + 0.5f); finer > 0 && l > 0u)
-                {
-                    l = finer >= 2 ? 0u : l - 1u;
-                    if (word(h + 0x30u + l * 4u) == 0u && word(h + 0x30u + gl * 4u) != 0u)
-                        l = gl;
-                }
                 lj.instance = instance;
-                lj.table = word(h + 0x30u + l * 4u);
+                lj.table = table;
                 lj.useGame = l == gl;
                 std::memcpy(lj.clip, clip, sizeof(lj.clip));
-                lj.partCulled = (word(h + 0x18u) & 1u) == 0u && word(h + 0x54u) != 1u;
+                lj.partCulled = partCulled;
                 std::memcpy(lj.model, model, sizeof(lj.model));
                 lj.plan = gamePlan;
                 MdsIn &in = lj.in;
@@ -10577,56 +10962,10 @@ namespace sotc_native
         }
         zone(0x2004u);
 
-        const uint32_t header = word(word(instance) + 0x20u);
-        static const uint32_t skipHeader = std::getenv("SOTC_NATIVE_SKIP") ? static_cast<uint32_t>(std::strtoul(std::getenv("SOTC_NATIVE_SKIP"), nullptr, 16)) : 0u; // debugging
-        if (header == skipHeader)
-            return;
+        const uint32_t header = h;
+        const uint32_t lod = l;
+        const uint32_t gameLod = gl;
         const bool fading = real(instance + 0x244u) > 0.0f; // modelDisp: param_1[0x91]
-        // modelDisp's instance opacity (the microcode's, at its packet + 0xdc).
-        float opacity = 1.0f - real(instance + 0x244u);
-        if (word(header + 0xCu) != 0u)
-            opacity *= 1.0f - real(instance + 0x248u);
-        if (!(opacity > 0.0f))
-        {
-            static const bool log = ps2_diag::env("SOTC_NATIVE_LOG") != nullptr;
-            static uint64_t logged = 0;
-            if (log && g_frame >= logged + 120u)
-            {
-                logged = g_frame;
-                std::fprintf(stderr, "[native-hidden] frame %llu header %08x f91 %g f92 %g hc %08x\n", (unsigned long long)g_frame, header,
-                             real(instance + 0x244u), real(instance + 0x248u), word(header + 0xCu));
-            }
-            return;
-        }
-        opacity = std::min(opacity, 1.0f);
-        uint64_t lodWord;
-        std::memcpy(&lodWord, rdram + ((instance + 0x250u) & 0x1FFFFF8u), 8);
-        uint32_t lod = static_cast<uint32_t>((lodWord >> 40) & 7u);
-        if ((word(header + 0x18u) & 1u) && lod >= word(header + 0x1Cu) && word(header + 0x1Cu) != 0u)
-            lod = word(header + 0x1Cu) - 1u;
-        // Quality "Model detail" (SOTC_MODEL_DETAIL): one level finer than
-        // the game's, or always level 0 (the finest; far hills and colossi
-        // lose their blocky outlines). The parts are then tested here, as
-        // the game's results (+0x2c) are for its own level's table.
-        const uint32_t gameLod = lod;
-        if (const int finer = static_cast<int>(native_renderer::tuning().modelDetail + 0.5f); finer > 0 && lod > 0u)
-        {
-            lod = finer >= 2 ? 0u : lod - 1u;
-            if (word(header + 0x30u + lod * 4u) == 0u && word(header + 0x30u + gameLod * 4u) != 0u)
-                lod = gameLod; // no part table there: as the game has it
-        }
-        const uint32_t table = word(header + 0x30u + lod * 4u);
-        // modelDisp (0x1097118) tests the parts against the camera only when
-        // the model has bit 0 of +0x18 clear and +0x54 != 1; otherwise every
-        // packet of the LOD is drawn. The test is made here again rather than
-        // read from the parts' +0x2c: the recompiled modelDisp can come back
-        // to this hook before its test has run (a checkpoint inside
-        // manager_sub_01099A08 returns with pc there, the rest of modelDisp
-        // runs after), so +0x2c still held another instance's or an earlier
-        // frame's result (on-screen parts skipped, off-screen ones drawn).
-        const bool partCulled = (word(header + 0x18u) & 1u) == 0u && word(header + 0x54u) != 1u;
-        if (partCulled && table == 0u)
-            return; // modelDisp returns too (bVar4 stays set): nothing drawn
         // The rest is the job's (on the worker when hookjobs::g_on): what it
         // needs of this moment taken now.
         if (hookJob)
@@ -10677,20 +11016,7 @@ namespace sotc_native
             {
                 if (!ps2Lists && !check && lod == gameLod)
                     return word(node + 0x2Cu); // modelDispState's (the game's own) result
-                uint32_t all = 0x3Fu, any = 0u;
-                for (int c = 0; c < 8; ++c)
-                {
-                    const float x = real(node + ((c & 1) ? 0x10u : 0u)), y = real(node + ((c & 2) ? 0x14u : 4u)), z = real(node + ((c & 4) ? 0x18u : 8u));
-                    float v[4];
-                    for (int r = 0; r < 4; ++r)
-                        v[r] = clip[r] * x + clip[4 + r] * y + clip[8 + r] * z + clip[12 + r];
-                    const float w = std::fabs(v[3]);
-                    const uint32_t flags = (v[0] > w ? 1u : 0u) | (v[0] < -w ? 2u : 0u) | (v[1] > w ? 4u : 0u) | (v[1] < -w ? 8u : 0u) | (v[2] > w ? 16u : 0u) |
-                                           (v[2] < -w ? 32u : 0u);
-                    all &= flags;
-                    any |= flags;
-                }
-                return all ? 1u : (any ? 0u : 2u);
+                return nodeClipTest(node, clip);
             };
             // manager_sub_01099A08: a node takes its parent's result unless
             // that is 0 (partly inside), then it is tested; +0x20 / +0x24 the
@@ -11156,7 +11482,7 @@ namespace sotc_native
                 if (found != g_skinnedPackets.end())
                     skinnedPacket = &found->second;
             }
-            const bool twoPasses = (info ? info->texMode : word(s + 0x1Cu)) == 2u;
+            const bool twoPasses = detailTexturesOn() && ((info ? info->texMode : word(s + 0x1Cu)) == 2u);
             const bool needsBuild = !skinnedPacket && ((!(known && e->ready) && !native_renderer::hasMesh(id)) ||
                                                        (twoPasses && !(known && e->readyTwo) && !native_renderer::hasMesh(id ^ (1ull << 61))));
             // Round 27: the terrain's packets (layers 1-3) are built here, up
@@ -11221,12 +11547,12 @@ namespace sotc_native
                         o.nz = v.nz;
                     };
                     triangulate(strips, place, vertices);
-                    native_renderer::uploadMesh(id, vertices.data(), static_cast<uint32_t>(vertices.size()));
+                    uploadOptimizedStaticMesh(id, vertices);
                     if (twoPasses) // two textures: the second pass's mesh, with the second coordinates
                     {
                         vertices.clear();
                         triangulate(strips, place, vertices, true);
-                        native_renderer::uploadMesh(id ^ (1ull << 61), vertices.data(), static_cast<uint32_t>(vertices.size()));
+                        uploadOptimizedStaticMesh(id ^ (1ull << 61), vertices);
                     }
                 }
                 if (here)
@@ -11541,7 +11867,7 @@ namespace sotc_native
             // being 0x20; the splash rings drawn after on the surface stay visible.
             if (((full ? static_cast<uint32_t>(full->flags) : word(s + 0x18u)) & 0x2200u) == 0x2200u)
                 state.noDepthWrite = true;
-            const bool twoTextures = (full ? full->texMode : word(s + 0x1Cu)) == 2u && !posed && !state.debugColour;
+            const bool twoTextures = detailTexturesOn() && ((full ? full->texMode : word(s + 0x1Cu)) == 2u) && !posed && !state.debugColour;
             // SOTC_LOG_HEADER=<hex> (debugging, round 38): that model's surfaces as drawn.
             static const uint32_t logHeader = std::getenv("SOTC_LOG_HEADER") ? static_cast<uint32_t>(std::strtoul(std::getenv("SOTC_LOG_HEADER"), nullptr, 16)) : 0u;
             if (logHeader && header == logHeader && g_frame % 30u == 0u)
@@ -11557,7 +11883,7 @@ namespace sotc_native
                 noteRead((s + 0x18u) & ~7u, 8u), std::memcpy(&sflags, g_ram + ((s + 0x18u) & 0x1FFFFF8u), 8);
             const bool layer14 = ((sflags >> 25) & 1u) != 0;
             const bool reflective = (layer14 || (sflags & 0x2200u) == 0x2200u) && !noReflect && !state.debugColour;
-            if (runs && e && e->resolved && !posed && !twoTextures && !reflective && info && info->texMode != 2u && mesh == id)
+            if (runs && e && e->resolved && !posed && !twoTextures && !reflective && info && (!detailTexturesOn() || info->texMode != 2u) && mesh == id)
             {
                 // The first packet of a run (planPackets adds the next ones).
                 g_planRun.flush();

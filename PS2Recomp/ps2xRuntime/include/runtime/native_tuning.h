@@ -246,7 +246,7 @@ namespace native_renderer
         // copy taken up again (the console). The Vita's default; the Mac's
         // OpenGL takes the copy unless SOTC_SBLUR_PINGPONG=1 (Metal: its own
         // path). SOTC_SBLUR_PINGPONG=0/1; A/B name `sblurapart`.
-#if defined(__vita__)
+#if defined(__vita__) || defined(__linux__)
         bool blurApart = true;
 #else
         bool blurApart = false;
@@ -292,7 +292,7 @@ namespace native_renderer
         // the pixels is Vita3K's texture coordinates for such reads (a
         // one-level texture read at LOD 0 or at the interpolated UV is the
         // same texel and filter on the GPU). Its window and r98all turn it off.
-#if defined(__vita__)
+#if defined(__vita__) || defined(__linux__)
         bool glPlainReads = true;
 #else
         bool glPlainReads = false;
@@ -352,7 +352,16 @@ namespace native_renderer
         // MHz, altar and route 6, matched): the world's neighbours differ by
         // matrix as well as texture, so sorting by texture buys few merges and
         // costs the sort. Off by default (SOTC_GL_SORT87=1 to try; A/B name `sort87`).
+#if defined(__vita__) || defined(__linux__)
+        bool glSort87 = true;
+#else
         bool glSort87 = false;
+#endif
+#if defined(__linux__) && !defined(__vita__)
+        bool glInstancing = true;
+#else
+        bool glInstancing = false;
+#endif
         // Round 87 (GPU, console A/B candidate): the shadow volumes' stencil
         // count drawn with the fragment program disabled (GXM's depth /
         // stencil-only primitives: the ISP alone, no USSE program, no blend)
@@ -360,7 +369,7 @@ namespace native_renderer
         // Round 88: the console's A/B measured it -2.0 ms a frame (matched):
         // the Vita's default (the Mac has no GXM: unused there).
         // SOTC_GL_VOL87=0/1 (Vita default 1); A/B name `vol87` (its windows flip it).
-#if defined(__vita__)
+#if defined(__vita__) || defined(__linux__)
         bool glVol87 = true;
 #else
         bool glVol87 = false;
@@ -383,7 +392,7 @@ namespace native_renderer
         // Round 88: the console's A/B measured it -5.2 ms a frame (matched;
         // the background scene ~20 ms of GPU -> ~1 ms): the Vita's default.
         // SOTC_GL_BGSMALL87=0/1 (Vita default 1, Mac 0); A/B name `bgsmall87` (its windows flip it).
-#if defined(__vita__)
+#if defined(__vita__) || defined(__linux__)
         bool glBgSmall87 = true;
 #else
         bool glBgSmall87 = false;
@@ -398,7 +407,7 @@ namespace native_renderer
         // Not where the picture's alpha must be kept (the Vita bloom's mask).
         // SOTC_GL_OPAQUE88=0/1 (default 1 on the Vita since round 93, 0
         // elsewhere); A/B name `opaque88` (its windows flip it).
-#if defined(__vita__)
+#if defined(__vita__) || defined(__linux__)
         bool glOpaque88 = true;
 #else
         bool glOpaque88 = false;
@@ -410,7 +419,7 @@ namespace native_renderer
         // position, rippled, as before.
         // SOTC_GL_MIRROR88=0/1 (default 1 on the Vita since round 93, 0
         // elsewhere); A/B name `mirror88` (its windows flip it).
-#if defined(__vita__)
+#if defined(__vita__) || defined(__linux__)
         bool glMirror88 = true;
 #else
         bool glMirror88 = false;
@@ -459,7 +468,7 @@ namespace native_renderer
         // its colour premultiplied on the CPU: one texture read and one
         // multiply a pixel over the whole picture instead of ~14 operations
         // and a dependent read. SOTC_GL_POST93=0/1; A/B `post93`.
-#if defined(__vita__)
+#if defined(__vita__) || defined(__linux__)
         bool glMirror93 = true;
         bool glAtOpaque93 = true;
         bool glPost93 = true;
@@ -685,6 +694,10 @@ namespace native_renderer
         // Models' detail levels picked as if 1.6x as far (coarser sooner;
         // none vanishes sooner) (SOTC_SAC_LOD).
         bool sacLod = false;
+        // Fur shells clamping (SOTC_FUR_SHELLS): limits consecutive alpha-tested
+        // shell layers (colossi fur) to N shells to prevent TBDR tile overdraw.
+        // 0 = full PS2 layers (8-16), 4 = default on handhelds.
+        int furShells = 4;
         // Round 65: the Quality menu's performance cuts (all off by default on
         // every platform; each saved in settings.cfg, each its own variable).
         // Camera checks: the camera's look / visibility segment tests (not

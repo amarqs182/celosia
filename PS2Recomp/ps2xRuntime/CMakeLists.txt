@@ -64,6 +64,12 @@ if(ANDROID)
     set(PS2X_IS_ANDROID ON)
 endif()
 
+set(PS2X_IS_LINUX OFF)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(PS2X_IS_LINUX ON)
+endif()
+
 option(PS2X_VITA_CREATE_PACKAGE "Create Vita eboot/vpk targets" ON)
 set(PS2X_VITA_APP_NAME "PS2 Retro X" CACHE STRING "Display name for the Vita bubble")
 set(PS2X_VITA_TITLEID "RANJ00001" CACHE STRING "9-character Vita title id")
@@ -100,7 +106,7 @@ else()
     )
     FetchContent_MakeAvailable(raylib)
 
-    if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_ANDROID)
+    if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_ANDROID AND NOT PS2X_IS_LINUX)
         FetchContent_Declare(
             imgui
             GIT_REPOSITORY https://github.com/ocornut/imgui.git
@@ -284,6 +290,28 @@ elseif(PS2X_IS_VITA)
         c
         pthread
     )
+elseif(PS2X_IS_LINUX)
+    # Linux (incl. AArch64): the raylib subset on SDL2 (window, input,
+    # audio) and GLES3 (drawing, textures) — platform/linux, mirrored from
+    # the Vita's SDL2 shim. The raylib FetchContent above still runs (it is
+    # the non-Vita branch); the shim resolves the subset instead of stock
+    # raylib, so the stock library is not linked here.
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(PS2X_LINUX_SDL2 REQUIRED IMPORTED_TARGET GLOBAL sdl2)
+
+    find_library(PS2X_LINUX_GLES_LIBRARY NAMES GLESv3 GLESv2 GLES REQUIRED)
+    find_library(PS2X_LINUX_EGL_LIBRARY NAMES EGL REQUIRED)
+
+    add_library(ps2x_linux_raylib STATIC "${CMAKE_CURRENT_SOURCE_DIR}/platform/linux/raylib_linux.cpp")
+    target_include_directories(ps2x_linux_raylib PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/platform/linux")
+    target_link_libraries(ps2x_linux_raylib PUBLIC
+        PkgConfig::PS2X_LINUX_SDL2
+        ${PS2X_LINUX_GLES_LIBRARY}
+        ${PS2X_LINUX_EGL_LIBRARY}
+        m
+    )
+    target_compile_definitions(ps2_host_backend INTERFACE PLATFORM_LINUX PS2X_LINUX_SDL2_SHIM=1)
+    target_link_libraries(ps2_host_backend INTERFACE ps2x_linux_raylib)
 else()
     target_link_libraries(ps2_host_backend INTERFACE raylib)
 
@@ -455,7 +483,12 @@ add_library(ps2_runtime STATIC
 # SOTC_NATIVE_GL=1, the Vita through vitaGL).
 target_sources(ps2_runtime PRIVATE src/lib/native/native_renderer.cpp src/lib/native/native_renderer_gl.cpp src/lib/native/native_recorder.cpp)
 # The scene recorder's blocks are zlib-compressed (the Vita SDK has libz).
-target_link_libraries(ps2_runtime PUBLIC z)
+find_package(ZLIB QUIET)
+if(TARGET ZLIB::ZLIB)
+    target_link_libraries(ps2_runtime PUBLIC ZLIB::ZLIB ${CMAKE_DL_LIBS})
+else()
+    target_link_libraries(ps2_runtime PUBLIC z ${CMAKE_DL_LIBS})
+endif()
 
 # GPU GS rasterizer (Metal) on macOS, the default there (PS2X_GS_GPU=0 = CPU).
 if(NOT APPLE)
@@ -519,6 +552,31 @@ foreach(runner_dir IN LISTS PS2X_RUNNER_DIRS)
     list(APPEND RUNNER_SRC_FILES ${runner_dir_files})
 endforeach()
 
+# Game overrides (game/overrides, next to PS2Recomp): the Vita and Windows
+# builds pass this directory through PS2X_RUNNER_DIRS, but the
+# linux-aarch64 (R36S) build was configured without it, so none of the
+# *_overrides.cpp files -- including sotc_overrides.cpp (the idle wait, the
+# host clock sync) -- were compiled there. Add the directory to the runner
+# sources (and to the include path below) whenever a non-Vita build did
+# not already list it. Vita always passes it, so it is left alone.
+if(NOT PS2X_IS_VITA)
+    set(PS2X_GAME_OVERRIDES_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../game/overrides")
+    if(EXISTS "${PS2X_GAME_OVERRIDES_DIR}")
+        # PS2X_RUNNER_DIRS may spell the directory differently (e.g.
+        # /d/celosia_upstream/game/overrides); normalise before testing so
+        # the files are not added twice.
+        set(PS2X_RUNNER_DIRS_NORM "${PS2X_RUNNER_DIRS}")
+        string(REPLACE "\\" "/" PS2X_RUNNER_DIRS_NORM "${PS2X_RUNNER_DIRS_NORM}")
+        if(NOT PS2X_RUNNER_DIRS_NORM MATCHES "game/overrides")
+            file(GLOB PS2X_GAME_OVERRIDES_SRC
+                 CONFIGURE_DEPENDS "${PS2X_GAME_OVERRIDES_DIR}/*.cpp")
+            list(APPEND RUNNER_SRC_FILES ${PS2X_GAME_OVERRIDES_SRC})
+            list(REMOVE_DUPLICATES RUNNER_SRC_FILES)
+            list(APPEND PS2X_RUNNER_DIRS "${PS2X_GAME_OVERRIDES_DIR}")
+        endif()
+    endif()
+endif()
+
 set(RUNNER_MAIN_CPP "${CMAKE_CURRENT_SOURCE_DIR}/src/runner/main.cpp")
 set(ROOT_MAIN_CPP "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp")
 
@@ -552,6 +610,12 @@ endif()
 # translation unit of its own.
 foreach(PS2X_SOURCE IN LISTS RUNNER_SRC_FILES)
     if(PS2X_SOURCE MATCHES "/overrides/lean_[^/]*\\.cpp$")
+        set_source_files_properties(${PS2X_SOURCE} PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
+    endif()
+    # Decomp D2: the lifted batches (decomp_liftd*_NN.cpp, D4: decomp_liftalt_NN.cpp; tools/lift_d1.py) are large and share namespace lift_d1:
+    # each a translation unit of its own (a guest function named like a libm one, D1's fabsf, stays out of the
+    # other batches; they build in parallel).
+    if(PS2X_SOURCE MATCHES "/overrides/decomp_lift(d[0-9]+|alt)_[0-9]+\\.cpp$")
         set_source_files_properties(${PS2X_SOURCE} PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
     endif()
     # The second set (lean_part_tN.cpp) defines PS2X_EE_TRUST_FINITE before
@@ -599,13 +663,23 @@ target_include_directories(ps2_runtime PUBLIC
 )
 
 target_link_libraries(ps2_runtime PUBLIC ps2_host_backend ffmpeg ps2_iop)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/meshoptimizer/CMakeLists.txt")
+    set(MESHOPT_BUILD_DEMO OFF CACHE BOOL "" FORCE)
+    set(MESHOPT_BUILD_GLTFPACK OFF CACHE BOOL "" FORCE)
+    set(MESHOPT_INSTALL OFF CACHE BOOL "" FORCE)
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/meshoptimizer" "${CMAKE_CURRENT_BINARY_DIR}/meshoptimizer" EXCLUDE_FROM_ALL)
+    target_link_libraries(ps2_runtime PUBLIC meshoptimizer)
+    target_include_directories(ps2_runtime PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/meshoptimizer/src")
+endif()
 target_link_libraries(ps2EntryRunner
     PRIVATE
     ps2_runtime
 )
 target_include_directories(ps2EntryRunner PRIVATE ${PS2X_RUNNER_DIRS})
 
-if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_VITA AND NOT PS2X_IS_ANDROID)
+# Linux: the debug UI needs the stock raylib (rlImGui), which the SDL2/GLES
+# shim does not provide yet (PLATFORM_LINUX; TODO r36s).
+if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_VITA AND NOT PS2X_IS_ANDROID AND NOT PS2X_IS_LINUX)
     target_sources(ps2EntryRunner PRIVATE
         src/lib/ps2_debug_panel.cpp
     )

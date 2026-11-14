@@ -47,7 +47,9 @@ namespace sotc_decomp
 
 namespace
 {
-    // Entry point of GAMECORE.XFF as laid out by the game's own loader.
+    // Real entry address of GAMECORE.XFF after module relocation at 0x01333500.
+    // The module is entered at 0x01344788 where the runtime's recompiled dispatch table
+    // registers the function; the hook wraps this entry point to enable all 68 overrides.
     constexpr uint32_t kGamecoreEntry = 0x01344788u;
 
     PS2Runtime::RecompiledFunction g_gamecoreEntry = nullptr;
@@ -57,6 +59,15 @@ namespace
     // modules are loaded, switch to real-time pacing.
     void gamecoreEntryHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        // DIAG (teto: 1x): entry do GAMECORE.
+        {
+            static bool logged = false;
+            if (!logged)
+            {
+                logged = true;
+                std::fprintf(stderr, "[ovr] gamecoreEntryHook ENTER pc=0x%08x\n", static_cast<unsigned>(ctx->pc));
+            }
+        }
         static bool enabled = false;
         if (!enabled)
         {
@@ -71,7 +82,94 @@ namespace
             if (ps2x::iop::IopSubsystem *iop = runtime->iopSubsystem())
                 iop->enterNativeMode();
         }
+        // SOTC_GAMECORE_ENTRY=0x13447c8: controlled experiment on where the
+        // GAMECORE should start. The loader's JALR lands at 0x01344788, inside
+        // the 0x01344780 function; with this set, resume at the given address
+        // instead of running the rest of that function. Read once; unset or
+        // invalid leaves the behaviour identical to before.
+        static const uint32_t redirectTarget = [] {
+            const char *env = std::getenv("SOTC_GAMECORE_ENTRY");
+            if (!env)
+                return 0u;
+            char *end = nullptr;
+            const unsigned long v = std::strtoul(env, &end, 0);
+            if (end == env || *end != '\0' || v == 0ul || v > 0xfffffffful)
+                return 0u;
+            return static_cast<uint32_t>(v);
+        }();
+        if (ctx->pc == 0x01344788u && redirectTarget != 0u)
+        {
+            std::fprintf(stderr, "[ovr] gamecoreEntryRedirect from=0x%08x to=0x%08x\n",
+                         static_cast<unsigned>(ctx->pc), static_cast<unsigned>(redirectTarget));
+            ctx->pc = redirectTarget;
+            return;
+        }
         g_gamecoreEntry(rdram, ctx, runtime);
+    }
+
+    // Modern delta-time pacing: hooks GAMECORE's frame time calculation (gamecore_sub_013455F8).
+    // Clamps delta-time to prevent physics / collision / camera death spirals when frame pacing slips.
+    constexpr uint32_t kGamecoreFrameTime = 0x013455F8u;
+    PS2Runtime::RecompiledFunction g_gamecoreFrameTime = nullptr;
+
+    void gamecoreFrameTimeHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_gamecoreFrameTime(rdram, ctx, runtime);
+
+        constexpr uint32_t kGameDt = 0x014657D0u;
+        constexpr uint32_t kInvGameDt = 0x014657D4u;
+        constexpr uint32_t kAnimeDt = 0x014657E0u;
+        constexpr uint32_t kInvAnimeDt = 0x014657E4u;
+
+        float dt = 0.0f, animeDt = 0.0f;
+        std::memcpy(&dt, rdram + kGameDt, 4);
+        std::memcpy(&animeDt, rdram + kAnimeDt, 4);
+
+        static const float fixedDt = [] {
+            const char *e = std::getenv("SOTC_FIXED_DT");
+            return e ? std::strtof(e, nullptr) : 0.0f;
+        }();
+        static const float maxDt = [] {
+            const char *e = std::getenv("SOTC_MAX_DT");
+            return e ? std::strtof(e, nullptr) : 0.0333334f; // 30 FPS floor clamp
+        }();
+
+        bool clamped = false;
+        if (fixedDt > 0.0001f)
+        {
+            dt = fixedDt;
+            animeDt = fixedDt;
+            clamped = true;
+        }
+        else
+        {
+            if (dt > maxDt)
+            {
+                dt = maxDt;
+                clamped = true;
+            }
+            if (animeDt > maxDt)
+            {
+                animeDt = maxDt;
+                clamped = true;
+            }
+        }
+
+        if (clamped)
+        {
+            if (dt > 0.0001f)
+            {
+                const float invDt = 1.0f / dt;
+                std::memcpy(rdram + kGameDt, &dt, 4);
+                std::memcpy(rdram + kInvGameDt, &invDt, 4);
+            }
+            if (animeDt > 0.0001f)
+            {
+                const float invAnime = 1.0f / animeDt;
+                std::memcpy(rdram + kAnimeDt, &animeDt, 4);
+                std::memcpy(rdram + kInvAnimeDt, &invAnime, 4);
+            }
+        }
     }
 
     // SOTC_TRACE_CALLS="0xaddr,0xaddr": count calls that go through the function
@@ -875,7 +973,7 @@ namespace
     //    and a timed wait on the host scheduler; T2 stays stopped.
     namespace sysnative
     {
-        PS2Runtime::RecompiledFunction g_initIntr = nullptr, g_dmaSendPath1 = nullptr, g_copyFrameBuffer = nullptr;
+        PS2Runtime::RecompiledFunction g_initIntr = nullptr, g_dmaSendPath1 = nullptr, g_copyFrameBuffer = nullptr, g_iosSyncPath = nullptr;
 
         void returnTo(R5900Context *ctx) { ctx->pc = GPR_U32(ctx, 31); }
         uint64_t busTicks(PS2Runtime *runtime) { return runtime->eeScheduler().eeCycle() / 2u; }
@@ -1067,6 +1165,20 @@ namespace
             SET_GPR_U64(ctx, 2, runtime->memory().hostDrawPathsIdle() ? 1u : 0u);
             returnTo(ctx);
         }
+        void syncPath(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            if (GPR_U32(ctx, 4) == 0u && (ctx->vu0_vpu_stat & 0x100u) == 0u)
+            {
+                runtime->memory().syncVu1();
+                if (runtime->memory().hostDrawPathsIdle())
+                {
+                    SET_GPR_U64(ctx, 2, 0u);
+                    returnTo(ctx);
+                    return;
+                }
+            }
+            g_iosSyncPath(rdram, ctx, runtime);
+        }
         void copyFrameBuffer(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             if (!runtime->memory().hostDrawPathsIdle())
@@ -1170,6 +1282,7 @@ namespace
                 {0x001AD958u, copyViaSpr, nullptr},
                 {0x001C2570u, dmaSendPath1, &g_dmaSendPath1},
                 {0x001C2A78u, checkDrawFinish, nullptr},
+                {0x001C0FE0u, syncPath, &g_iosSyncPath},
                 {0x001C19C0u, copyFrameBuffer, &g_copyFrameBuffer},
             };
             const char *skip = std::getenv("SOTC_SYSTEM_SKIP"); // debugging: "0x1c2570,0x1c2a78" left to the game
@@ -1191,6 +1304,16 @@ namespace
 
     void applySotcOverrides(PS2Runtime &runtime)
     {
+        runtime.eeScheduler().enableHostClockSync();
+        // DIAG (teto: 1x): applySotcOverrides chamado?
+        {
+            static bool logged = false;
+            if (!logged)
+            {
+                logged = true;
+                std::fprintf(stderr, "[ovr] applySotcOverrides ENTER\n");
+            }
+        }
         // First: the hooks below wrap whatever is in the table, lean or not.
         ps2_lean::install(runtime);
         if (runtime.hasFunction(0x001AFFD8u) && runtime.hasFunction(0x001B00F0u) && runtime.hasFunction(0x001B0328u))
@@ -1218,6 +1341,25 @@ namespace
         {
             g_iosRecvMsg = runtime.lookupFunction(kIosRecvMsg);
             runtime.registerFunction(kIosRecvMsg, iosRecvMsgHook);
+            // DIAG (teto: 1x): hook instalado?
+            {
+                static bool logged = false;
+                if (!logged)
+                {
+                    logged = true;
+                    std::fprintf(stderr, "[ovr] iosRecvMsgHook INSTALLED hasFunc=%d\n", runtime.hasFunction(kIosRecvMsg) ? 1 : 0);
+                }
+            }
+        }
+        else
+        {
+            // DIAG (teto: 1x): hook NAO instalado; por que?
+            static bool logged = false;
+            if (!logged)
+            {
+                logged = true;
+                std::fprintf(stderr, "[ovr] iosRecvMsgHook NOT installed hasFunc=%d spinEnv=%d\n", runtime.hasFunction(kIosRecvMsg) ? 1 : 0, std::getenv("SOTC_IDLE_SPIN") ? 1 : 0);
+            }
         }
         if (std::getenv("SOTC_DUMP_SPRITE_PACKETS") && runtime.hasFunction(kSpriteDrawSprite))
         {
@@ -1258,6 +1400,12 @@ namespace
             g_gamecoreEntry = runtime.lookupFunction(kGamecoreEntry);
             runtime.registerFunction(kGamecoreEntry, gamecoreEntryHook);
         }
+        if (runtime.hasFunction(kGamecoreFrameTime))
+        {
+            g_gamecoreFrameTime = runtime.lookupFunction(kGamecoreFrameTime);
+            runtime.registerFunction(kGamecoreFrameTime, gamecoreFrameTimeHook);
+            std::fprintf(stderr, "[ovr] Modern gamecoreFrameTimeHook INSTALLED at 0x%08x\n", kGamecoreFrameTime);
+        }
         ps2_lean::afterOverrides(runtime);
         // The input recorder / replay (SOTC_INPUT_RECORD, SOTC_INPUT_REPLAY).
         sotc_replay::install(runtime);
@@ -1267,6 +1415,7 @@ namespace
 }
 
 PS2_REGISTER_GAME_OVERRIDE("Shadow of the Colossus (USA)", "SCUS_974.72", 0u, 0u, applySotcOverrides)
+PS2_REGISTER_GAME_OVERRIDE("Shadow of the Colossus (USA) - NICO.ELF", "NICO.ELF", 0u, 0u, applySotcOverrides)
 
 // The idle thread's turn once a game frame (round 25: the console's loader
 // stall). A thread that waits for the EE to be idle (the loader, t11, in a

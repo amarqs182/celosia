@@ -1,5 +1,7 @@
 #if defined(__APPLE__)
 #include "GLFW/glfw3.h"
+#elif defined(__linux__) && !defined(PS2X_LINUX_SDL2_SHIM)
+#include <EGL/egl.h>
 #endif
 #include "runtime/ps2_diag.h"
 #include "runtime/gs/gs_hw_backend.h"
@@ -556,7 +558,7 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     if (GSDirectFrame::load(s_scratch, direct))
     {
         waitDirectFrame(direct.fence);
-#if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
+#if (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)) || defined(PS2X_LINUX_SDL2_SHIM)
         // The shim draws a GL texture name as is when bit 31 is set.
         const unsigned int id = direct.texture | 0x80000000u;
 #else
@@ -971,7 +973,7 @@ namespace
                 as::callbacksLate.fetch_add(1, std::memory_order_relaxed);
         }
         lastCall = start;
-#if defined(PLATFORM_VITA)
+#if defined(PLATFORM_VITA) || defined(__linux__)
         // Once: the audio thread's priority and cores, as SDL left them
         // (round 12: is the mix on a core of its own, above the game?).
         static bool told = false;
@@ -980,11 +982,13 @@ namespace
             told = true;
             // Round 33: off the game thread's core (SOTC_THREADS=1).
             native_renderer::threads::place(native_renderer::threads::kAudio);
+#if defined(PLATFORM_VITA)
             SceKernelThreadInfo info{};
             info.size = sizeof(info);
             if (sceKernelGetThreadInfo(sceKernelGetThreadId(), &info) >= 0)
                 std::fprintf(stderr, "[audio] callback thread %s: priority %d (initial %d), cpu affinity 0x%x, %u frames a call\n", info.name,
                              info.currentPriority, info.initPriority, static_cast<unsigned>(info.currentCpuAffinityMask), frames);
+#endif
         }
 #endif
         auto *out = static_cast<int16_t *>(buffer);
@@ -1092,6 +1096,66 @@ bool PS2Runtime::initialize(const char *title)
         // nothing to make current, the GPU GS renderer can start.
         GSHwBackend::setContextProvider([] {});
         native_renderer::setGlContext([] {});
+#elif defined(PS2X_LINUX_SDL2_SHIM)
+        native_renderer::setGlContext([] {});
+#elif defined(__linux__)
+        {
+            EGLDisplay dpy = eglGetCurrentDisplay();
+            EGLContext mainCtx = eglGetCurrentContext();
+            if (dpy != EGL_NO_DISPLAY && mainCtx != EGL_NO_CONTEXT)
+            {
+                EGLConfig cfg = nullptr;
+                EGLint numCfg = 0;
+                EGLint cfgId = 0;
+                if (eglQueryContext(dpy, mainCtx, EGL_CONFIG_ID, &cfgId))
+                {
+                    const EGLint byId[] = {EGL_CONFIG_ID, cfgId, EGL_NONE};
+                    eglChooseConfig(dpy, byId, &cfg, 1, &numCfg);
+                }
+                if (numCfg == 0)
+                {
+                    const EGLint fallbackCfg[] = {
+                        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+                        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+                        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+                        EGL_NONE};
+                    eglChooseConfig(dpy, fallbackCfg, &cfg, 1, &numCfg);
+                }
+                if (numCfg > 0 && cfg)
+                {
+                    eglBindAPI(EGL_OPENGL_ES_API);
+                    const EGLint ctxAttribs3[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
+                    EGLContext nativeCtx = eglCreateContext(dpy, cfg, EGL_NO_CONTEXT, ctxAttribs3);
+                    if (nativeCtx == EGL_NO_CONTEXT)
+                    {
+                        const EGLint ctxAttribs2[] = {EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE};
+                        nativeCtx = eglCreateContext(dpy, cfg, EGL_NO_CONTEXT, ctxAttribs2);
+                    }
+                    if (nativeCtx != EGL_NO_CONTEXT)
+                    {
+                        const EGLint pbAttribs[] = {EGL_WIDTH, 16, EGL_HEIGHT, 16, EGL_NONE};
+                        EGLSurface pbSurf = eglCreatePbufferSurface(dpy, cfg, pbAttribs);
+                        native_renderer::setGlContext([dpy, pbSurf, nativeCtx]
+                                                      {
+                            eglBindAPI(EGL_OPENGL_ES_API);
+                            if (!eglMakeCurrent(dpy, pbSurf, pbSurf, nativeCtx))
+                                std::cerr << "[native] eglMakeCurrent failed: 0x" << std::hex << eglGetError() << std::dec << std::endl; });
+                    }
+                    else
+                    {
+                        std::cerr << "[native] eglCreateContext failed: 0x" << std::hex << eglGetError() << std::dec << std::endl;
+                    }
+                }
+                else
+                {
+                    std::cerr << "[native] eglChooseConfig failed: 0x" << std::hex << eglGetError() << std::dec << std::endl;
+                }
+            }
+            else
+            {
+                std::cerr << "[native] no current EGL display/context for native renderer" << std::endl;
+            }
+        }
 #endif
         ps2_stats::bootMark("window and renderers up");
         hostmenu::load();
@@ -1494,6 +1558,39 @@ namespace
         slot = offset >> 2;
         return slot < g_ps2RecompiledFunctionTableSlotCount;
     }
+
+    // Nearest recompiled-function start at or before `address` (the owner
+    // function), scanning back up to maxBackBytes. 0 when there is none.
+    uint32_t containingFunctionStart(uint32_t address, uint32_t maxBackBytes = 0x1000u)
+    {
+        uint32_t slot = 0u;
+        if (!generatedFunctionTableSlot(address, slot))
+        {
+            return 0u;
+        }
+
+        const uint32_t maxBackSlots = maxBackBytes >> 2;
+        for (uint32_t back = 0; back <= maxBackSlots && back <= slot; ++back)
+        {
+            const uint32_t candidate = slot - back;
+            if (g_ps2RecompiledFunctionTable[candidate] != nullptr)
+            {
+                return g_ps2RecompiledFunctionTableBase + (candidate << 2);
+            }
+        }
+        return 0u;
+    }
+
+    // PS2X_DISPATCH_CONTAINING=0 disables the containing-function fallback in
+    // dispatchGuestBranch (legacy reportMissingFunction path). Default on.
+    bool dispatchContainingEnabled()
+    {
+        static const bool enabled = [] {
+            const char *value = std::getenv("PS2X_DISPATCH_CONTAINING");
+            return !(value && std::strcmp(value, "0") == 0);
+        }();
+        return enabled;
+    }
 }
 
 namespace
@@ -1840,6 +1937,33 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
     }
 }
 
+namespace
+{
+    // One line per distinct guest target redispatched to its containing
+    // function (mirrors the missing-target log in reportMissingFunction).
+    void logContainingFunctionDispatch(uint32_t targetPc, uint32_t sourcePc, uint32_t start,
+                                       PS2Runtime::GuestBranchKind kind, const char *debugName)
+    {
+        static std::set<uint32_t> loggedTargets;
+        static std::mutex logMutex;
+
+        std::lock_guard<std::mutex> lock(logMutex);
+        if (!loggedTargets.emplace(targetPc).second)
+        {
+            return;
+        }
+
+        std::ostringstream oss;
+        oss << "[guest-branch:containing-function] source=0x" << std::hex << sourcePc
+            << " target=0x" << targetPc
+            << " -> start=0x" << start
+            << " kind=" << describeGuestBranchKind(kind)
+            << " name=" << (debugName ? debugName : "<unknown>")
+            << std::dec;
+        std::cerr << oss.str() << std::endl;
+    }
+}
+
 bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
                                      R5900Context *ctx,
                                      uint32_t targetPc,
@@ -1880,6 +2004,27 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
 
     if (!hasFunction(targetPc))
     {
+        // The target is inside a recompiled function but not at its entry
+        // (e.g. a JALR into the middle of one). Its generated code switches
+        // on ctx->pc with a default that restarts at the entry, so dispatch
+        // the owner function with the original guest PC.
+        if (dispatchContainingEnabled())
+        {
+            const uint32_t start = containingFunctionStart(targetPc);
+            if (start != 0u)
+            {
+                logContainingFunctionDispatch(targetPc, sourcePc, start, kind, debugName);
+                ctx->pc = targetPc;
+                if (RecompiledFunction ownerFn = guestFunctionAt(start))
+                {
+                    const uint32_t entryPc = ctx->pc;
+                    const uint32_t jumpSerial = m_guestJumpSerial;
+                    ownerFn(rdram, ctx, this);
+                    return finishGuestCall(ctx, entryPc, fallthroughPc, jumpSerial);
+                }
+            }
+        }
+
         reportMissingFunction(rdram, ctx, targetPc, sourcePc, kind, debugName);
 
         const MissingFunctionPolicy policy = missingFunctionPolicy();
@@ -2788,11 +2933,15 @@ bool PS2Runtime::isStopRequested() const
 
 EeScheduler &PS2Runtime::eeScheduler()
 {
+    if (ps2_worker::isShell(this) && ps2_worker::g_real && ps2_worker::g_real->m_eeScheduler)
+        return *ps2_worker::g_real->m_eeScheduler;
     return *m_eeScheduler;
 }
 
 const EeScheduler &PS2Runtime::eeScheduler() const
 {
+    if (ps2_worker::isShell(this) && ps2_worker::g_real && ps2_worker::g_real->m_eeScheduler)
+        return *ps2_worker::g_real->m_eeScheduler;
     return *m_eeScheduler;
 }
 
@@ -2936,6 +3085,164 @@ void PS2Runtime::HandleIntegerOverflow(R5900Context *ctx)
     raiseCop0Exception(ctx, EXCEPTION_INTEGER_OVERFLOW);
 }
 
+#if defined(__linux__) || defined(PLATFORM_LINUX)
+namespace
+{
+    struct SystemTelemetry
+    {
+        float cpuTotal = 0.0f;
+        float cpuCores[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        int gpuLoad = 0;
+        int gpuFreqMhz = 0;
+        int ramUsedMb = 0;
+        int ramTotalMb = 0;
+        int zramUsedKb = 0;
+        int zramTotalMb = 0;
+        int ioReadKbSec = 0;
+        int ioWriteKbSec = 0;
+    };
+
+    struct CpuSample {
+        uint64_t idle = 0;
+        uint64_t total = 0;
+    };
+
+    static CpuSample s_lastCpuTotal;
+    static CpuSample s_lastCpuCore[4];
+    static uint64_t s_lastDiskReadSec = 0;
+    static uint64_t s_lastDiskWriteSec = 0;
+    static double s_lastSampleTime = 0.0;
+    static SystemTelemetry s_telemetryCache;
+
+    void updateSystemTelemetry(double now)
+    {
+        double dt = (s_lastSampleTime > 0.0) ? (now - s_lastSampleTime) : 1.0;
+        if (dt < 0.1) dt = 1.0;
+        s_lastSampleTime = now;
+
+        // 1. CPU from /proc/stat
+        if (FILE *f = std::fopen("/proc/stat", "r"))
+        {
+            char line[256];
+            while (std::fgets(line, sizeof(line), f))
+            {
+                if (std::strncmp(line, "cpu", 3) == 0)
+                {
+                    uint64_t u=0, n=0, s=0, id=0, io=0, irq=0, sirq=0, st=0;
+                    if (line[3] == ' ')
+                    {
+                        std::sscanf(line + 4, "%llu %llu %llu %llu %llu %llu %llu %llu",
+                                    &u, &n, &s, &id, &io, &irq, &sirq, &st);
+                        uint64_t idle = id + io;
+                        uint64_t total = u + n + s + id + io + irq + sirq + st;
+                        uint64_t dIdle = idle - s_lastCpuTotal.idle;
+                        uint64_t dTot = total - s_lastCpuTotal.total;
+                        s_lastCpuTotal = {idle, total};
+                        s_telemetryCache.cpuTotal = (dTot > 0) ? (100.0f * (1.0f - (float)dIdle / (float)dTot)) : 0.0f;
+                    }
+                    else if (line[3] >= '0' && line[3] <= '3')
+                    {
+                        int c = line[3] - '0';
+                        std::sscanf(line + 5, "%llu %llu %llu %llu %llu %llu %llu %llu",
+                                    &u, &n, &s, &id, &io, &irq, &sirq, &st);
+                        uint64_t idle = id + io;
+                        uint64_t total = u + n + s + id + io + irq + sirq + st;
+                        uint64_t dIdle = idle - s_lastCpuCore[c].idle;
+                        uint64_t dTot = total - s_lastCpuCore[c].total;
+                        s_lastCpuCore[c] = {idle, total};
+                        s_telemetryCache.cpuCores[c] = (dTot > 0) ? (100.0f * (1.0f - (float)dIdle / (float)dTot)) : 0.0f;
+                    }
+                }
+            }
+            std::fclose(f);
+        }
+
+        // 2. GPU from /sys/class/devfreq
+        if (FILE *f = std::fopen("/sys/class/devfreq/ff400000.gpu/load", "r"))
+        {
+            int load = 0, freq = 0;
+            if (std::fscanf(f, "%d@%dHz", &load, &freq) == 2)
+            {
+                s_telemetryCache.gpuLoad = load;
+                s_telemetryCache.gpuFreqMhz = freq / 1000000;
+            }
+            std::fclose(f);
+        }
+        else if (FILE *f = std::fopen("/sys/class/devfreq/ff400000.gpu/cur_freq", "r"))
+        {
+            int freq = 0;
+            if (std::fscanf(f, "%d", &freq) == 1)
+                s_telemetryCache.gpuFreqMhz = freq / 1000000;
+            std::fclose(f);
+        }
+
+        // 3. RAM from /proc/meminfo
+        if (FILE *f = std::fopen("/proc/meminfo", "r"))
+        {
+            char key[64];
+            long val = 0;
+            long totalKb = 0, availKb = 0;
+            while (std::fscanf(f, "%63s %ld kB", key, &val) == 2)
+            {
+                if (std::strcmp(key, "MemTotal:") == 0) totalKb = val;
+                else if (std::strcmp(key, "MemAvailable:") == 0) availKb = val;
+            }
+            std::fclose(f);
+            s_telemetryCache.ramTotalMb = totalKb / 1024;
+            s_telemetryCache.ramUsedMb = (totalKb - availKb) / 1024;
+        }
+
+        // 4. ZRAM from /sys/block/zram0
+        if (FILE *f = std::fopen("/sys/block/zram0/mm_stat", "r"))
+        {
+            uint64_t orig = 0, comp = 0, memTotal = 0;
+            if (std::fscanf(f, "%llu %llu %llu", &orig, &comp, &memTotal) >= 3)
+                s_telemetryCache.zramUsedKb = memTotal / 1024;
+            std::fclose(f);
+        }
+        if (FILE *f = std::fopen("/sys/block/zram0/disksize", "r"))
+        {
+            uint64_t diskSize = 0;
+            if (std::fscanf(f, "%llu", &diskSize) == 1)
+                s_telemetryCache.zramTotalMb = diskSize / (1024 * 1024);
+            std::fclose(f);
+        }
+
+        // 5. I/O from /proc/diskstats
+        if (FILE *f = std::fopen("/proc/diskstats", "r"))
+        {
+            char line[256];
+            while (std::fgets(line, sizeof(line), f))
+            {
+                if (std::strstr(line, "mmcblk0 "))
+                {
+                    int major = 0, minor = 0;
+                    char dev[32];
+                    uint64_t r_ios = 0, r_merges = 0, r_sec = 0, r_ticks = 0;
+                    uint64_t w_ios = 0, w_merges = 0, w_sec = 0, w_ticks = 0;
+                    if (std::sscanf(line, "%d %d %31s %llu %llu %llu %llu %llu %llu %llu %llu",
+                                    &major, &minor, dev, &r_ios, &r_merges, &r_sec, &r_ticks,
+                                    &w_ios, &w_merges, &w_sec, &w_ticks) >= 11)
+                    {
+                        if (s_lastDiskReadSec > 0)
+                        {
+                            uint64_t dR = (r_sec >= s_lastDiskReadSec) ? (r_sec - s_lastDiskReadSec) : 0;
+                            uint64_t dW = (w_sec >= s_lastDiskWriteSec) ? (w_sec - s_lastDiskWriteSec) : 0;
+                            s_telemetryCache.ioReadKbSec = static_cast<int>(dR * 512.0 / 1024.0 / dt);
+                            s_telemetryCache.ioWriteKbSec = static_cast<int>(dW * 512.0 / 1024.0 / dt);
+                        }
+                        s_lastDiskReadSec = r_sec;
+                        s_lastDiskWriteSec = w_sec;
+                    }
+                    break;
+                }
+            }
+            std::fclose(f);
+        }
+    }
+}
+#endif
+
 void PS2Runtime::run()
 {
     m_stopRequested.store(false, std::memory_order_relaxed);
@@ -2973,7 +3280,12 @@ void PS2Runtime::run()
             const float screenHeight = static_cast<float>(GetScreenHeight());
             // The PS2 picture is 4:3 whatever its pixel size (512x448, 640x448...).
             const float aspect = 4.0f / 3.0f;
-            const int screenMode = hostmenu::settings().screenMode.load(std::memory_order_relaxed);
+            static const int envScreenMode = []() {
+                if (const char *e = std::getenv("SOTC_SCREEN_MODE")) return std::atoi(e);
+                if (std::getenv("SOTC_STRETCH")) return 1;
+                return -1;
+            }();
+            const int screenMode = (envScreenMode >= 0) ? envScreenMode : hostmenu::settings().screenMode.load(std::memory_order_relaxed);
             float dstWidth = std::min(screenWidth, screenHeight * aspect);
             float dstHeight = dstWidth / aspect;
             if (screenMode == hostmenu::kScreenStretch)
@@ -2987,7 +3299,16 @@ void PS2Runtime::run()
                 dstWidth = srcWidth * whole;
                 dstHeight = srcHeight * whole;
             }
-            const Rectangle srcRect{0.0f, 0.0f, srcWidth, hostFrameFlipY ? -srcHeight : srcHeight};
+            static const float cropRatio = []() {
+                if (const char *e = std::getenv("SOTC_CROP_LETTERBOX"))
+                    return std::clamp(std::strtof(e, nullptr), 0.0f, 0.25f);
+                if (envScreenMode == 1 || std::getenv("SOTC_STRETCH"))
+                    return 0.115f; // remove PS2 cinema letterbox bands on stretched handheld displays
+                return 0.0f;
+            }();
+            const float cropY = srcHeight * cropRatio;
+            const float activeSrcH = srcHeight - 2.0f * cropY;
+            const Rectangle srcRect{0.0f, cropY, srcWidth, hostFrameFlipY ? -activeSrcH : activeSrcH};
             const Rectangle dstRect{
                 (screenWidth - dstWidth) * 0.5f,
                 (screenHeight - dstHeight) * 0.5f,
@@ -3002,7 +3323,7 @@ void PS2Runtime::run()
             }
             if (hostmenu::settings().showFps.load(std::memory_order_relaxed))
             {
-                // FPS overlay: game frames = display lists sent to VIF1 per second.
+                // Enhanced Telemetry Overlay: game/host FPS, draws, CPU, GPU, RAM, ZRAM, I/O
                 static double windowStart = GetTime();
                 static uint64_t lastChains = 0;
                 static int gameFps = 0;
@@ -3013,10 +3334,51 @@ void PS2Runtime::run()
                     gameFps = static_cast<int>((chains - lastChains) / (now - windowStart) + 0.5);
                     lastChains = chains;
                     windowStart = now;
+#if defined(__linux__) || defined(PLATFORM_LINUX)
+                    updateSystemTelemetry(now);
+#endif
                 }
-                const std::string fpsText = "game " + std::to_string(gameFps) + " fps | host " + std::to_string(GetFPS()) + " fps";
-                DrawRectangle(8, GetScreenHeight() - 30, MeasureText(fpsText.c_str(), 20) + 12, 26, Color{0, 0, 0, 160});
-                DrawText(fpsText.c_str(), 14, GetScreenHeight() - 27, 20, Color{120, 255, 120, 255});
+
+                native_renderer::PerfStats perf{};
+                native_renderer::perfSnapshot(perf);
+
+                char l1[160];
+                if (perf.draws > 0)
+                {
+                    std::snprintf(l1, sizeof(l1), "game %d fps | host %d fps | draws %.0f | %.1f ms",
+                                  gameFps, GetFPS(), perf.draws, perf.frameMs);
+                }
+                else
+                {
+                    std::snprintf(l1, sizeof(l1), "game %d fps | host %d fps", gameFps, GetFPS());
+                }
+
+#if defined(__linux__) || defined(PLATFORM_LINUX)
+                char l2[200];
+                std::snprintf(l2, sizeof(l2), "CPU %d%% (C0:%d C1:%d C2:%d C3:%d) | GPU %d%% %dM | RAM %d/%dM | ZRAM %dM | IO R:%dK W:%dK",
+                              (int)(s_telemetryCache.cpuTotal + 0.5f),
+                              (int)(s_telemetryCache.cpuCores[0] + 0.5f), (int)(s_telemetryCache.cpuCores[1] + 0.5f),
+                              (int)(s_telemetryCache.cpuCores[2] + 0.5f), (int)(s_telemetryCache.cpuCores[3] + 0.5f),
+                              s_telemetryCache.gpuLoad, s_telemetryCache.gpuFreqMhz,
+                              s_telemetryCache.ramUsedMb, s_telemetryCache.ramTotalMb,
+                              s_telemetryCache.zramUsedKb > 1024 ? s_telemetryCache.zramUsedKb / 1024 : 0,
+                              s_telemetryCache.ioReadKbSec, s_telemetryCache.ioWriteKbSec);
+
+                const int fontSize = 13;
+                const int boxW = std::max(MeasureText(l1, fontSize), MeasureText(l2, fontSize)) + 14;
+                const int boxH = 34;
+                const int boxY = GetScreenHeight() - boxH - 4;
+                DrawRectangle(6, boxY, boxW, boxH, Color{0, 0, 0, 175});
+                DrawText(l1, 12, boxY + 3, fontSize, Color{120, 255, 120, 255});
+                DrawText(l2, 12, boxY + 18, fontSize, Color{180, 225, 255, 255});
+#else
+                const int fontSize = 16;
+                const int boxW = MeasureText(l1, fontSize) + 14;
+                const int boxH = 26;
+                const int boxY = GetScreenHeight() - boxH - 4;
+                DrawRectangle(6, boxY, boxW, boxH, Color{0, 0, 0, 160});
+                DrawText(l1, 12, boxY + 4, fontSize, Color{120, 255, 120, 255});
+#endif
             }
             if (m_debugUiInitialized && m_debugUiDrawCallback)
             {
@@ -3034,7 +3396,7 @@ void PS2Runtime::run()
             }
 #endif
     };
-#if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
+#if (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)) || defined(PS2X_LINUX_SDL2_SHIM)
     // The GS thread puts its frames on screen as soon as they are ready (one
     // GL for every thread: drawing here would hold it through every vsync).
     static std::atomic<double> lastGsPresent{-1.0};
@@ -3119,7 +3481,7 @@ void PS2Runtime::run()
     std::thread gameThread([&]()
                            {
         ThreadNaming::SetCurrentThreadName("GameThread");
-#if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
+#if (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)) || defined(__linux__)
         // Core 0 alone (SOTC_THREADS=0: cores 0 and 1); the render thread has
         // core 2 (native_renderer::threads).
         native_renderer::threads::place(native_renderer::threads::kGame);
@@ -3160,7 +3522,7 @@ void PS2Runtime::run()
 #endif
 
     uint64_t tick = 0;
-#if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
+#if (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)) || defined(__linux__)
     native_renderer::threads::place(native_renderer::threads::kMain); // off the game thread's core (SOTC_THREADS=1)
 #endif
     while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))
@@ -3202,7 +3564,8 @@ void PS2Runtime::run()
         }
         PS2_IF_AGRESSIVE_LOGS({
             tick++;
-            if ((tick % 120) == 0)
+            static const bool logRunTick = std::getenv("PS2X_LOG_RUN_TICK") != nullptr;
+            if (logRunTick && (tick % 120) == 0)
             {
                 uint64_t curDma = m_memory.dmaStartCount();
                 uint64_t curGif = m_memory.gifCopyCount();
@@ -3264,17 +3627,17 @@ void PS2Runtime::run()
         });
         uint32_t presentWidth = FB_WIDTH;
         uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
-#if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
-        // The Vita shows the native picture from the render thread (its
-        // present hook): the GS's display read out of local memory and
-        // uploaded here every refresh went nowhere (round 19: ~12% of the
+#if (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)) || defined(PS2X_LINUX_SDL2_SHIM)
+        // The Vita / Linux SDL2 shim shows the native picture from the render
+        // thread (its present hook): the GS's display read out of local memory
+        // and uploaded here every refresh went nowhere (round 19: ~12% of the
         // CPU during the boot, the GS thread and this one).
         if (!native_renderer::shown())
             UploadFrame(frameTex, this, presentWidth, presentHeight);
 #else
         UploadFrame(frameTex, this, presentWidth, presentHeight);
 #endif
-#if !(defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
+#if !((defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)) || defined(PS2X_LINUX_SDL2_SHIM))
         // The native renderer's picture at its own size (it may draw larger
         // than the PS2's 512 x 448), filtered: not through the GS's display.
         static Texture2D nativeTex{};
@@ -3394,6 +3757,7 @@ void PS2Runtime::run()
             std::cerr << "[stats] t=" << static_cast<int>(GetTime())
                       << " gameFps=" << (statChains - lastStatChains) / 5.0
                       << " shownFps=" << ps2_stats::presentedFrames.exchange(0) / 5.0
+                      << " hostFps=" << static_cast<double>(hostFrames) / 5.0
                       << " frames=" << statChains
                       << " gfx=" << native_renderer::presetName(native_renderer::gfxPresetNow()) // round 124: the Graphics preset
                       << []
@@ -3469,6 +3833,7 @@ void PS2Runtime::run()
                 std::cerr << ps2_stats::gsPrims[i].exchange(0) << (i < 6 ? "," : "");
             lastStatChains = statChains;
             lastHostFrames = hostFrames;
+            hostFrames = 0; // reset the 5 s window that hostFps= above reports
             dumpDispatchProfile();
             std::cerr << " vif:";
             for (int op = 0; op < 128; ++op)
@@ -3714,7 +4079,7 @@ void PS2Runtime::run()
             }
         }
 
-#if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
+#if (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)) || defined(PS2X_LINUX_SDL2_SHIM)
         // Draw here only before the GS thread's first frame, or when it has
         // stopped presenting: a slow game frame must not bring the host back
         // (it holds the one GL through every vsync and starves the GS).
@@ -3739,7 +4104,7 @@ void PS2Runtime::run()
         }
     }
 
-#if defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)
+#if (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)) || defined(PS2X_LINUX_SDL2_SHIM)
     GSHwBackend::setPresentHook(nullptr); // drawHostFrame goes out of scope
     native_renderer::setPresentHook(nullptr);
 #endif

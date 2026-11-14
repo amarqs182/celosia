@@ -31,6 +31,7 @@
 // recompiled fallbacks read them). VU0's vf / ACC / Q registers are not left
 // as the original leaves them.
 #include "sotc_decomp.h"
+#include "sotc_pf141.h"
 #include "runtime/ps2_diag.h"
 #include "lines67.h"
 
@@ -51,6 +52,9 @@
 #include <chrono>
 #if defined(__vita__)
 #include <psp2/kernel/processmgr.h>
+#endif
+#if defined(__aarch64__) || defined(__ARM_NEON)
+#include <arm_neon.h>
 #endif
 
 // Round 85 (decomp_hot47j's ground85): the finder leaf's entries recorded while
@@ -95,6 +99,13 @@ namespace decomp_collision
         if (g_statsOn)  \
             g_stats.name.fetch_add(1, std::memory_order_relaxed); \
     } while (0)
+
+    inline float fastDiv(uint32_t &fcr31, float num, float den)
+    {
+        if (__builtin_expect(den != 0.0f, 1))
+            return num / den;
+        return ps2FpuDivide(fcr31, num, den);
+    }
 
     // Filters run as guest code (SOTC_COLLISION_STATS): address, count.
     std::atomic<uint32_t> g_guestFilterAt[8];
@@ -1108,7 +1119,7 @@ namespace decomp_collision
             g.put(sp, g.q(a1));
         else
         {
-            const float t = ps2FpuDivide(ctx->fcr31, d1, span);
+            const float t = fastDiv(ctx->fcr31, d1, span);
             g.f0(t);
             const __m128 vt = _mm_set1_ps(t);
             const __m128 p0 = g.q(a1), p1 = g.q(a2);
@@ -1165,9 +1176,9 @@ namespace decomp_collision
             return x(vu::addN(acc, lane<2>(prod)));
         };
         __m128 c2 = crossN(nrm, e2);
-        const float u = ps2FpuDivide(ctx->fcr31, dot(c2, w), dot(c2, e1));
+        const float u = fastDiv(ctx->fcr31, dot(c2, w), dot(c2, e1));
         __m128 c1 = crossN(nrm, e1);
-        const float v = ps2FpuDivide(ctx->fcr31, dot(c1, w), dot(c1, e2));
+        const float v = fastDiv(ctx->fcr31, dot(c1, w), dot(c1, e2));
         uint32_t ub, vb;
         std::memcpy(&ub, &u, 4);
         std::memcpy(&vb, &v, 4);
@@ -1350,7 +1361,11 @@ namespace decomp_collision
         return false;
 #endif
     }
+#if PS2X_VU_NEON_A32
     inline bool keepFastOk() { return sotc_decomp::fastNativeOn() && !fast::check49(); }
+#else
+    inline bool keepFastOk() { return false; } // (the fast natives are NEON only)
+#endif
     // The same for the surface id at `id` (the chain made here).
     bool keepEarly(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t id, uint32_t point, float keep)
     {
@@ -1955,6 +1970,18 @@ namespace decomp_collision
     uint64_t nodeOld(const G g, const Seg &s, uint32_t a1, uint32_t a2, uint32_t t0, uint32_t spIn);
     sotc_decomp::NativeCount g_countLow("collisionLow"), g_countHigh("collisionHigh"), g_countNode("collisionNode");
 
+#if defined(__aarch64__) || defined(__ARM_NEON)
+    // r.xyz = a.xyz * t + b.xyz * (1 - t); r.w = a.w (single-cycle NEON FMA)
+    inline __m128 lerp(const G g, __m128 a, __m128 b, float t)
+    {
+        float32x4_t va = a;
+        float32x4_t vb = b;
+        float32x4_t vt = vdupq_n_f32(t);
+        float32x4_t v1mt = vdupq_n_f32(1.0f - t);
+        float32x4_t vr = vmlaq_f32(vmulq_f32(vb, v1mt), va, vt);
+        return vsetq_lane_f32(vgetq_lane_f32(va, 3), vr, 3);
+    }
+#else
     // vmulax.xyz ACC = a * t; vmaddw.xyz a = ACC + b * (1 - t): w stays a's.
     inline __m128 lerp(const G g, __m128 a, __m128 b, float t)
     {
@@ -1964,6 +1991,7 @@ namespace decomp_collision
         const __m128 r = PS2_VADD(acc, PS2_VMUL(b, lane<3>(vf8)));
         return _mm_blendv_ps(a, r, _mm_castsi128_ps(_mm_set_epi32(0, -1, -1, -1)));
     }
+#endif
 
     // 0x112c498: the low side of the node at t0 (coordinates <= split x scale).
     uint64_t lowOld(const G g, const Seg &s, uint32_t a1, uint32_t a2, uint32_t t0, uint32_t spIn)
@@ -1992,7 +2020,7 @@ namespace decomp_collision
         {
             const float f2 = FPU_SUB_S(f0, f1);
             f0 = FPU_SUB_S(split, f1);
-            f0 = ps2FpuDivide(g.ctx->fcr31, f0, f2);
+            f0 = fastDiv(g.ctx->fcr31, f0, f2);
             f0 = FPU_ADD_S(f0, zero);
             g.f0(f0);
             g.put(sp, lerp(g, g.q(a2), g.q(a1), f0));
@@ -2000,7 +2028,7 @@ namespace decomp_collision
         }
         const float f2 = FPU_SUB_S(f1, f0);
         f0 = FPU_SUB_S(split, f0);
-        f0 = ps2FpuDivide(g.ctx->fcr31, f0, f2);
+        f0 = fastDiv(g.ctx->fcr31, f0, f2);
         f0 = FPU_ADD_S(f0, zero);
         g.f0(f0);
         g.put(sp + 0x10u, lerp(g, g.q(a1), g.q(a2), f0));
@@ -2033,7 +2061,7 @@ namespace decomp_collision
         {
             const float f2 = FPU_SUB_S(f1, f0);
             f0 = FPU_SUB_S(split, f0);
-            f0 = ps2FpuDivide(g.ctx->fcr31, f0, f2);
+            f0 = fastDiv(g.ctx->fcr31, f0, f2);
             f0 = FPU_SUB_S(f0, zero);
             g.f0(f0);
             g.put(sp, lerp(g, g.q(a1), g.q(a2), f0));
@@ -2041,7 +2069,7 @@ namespace decomp_collision
         }
         const float f2 = FPU_SUB_S(f0, f1);
         f0 = FPU_SUB_S(split, f1);
-        f0 = ps2FpuDivide(g.ctx->fcr31, f0, f2);
+        f0 = fastDiv(g.ctx->fcr31, f0, f2);
         f0 = FPU_SUB_S(f0, zero);
         g.f0(f0);
         g.put(sp + 0x10u, lerp(g, g.q(a2), g.q(a1), f0));
@@ -2153,7 +2181,7 @@ namespace decomp_collision
         {
             const float f2 = FPU_SUB_S(f0, f1);
             f0 = FPU_SUB_S(split, f1);
-            f0 = ps2FpuDivide(g.ctx->fcr31, f0, f2);
+            f0 = fastDiv(g.ctx->fcr31, f0, f2);
             f0 = FPU_ADD_S(f0, zero);
             g.f0(f0);
             g.put(sp, lerp(g, g.q(a2), g.q(a1), f0));
@@ -2161,7 +2189,7 @@ namespace decomp_collision
         }
         const float f2 = FPU_SUB_S(f1, f0);
         f0 = FPU_SUB_S(split, f0);
-        f0 = ps2FpuDivide(g.ctx->fcr31, f0, f2);
+        f0 = fastDiv(g.ctx->fcr31, f0, f2);
         f0 = FPU_ADD_S(f0, zero);
         g.f0(f0);
         g.put(sp + 0x10u, lerp(g, g.q(a1), g.q(a2), f0));
@@ -2193,7 +2221,7 @@ namespace decomp_collision
         {
             const float f2 = FPU_SUB_S(f1, f0);
             f0 = FPU_SUB_S(split, f0);
-            f0 = ps2FpuDivide(g.ctx->fcr31, f0, f2);
+            f0 = fastDiv(g.ctx->fcr31, f0, f2);
             f0 = FPU_SUB_S(f0, zero);
             g.f0(f0);
             g.put(sp, lerp(g, g.q(a1), g.q(a2), f0));
@@ -2201,7 +2229,7 @@ namespace decomp_collision
         }
         const float f2 = FPU_SUB_S(f0, f1);
         f0 = FPU_SUB_S(split, f1);
-        f0 = ps2FpuDivide(g.ctx->fcr31, f0, f2);
+        f0 = fastDiv(g.ctx->fcr31, f0, f2);
         f0 = FPU_SUB_S(f0, zero);
         g.f0(f0);
         g.put(sp + 0x10u, lerp(g, g.q(a2), g.q(a1), f0));
@@ -2343,7 +2371,7 @@ namespace decomp_collision
                 f2 = FPU_SUB_S(f1, f0);
                 f0 = FPU_SUB_S(split, f0);
             }
-            f0 = ps2FpuDivide(g.ctx->fcr31, f0, f2);
+            f0 = fastDiv(g.ctx->fcr31, f0, f2);
             f0 = high ? FPU_SUB_S(f0, zero) : FPU_ADD_S(f0, zero);
             g.f0(f0);
             const __m128 A = walk101::ld(e.a), B = walk101::ld(e.b);
@@ -3112,7 +3140,7 @@ namespace decomp_collision
     // (what that call would do: v0 the record; false: make the guest call).
     bool attributeAdrDirect(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t id)
     {
-        if (!sotc_decomp::coll71On() || sotc_decomp::guestFunction(runtime, kAttributeAdr) != attributeAdr)
+        if (!sotc_decomp::coll71On())
             return false;
         const G g{rdram, ctx, runtime};
         uint32_t v0;
@@ -4239,13 +4267,33 @@ namespace decomp_collision
     // near one only costs its part's test, which decides as before)
     inline bool cyl125(__m128 c, float r, float length)
     {
+#if defined(__aarch64__)
+        const float32x4_t cv = vreinterpretq_f32_m128(c);
+        const float z = vgetq_lane_f32(cv, 2);
+        const float rr = r * 1.001f + 1e-3f;
+        // Fast Z-axis early-out (most objects in world are along different Z coordinates)
+        if (z < -rr || z > length + rr)
+            return false;
+        const float x = vgetq_lane_f32(cv, 0);
+        const float y = vgetq_lane_f32(cv, 1);
+        return (x * x + y * y) < (rr * rr);
+#else
         float v[4];
         std::memcpy(v, &c, 16);
         const float rr = r * 1.001f + 1e-3f;
-        return v[0] * v[0] + v[1] * v[1] < rr * rr && -rr < v[2] && v[2] < length + rr;
+        if (v[2] < -rr || v[2] > length + rr)
+            return false;
+        return (v[0] * v[0] + v[1] * v[1]) < (rr * rr);
+#endif
     }
     inline __m128 abs125(__m128 v)
     {
+#if defined(__aarch64__)
+        const uint32x4_t u = vreinterpretq_u32_m128(v);
+        const uint32x4_t has_exp = vtstq_u32(u, vdupq_n_u32(0x7F800000u));
+        const uint32x4_t abs_bits = vandq_u32(u, vdupq_n_u32(0x7FFFFFFFu));
+        return vreinterpretq_m128_u32(vandq_u32(abs_bits, has_exp));
+#else
         uint32_t b[4];
         std::memcpy(b, &v, 16);
         for (uint32_t &w : b)
@@ -4253,6 +4301,7 @@ namespace decomp_collision
         __m128 r;
         std::memcpy(&r, b, 16);
         return r;
+#endif
     }
     // v through the four rows at m in plain NEON when the rows and v are small (finite, below 2^61: then the PS2's clamps
     // are identities and these are transform()'s bits, round 119's part119 argument), else transform().
@@ -4329,6 +4378,7 @@ namespace decomp_collision
             return;
         for (uint32_t off : {0x00u, 0xB0u, 0x154u, 0x178u, 0x1A4u, 0x1D8u})
             __builtin_prefetch(g.rdram + object + off);
+        pf141::noteColl(g.rdram, object, 0x1E0u); // round 141 (pfc141): for the next frame's helper
     }
 
     template <bool Array>
@@ -4384,7 +4434,25 @@ namespace decomp_collision
                     const float radius = g.f32(db + 0x2Cu), scale = g.f32(cls + 0x90u);
                     bool near = true;
                     if (radius != 0.0f)
-                        near = cyl125(xf125(g, sp + 0x40u, g.q(g.u32(cls + 0x134u))), radius * scale, length);
+                    {
+#if defined(__aarch64__)
+                        // Broadphase Sphere-to-Segment conservative culling before inverse matrix transformation:
+                        const uint32_t posPtr = g.u32(cls + 0x134u);
+                        if (posPtr != 0u && G::plain(posPtr, 0x10u))
+                        {
+                            const float32x4_t p_obj = vld1q_f32(reinterpret_cast<const float *>(g.rdram + (posPtr & ~0xFu)));
+                            const float32x4_t p_seg = vmulq_n_f32(vaddq_f32(vreinterpretq_f32_m128(qStart), vreinterpretq_f32_m128(endObj)), 0.5f);
+                            const float32x4_t diff = vsubq_f32(p_obj, p_seg);
+                            const float32x4_t diff2 = vmulq_f32(diff, diff);
+                            const float d2 = vgetq_lane_f32(diff2, 0) + vgetq_lane_f32(diff2, 1) + vgetq_lane_f32(diff2, 2);
+                            const float max_r = (length * 0.5f) + (radius * scale * 1.002f) + 0.01f;
+                            if (d2 > (max_r * max_r))
+                                near = false;
+                        }
+#endif
+                        if (near)
+                            near = cyl125(xf125(g, sp + 0x40u, g.q(g.u32(cls + 0x134u))), radius * scale, length);
+                    }
                     if (near)
                     {
                         ++g_obj125.near;
@@ -4407,6 +4475,8 @@ namespace decomp_collision
                                     __builtin_prefetch(g.rdram + s7 + off);
                                 __builtin_prefetch(g.rdram + m1 + 0x40u);
                                 __builtin_prefetch(g.rdram + m1 + 0x40u + 0x20u);
+                                pf141::noteColl(g.rdram, s7 + 0x90u, 0x90u); // round 141 (pfc141)
+                                pf141::noteColl(g.rdram, m1 + 0x40u, 0x40u);
                             }
                             if (g.u32(s7 + 4u) == 0u)
                                 continue;
@@ -5377,13 +5447,17 @@ namespace decomp_collision
             uint64_t frame = ~0ull, v0 = 0;
             uint8_t bytes[kResult] = {};
         };
-        Slot g_slots[16];
+        constexpr int kMaxSlots = 64;
+        Slot g_slots[kMaxSlots];
         uint64_t g_frame = ~0ull;
-        uint32_t g_seen[16][2]; // ra, calls this frame
+        uint32_t g_seen[kMaxSlots][2]; // ra, calls this frame
         int g_seenCount = 0;
         bool site(uint32_t ra)
         {
-            return ra == 0x01417108u || ra == 0x0141AA0Cu || ra == 0x01418494u || ra == 0x01418548u || ra == 0x0140F2ACu;
+            return ra == 0x01417108u || ra == 0x0141AA0Cu || ra == 0x01418494u || ra == 0x01418548u || ra == 0x0140F2ACu ||
+                   ra == 0x01419F30u || ra == 0x0141729Cu || ra == 0x01416058u || ra == 0x01416080u || ra == 0x014160F0u ||
+                   ra == 0x01416668u || ra == 0x014178A8u || ra == 0x014273A8u || ra == 0x014273E4u || ra == 0x014115DCu ||
+                   ra == 0x0140E6A4u || ra == 0x010D4668u;
         }
         uint32_t nthCall(uint32_t ra)
         {
@@ -5395,7 +5469,7 @@ namespace decomp_collision
             for (int i = 0; i < g_seenCount; ++i)
                 if (g_seen[i][0] == ra)
                     return g_seen[i][1]++;
-            if (g_seenCount < 16)
+            if (g_seenCount < kMaxSlots)
             {
                 g_seen[g_seenCount][0] = ra;
                 g_seen[g_seenCount][1] = 1u;
@@ -5496,6 +5570,11 @@ namespace decomp_collision
             return sotc_decomp::recompiled(kCameraInvisible)(rdram, ctx, runtime);
         const G g{rdram, ctx, runtime};
         const uint32_t ra = GPR_U32(ctx, 31), spIn = GPR_U32(ctx, 29), sp = spIn - 0x70u;
+        const bool memo = native_renderer::tuning().sacCamColl && cammemo::site(ra);
+        uint32_t memoNth = 0u;
+        const uint32_t memoOut = GPR_U32(ctx, 4);
+        if (memo && cammemo::replay(g, ra, memoOut, memoNth))
+            return returnTo(ctx);
         const uint32_t cam = GPR_U32(ctx, 7), extra = GPR_U32(ctx, 8), withTarget = GPR_U32(ctx, 9);
         judgeData(g, sp + 0x10u, extra, withTarget == 1u ? g.u32(cam + 0x1Cu) : 0u);
         g.put32(sp, sp + 0x10u);
@@ -5507,6 +5586,8 @@ namespace decomp_collision
         guestCall(rdram, ctx, runtime, kDirectCallBack, 0x0140F09Cu, sp);
         SET_GPR_U32(ctx, 31, ra);
         SET_GPR_U32(ctx, 29, spIn);
+        if (memo)
+            cammemo::keep(g, ra, memoNth, memoOut);
         returnTo(ctx);
     }
 
@@ -5870,7 +5951,7 @@ namespace decomp_collision
         // Round 119 (SOTC_FLUSH119, default on): an empty list (count 0) is not handed to
         // FlushModifiedManager's native, which would only set v0 = 2 and return: a0 stays the list
         // as the call leaves it; ra / sp / v0 are set at the end below whatever the last call left.
-        const bool skipEmpty = sotc_decomp::switchOn(sotc_decomp::kFlush119) && sotc_decomp::guestFunction(runtime, kFlushModified) == &flushModified;
+        const bool skipEmpty = sotc_decomp::switchOn(sotc_decomp::kFlush119);
         auto flush = [&](uint32_t list, uint32_t site)
         {
             SET_GPR_U32(ctx, 4, list);

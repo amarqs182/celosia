@@ -116,6 +116,12 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
             const float v = env ? static_cast<float>(std::atof(env)) : 0.18f;
             return std::clamp(v, 0.0f, 0.9f);
         }();
+        static const float curveExp = []
+        {
+            const char *env = std::getenv("PS2X_STICK_CURVE");
+            const float v = env ? static_cast<float>(std::atof(env)) : 1.25f;
+            return std::clamp(v, 0.5f, 3.0f);
+        }();
         auto shape = [](float &x, float &y)
         {
             const float m = std::sqrt(x * x + y * y);
@@ -124,7 +130,10 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
                 x = y = 0.0f;
                 return;
             }
-            const float scale = std::min(1.0f, (m - deadZone) / (1.0f - deadZone)) / m;
+            float normM = std::min(1.0f, (m - deadZone) / (1.0f - deadZone));
+            if (curveExp != 1.0f)
+                normM = std::pow(normM, curveExp);
+            const float scale = normM / m;
             x *= scale;
             y *= scale;
         };

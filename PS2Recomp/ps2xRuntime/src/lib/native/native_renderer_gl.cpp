@@ -18,12 +18,34 @@
 #include "runtime/ps2_stats.h"
 #include "runtime/ps2_thread_load.h"
 
-#if defined(__APPLE__) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
+#if defined(__APPLE__) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)) || defined(__linux__)
 
 #if defined(__APPLE__)
 #define GL_SILENCE_DEPRECATION
 #include <OpenGL/gl3.h>
 #include <malloc/malloc.h>
+#elif defined(__linux__)
+// OpenGL ES 3.0 (Linux/GLES3): the shader set below is GLSL ES 3.00 and the
+// entry points this file uses (glBindVertexArray, glMapBuffer,
+// glFramebufferTexture2D, texelFetch, ...) are not in the ES 2.0 API or its
+// header. The GLES2 header is only an include-level fallback when GLES3
+// headers are missing; a true ES 1.00 runtime needs a separate shader set
+// (attribute/varying/texture2D, no texelFetch/textureSize/laml/LAYOUT) and
+// VAO-less/mapping-less code.
+#if __has_include(<GLES3/gl3.h>)
+#include <GLES3/gl3.h>
+#else
+#include <GLES2/gl2.h>
+#endif
+#include <malloc.h>
+#define PS2X_NATIVE_GLES 1
+void ps2xLinuxGlLock();
+void ps2xLinuxGlUnlock();
+// ES has no GL_DEPTH_CLAMP (desktop only): the shadow volumes' near-plane
+// clamp is GL_EXT_depth_clamp's, whose enum the headers may not define.
+#ifndef GL_DEPTH_CLAMP_EXT
+#define GL_DEPTH_CLAMP_EXT 0x864F
+#endif
 #else
 #include <mutex>
 #include <malloc.h>
@@ -50,6 +72,23 @@ extern "C" SceGxmContext *gxm_context;              // vitaGL's (gxm.c): round 8
 extern "C" volatile unsigned long long ps2x_vita_swap_us; // raylib_vita.cpp (round 86): time in vglSwapBuffers, summed
 extern "C" void ps2x_vita_render_wait(int on);                  // raylib_vita.cpp (round 132)
 extern "C" void ps2x_vita_pace_tag(uint32_t seq);        // raylib_vita.cpp (round 110): the next swap's frame release
+#endif
+
+// The GLSL version header of the shader strings below. Desktop GL is 3.3
+// core; on Linux the same shader bodies are GLSL ES 3.10 (in/out, texture,
+// textureLod, texelFetch, textureSize, layout(location) and array
+// constructors are all ES 3.00, but the full-screen passes sample the depth
+// texture with texelFetch: int texel is ES 3.10, so the version is 310 es
+// and the context is asked for below ES 3.10 no shader here compiles), plus
+// the fragment stage's default precision ES requires.
+#if defined(PS2X_NATIVE_GLES)
+#define PS2X_GL_VERSION_VERT "#version 310 es\nprecision highp float;\nprecision highp int;\n"
+#define PS2X_GL_VERSION_FRAG "#version 310 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\n"
+#define PS2X_GL_VERSION PS2X_GL_VERSION_VERT
+#else
+#define PS2X_GL_VERSION_VERT "#version 330 core\n"
+#define PS2X_GL_VERSION_FRAG "#version 330 core\n"
+#define PS2X_GL_VERSION PS2X_GL_VERSION_VERT
 #endif
 
 #include "ThreadNaming.h"
@@ -385,7 +424,7 @@ namespace
     // zones): the memory log and the eviction under pressure read it.
     uint64_t heapUsed()
     {
-#if defined(PS2X_NATIVE_VITA)
+#if defined(PS2X_NATIVE_VITA) || defined(PS2X_NATIVE_GLES)
         return mallinfo().uordblks;
 #else
         malloc_statistics_t stats{};
@@ -423,8 +462,7 @@ namespace
 
 #if !defined(PS2X_NATIVE_VITA)
     // ---- GLSL (macOS) ----
-    const char *kMainVertex = R"(#version 330 core
-layout(location = 0) in vec3 aPos;
+    const char *kMainVertex = PS2X_GL_VERSION_VERT R"(layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec4 aColor;
 layout(location = 3) in vec2 aUV;
@@ -433,12 +471,23 @@ uniform vec4 uMisc;  // lit, opacity, uv offset
 uniform vec4 uFogB;  // size, vertex fog, base
 uniform vec4 uFogC;  // scale, lod K, lod scale, max lod
 uniform vec4 uGuard; // x > 0: layer 1's near plane (see Renderer::guardFor): what lies nearer than w = y cut
-out vec4 vUV;        // uv, w, fog x w (the fog factor is linear on the screen, as the GS's)
-out vec4 vColor;
-out vec4 vScreen;    // clip x, y, w
+uniform vec4 uInstanceClips[64];
+uniform int uInstanceCount;
+out highp vec4 vUV;        // uv, w, fog x w (the fog factor is linear on the screen, as the GS's)
+out mediump vec4 vColor;
+out highp vec4 vScreen;    // clip x, y, w
 void main()
 {
-    vec4 c = uClip[0] * aPos.x + uClip[1] * aPos.y + uClip[2] * aPos.z + uClip[3];
+    vec4 c;
+    if (uInstanceCount > 1)
+    {
+        int base = gl_InstanceID * 4;
+        c = uInstanceClips[base] * aPos.x + uInstanceClips[base + 1] * aPos.y + uInstanceClips[base + 2] * aPos.z + uInstanceClips[base + 3];
+    }
+    else
+    {
+        c = uClip[0] * aPos.x + uClip[1] * aPos.y + uClip[2] * aPos.z + uClip[3];
+    }
     // Depth from w, near plane at w = 0.1: depth = 1 - 0.1 / w.
     gl_Position = vec4(c.x, c.y, c.w - 0.2, c.w);
     float fog = uFogB.z > 0.5 ? clamp(uFogB.w + uFogC.x / max(c.w, 1e-3), 0.0, 255.0) / 255.0 : 1.0;
@@ -465,10 +514,9 @@ void main()
 }
 )";
 
-    const char *kMainFragment = R"(#version 330 core
-in vec4 vUV;
-in vec4 vColor;
-in vec4 vScreen;
+    const char *kMainFragment = PS2X_GL_VERSION_FRAG R"(in highp vec4 vUV;
+in mediump vec4 vColor;
+in highp vec4 vScreen;
 uniform sampler2D uTex, uBackground, uReflection, uRefraction;
 uniform vec4 uFogA;      // start, width, steps, fogged
 uniform vec4 uFogC;      // scale, lod K, lod scale, max lod
@@ -480,9 +528,9 @@ void main()
 {
     if (vScreen.w < 0.0) // layer 1 nearer than its near plane (uGuard)
         discard;
-    float textured = uFogColour.w;
-    vec2 screen = vScreen.xy / vScreen.z * 0.5 + 0.5;
-    float depth = vUV.z;
+    mediump float textured = uFogColour.w;
+    highp vec2 screen = vScreen.xy / vScreen.z * 0.5 + 0.5;
+    highp float depth = vUV.z;
     // Textured 5 and 4 sample pictures this renderer drew (y-up in GL) at
     // the draw's PS2 UV (v down the screen): v is turned over.
     if (textured > 4.5) // the last frame shown, at the draw's UV
@@ -507,7 +555,7 @@ void main()
     {
         // TEX0 TCC 0: the mirror's alpha is not read; the vertex alpha (microcode 1) x VU 0x3f3 w.
         // reflectionBegin's ripple: band i of 32 (from the top) shifted by (sin(2 (12 i + t) 24 pi / H) + 1) (6.4 i / H + 0.2) texels.
-        vec2 uv = screen;
+        highp vec2 uv = screen;
         if (uFogC.z > 0.0)
         {
             float band = floor(clamp(1.0 - uv.y, 0.0, 0.999) * 32.0);
@@ -516,9 +564,9 @@ void main()
         oColor = vec4(clamp(texture(uReflection, uv).rgb * uDebug.rgb * vColor.rgb, 0.0, 1.0), clamp(vColor.a * -uDebug.w, 0.0, 1.0));
         return;
     }
-    float lod = uFogC.w > 0.0 ? clamp(log2(max(depth, 1e-3)) * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
-    vec4 t = textured > 0.5 ? textureLod(uTex, vUV.xy, lod) : vec4(vec3(128.0 / 255.0), 1.0); // untextured: the GS takes the vertex colour as is (255 = white)
-    float alpha = clamp(t.a * (textured > 0.5 ? 2.0 : 1.0) * vColor.a, 0.0, 1.0);
+    mediump float lod = uFogC.w > 0.0 ? clamp(log2(max(depth, 1e-3)) * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
+    mediump vec4 t = textured > 0.5 ? textureLod(uTex, vUV.xy, lod) : vec4(vec3(128.0 / 255.0), 1.0); // untextured: the GS takes the vertex colour as is (255 = white)
+    mediump float alpha = clamp(t.a * (textured > 0.5 ? 2.0 : 1.0) * vColor.a, 0.0, 1.0);
     if (alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y)) // the cut-out, the GS alpha test's side (DrawState::alphaTest)
         discard;
     if (uDebug.w > 0.0)
@@ -526,11 +574,12 @@ void main()
         oColor = vec4(uDebug.rgb, uDebug.w > 1.5 ? alpha : 1.0);
         return;
     }
-    vec3 rgb = clamp(t.rgb * vColor.rgb, 0.0, 1.0);
+    mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
+    mediump vec3 rgb = raw / (vec3(1.0) + raw * 0.35);
     rgb = mix(uFogColour.rgb, rgb, vUV.w / vUV.z);
     if (uFogA.w > 0.5)
     {
-        float f = clamp((depth - uFogA.x) / uFogA.y, 0.0, 1.0);
+        mediump float f = clamp((depth - uFogA.x) / uFogA.y, 0.0, 1.0);
         if (uFogA.z > 0.0)
             f = floor(f * uFogA.z) / uFogA.z;
         rgb = mix(rgb, texture(uBackground, screen).rgb, f);
@@ -539,7 +588,6 @@ void main()
 }
 )";
 
-
     // The plain world draws' fragment stage (textured 0 / 1 of kMainFragment,
     // the same arithmetic): only the samplers it reads (vitaGL sets every
     // sampler of a program at each draw). BG: fogged / zFogged draws (the
@@ -547,9 +595,9 @@ void main()
     // variant, for draws whose alpha cannot fall under 0.02). Preceded by
     // "#define BG n" and "#define CUT n" (after the version line).
     const char *kWorldFragment = R"(
-in vec4 vUV;
-in vec4 vColor;
-in vec4 vScreen;
+in highp vec4 vUV;
+in mediump vec4 vColor;
+in highp vec4 vScreen;
 uniform sampler2D uTex;
 #if BG
 uniform sampler2D uBackground;
@@ -563,24 +611,25 @@ uniform vec4 uAlpha;     // alpha test: cut under x (at least 0.02), and at / ov
 out vec4 oColor;
 void main()
 {
-    float textured = uFogColour.w;
-    float depth = vUV.z;
-    float lod = uFogC.w > 0.0 ? clamp(log2(max(depth, 1e-3)) * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
-    vec4 t = textured > 0.5 ? textureLod(uTex, vUV.xy, lod) : vec4(vec3(128.0 / 255.0), 1.0); // untextured: the GS takes the vertex colour as is (255 = white)
-    float alpha = clamp(t.a * (textured > 0.5 ? 2.0 : 1.0) * vColor.a, 0.0, 1.0);
+    mediump float textured = uFogColour.w;
+    highp float depth = vUV.z;
+    mediump float lod = uFogC.w > 0.0 ? clamp(log2(max(depth, 1e-3)) * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
+    mediump vec4 t = textured > 0.5 ? textureLod(uTex, vUV.xy, lod) : vec4(vec3(128.0 / 255.0), 1.0); // untextured: the GS takes the vertex colour as is (255 = white)
+    mediump float alpha = clamp(t.a * (textured > 0.5 ? 2.0 : 1.0) * vColor.a, 0.0, 1.0);
 #if CUT
     if (vScreen.w < 0.0) // layer 1 nearer than its near plane (uGuard; such draws take the CUT programs)
         discard;
     if (alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y)) // the cut-out, the GS alpha test's side (DrawState::alphaTest)
         discard;
 #endif
-    vec3 rgb = clamp(t.rgb * vColor.rgb, 0.0, 1.0);
+    mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
+    mediump vec3 rgb = raw / (vec3(1.0) + raw * 0.35);
     rgb = mix(uFogColour.rgb, rgb, vUV.w / vUV.z);
 #if BG
     if (uFogA.w > 0.5)
     {
-        vec2 screen = vScreen.xy / vScreen.z * 0.5 + 0.5;
-        float f = clamp((depth - uFogA.x) / uFogA.y, 0.0, 1.0);
+        highp vec2 screen = vScreen.xy / vScreen.z * 0.5 + 0.5;
+        mediump float f = clamp((depth - uFogA.x) / uFogA.y, 0.0, 1.0);
         if (uFogA.z > 0.0)
             f = floor(f * uFogA.z) / uFogA.z;
         rgb = mix(rgb, texture(uBackground, screen).rgb, f);
@@ -592,8 +641,7 @@ void main()
 
     // Round 45: the shadow volumes' fragment stage: nothing (the volume only
     // counts in the stencil; its colour is masked and blended away).
-    const char *kVolumeFragment = R"(#version 330 core
-out vec4 oColor;
+    const char *kVolumeFragment = PS2X_GL_VERSION_FRAG R"(out vec4 oColor;
 void main()
 {
     oColor = vec4(0.0);
@@ -601,11 +649,10 @@ void main()
 )";
 
     // Full-screen passes: a triangle over the screen, uv 0..1 (y up).
-    const char *kQuadVertex = R"(#version 330 core
-layout(location = 0) in vec2 aPos;
+    const char *kQuadVertex = PS2X_GL_VERSION_VERT R"(layout(location = 0) in vec2 aPos;
 uniform vec4 uQuad; // blur copy: scale, angle, offset (NDC); scale 0: plain
 uniform float uZ;   // the NDC z (SOTC_BLOOM_VITA: the Vita bloom mask's quad at the threshold's depth)
-out vec2 vUV;
+out highp vec2 vUV;
 void main()
 {
     vec2 p = aPos;
@@ -620,8 +667,7 @@ void main()
 }
 )";
 
-    const char *kQuadFragment = R"(#version 330 core
-in vec2 vUV;
+    const char *kQuadFragment = PS2X_GL_VERSION_FRAG R"(in highp vec2 vUV;
 uniform sampler2D uSrc, uSrc2, uDepth;
 uniform int uMode;
 uniform vec4 uA, uB, uC, uSize;
@@ -676,7 +722,11 @@ void main()
     else if (uMode == 9) // soft shadow: alpha mask x uA.x
         oColor = vec4(0.0, 0.0, 0.0, clamp(texture(uSrc, vUV).r * uA.x, 0.0, 1.0));
     else if (uMode == 10) // bloom composite: rgb x uB.rgb x uB.a
-        oColor = vec4(texture(uSrc, vUV).rgb * uB.rgb * uB.a, 1.0);
+    {
+        vec3 b = texture(uSrc, vUV).rgb * uB.rgb * uB.a;
+        b = b / (1.0 + b * 0.4);
+        oColor = vec4(b, 1.0);
+    }
     else if (uMode == 15) // the GS chain's mask at 256 x 256 (rows from the top): bilinear over the PS2 frame's
     {                     // texels (p + 0.5) x (2, 1.75), each white where GS Z <= uA.x + 1; uB the mask colour
         vec2 size = vec2(textureSize(uDepth, 0));
@@ -728,7 +778,9 @@ void main()
         vec2 size = vec2(textureSize(uDepth, 0));
         vec2 x = vec2(gl_FragCoord.x, size.y - gl_FragCoord.y) / uA.xy - 0.5;
         vec2 uv = (0.5 + x * vec2(256.0 / 512.0, 256.0 / 448.0)) / 256.0;
-        oColor = vec4(texture(uSrc, vec2(uv.x, 1.0 - uv.y)).rgb * uB.rgb * uB.a, 1.0);
+        vec3 b = texture(uSrc, vec2(uv.x, 1.0 - uv.y)).rgb * uB.rgb * uB.a;
+        b = b / (1.0 + b * 0.4);
+        oColor = vec4(b, 1.0);
     }
     // SOTC_BLOOM_VITA=1 (Mac): the Vita's bloom modes 8, 11, 15-18 (kQuadFragment's
     // CG below) as 19-24, line for line, so that the Mac runs the Vita's bloom.
@@ -857,7 +909,7 @@ float4 main(float4 vUV : TEXCOORD0, float4 vColor : TEXCOORD1, float4 vScreen : 
 {
     if (vScreen.w < 0.0) // layer 1 nearer than its near plane (uGuard)
         discard;
-    float textured = uFogColour.w;
+    mediump float textured = uFogColour.w;
     float2 screen = vScreen.xy / vScreen.z * 0.5 + 0.5;
     float depth = vUV.z;
     // Textured 5 and 4 sample pictures this renderer drew (y-up) at the
@@ -925,7 +977,7 @@ float4 main(float4 vUV : TEXCOORD0, float4 vColor : TEXCOORD1,
 #endif
             uniform float4 uFogC, uniform float4 uFogColour) : COLOR
 {
-    float textured = uFogColour.w;
+    mediump float textured = uFogColour.w;
     float depth = vUV.z;
 #if UNTEX
     // Round 98 (Tuning glUntex98): an untextured draw: the LOD program's own
@@ -1530,6 +1582,57 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         uint32_t width = 0, height = 0;
     };
 
+    // Attaches a depth-stencil texture to the framebuffer bound now: a single
+    // GL_DEPTH_STENCIL_ATTACHMENT call on desktop GL; ES has no such point,
+    // so the same texture goes on both GL_DEPTH_ATTACHMENT and
+    // GL_STENCIL_ATTACHMENT.
+    static void attachDepthStencil(GLuint depthTexture)
+    {
+#if defined(PS2X_NATIVE_GLES)
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depthTexture, 0);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_TEXTURE_2D, depthTexture, 0);
+#else
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, depthTexture, 0);
+#endif
+    }
+
+#if defined(PS2X_NATIVE_GLES)
+    // The near-plane clamp of the shadow volumes: ES has no GL_DEPTH_CLAMP
+    // (desktop only), so it is GL_EXT_depth_clamp's point (the #ifndef above).
+    constexpr GLenum kDepthClamp = GL_DEPTH_CLAMP_EXT;
+
+    // glGetString as a C string ("" when there is no context to ask).
+    const char *glString(GLenum name)
+    {
+        const char *s = reinterpret_cast<const char *>(glGetString(name));
+        return s ? s : "";
+    }
+
+    // The whole name in the space-separated GL_EXTENSIONS list (the ES 2.0
+    // way, valid in ES 3.x too). Asked once, at init.
+    bool hasExtension(const char *name)
+    {
+        const char *list = glString(GL_EXTENSIONS);
+        const size_t n = std::strlen(name);
+        for (const char *at = list; (at = std::strstr(at, name)) != nullptr; at += n)
+            if ((at == list || at[-1] == ' ') && (at[n] == ' ' || at[n] == '\0'))
+                return true;
+        return false;
+    }
+
+    // The context's OpenGL ES version (310 = ES 3.10): what the shader set
+    // above is written for. 0: the version could not be read.
+    int glEsVersion()
+    {
+        GLint major = 0, minor = 0;
+        glGetIntegerv(GL_MAJOR_VERSION, &major);
+        glGetIntegerv(GL_MINOR_VERSION, &minor);
+        return major > 0 ? major * 100 + minor * 10 : 0;
+    }
+#elif !defined(PS2X_NATIVE_VITA)
+    constexpr GLenum kDepthClamp = GL_DEPTH_CLAMP; // desktop GL: core
+#endif
+
     struct Renderer
     {
         GLuint mainProgram = 0, quadProgram = 0;
@@ -1541,6 +1644,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         bool regionReady = false; // every one of them built // by mode (8 and 11: the bloom mask's, see kQuadFragment; 12 unused; 15-18 the GS bloom chain, round 65b)
 #endif
         GLuint quadBuffer = 0, blurBuffer = 0, vao = 0;
+        // The shadow volumes' near-plane clamp (kDepthClamp), set by init: on
+        // ES it is GL_EXT_depth_clamp, which the driver may not have.
+#if defined(PS2X_NATIVE_GLES)
+        bool depthClamp = false;
+#else
+        bool depthClamp = true; // GL_DEPTH_CLAMP is core in desktop GL
+#endif
         // Uniform locations by (program, name): the names are string literals,
         // so their address is the key (no string built per call: that was 41%
         // of the Vita's time). A few dozen: a list looked through, the last
@@ -1685,7 +1795,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #else
             // The rest of the frame is drawn on the picture's depth.
             glBindFramebuffer(GL_FRAMEBUFFER, blurOut.fbo);
-            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, color.depth, 0);
+            attachDepthStencil(color.depth);
 #endif
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
             boundFbo = ~0u;
@@ -2092,6 +2202,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             uint8_t maxAlpha = 0xFF;   // round 45: the greatest (0xFF: not known)
             float minW = -1.0f;        // round 75: a background draw's least clip w over its mesh(es)' bounds (-1: not known)
             float maxW = -1.0f;        // round 98: a draw's greatest clip w over its mesh(es)' bounds (-1: not known; nofog98)
+            uint32_t instances = 1;    // instanced draws: count of instances (0: merged into an earlier instance)
+            uint32_t instanceOffset = 0; // offset into instanceClips
         };
         std::vector<Planned> plan;
         // Merged runs whose meshes lie apart in the pools: their vertices
@@ -2174,12 +2286,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         void sortFree(); // round 87 (Tuning glSort87)
         struct SortKey87
         {
-            uint64_t tex, state, where;
+            uint64_t tex, state, where, clip;
             uint32_t k;
         };
         std::vector<SortKey87> sortKeys;
         std::vector<uint64_t> sortOrder;
         std::vector<Planned> sortPlan;
+        std::vector<float> instanceClips;
         struct
         {
             uint64_t frames = 0, draws = 0, free = 0, segments = 0, moved = 0;
@@ -2204,6 +2317,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         struct
         {
             uint64_t frames = 0, draws = 0, calls = 0, merged = 0, ranges = 0, indexed = 0, noDiscard = 0, bufferSwitches = 0;
+            uint64_t instancedDraws = 0, instancedMerged = 0;
             uint64_t progOff = 0, progZero = 0; // SOTC_GL_PROG_CHECK=1: draws with another GL program bound than the cache says / none
             uint64_t alphaSecond = 0; // the alpha test's second passes (round 38)
             uint64_t cut = 0, cutDepth = 0, soft = 0; // round 75: GL calls with discard (with depth writes), through the SOFT programs
@@ -2344,6 +2458,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             int lastCount[kMainUniforms] = {};
             GLint palette = -1;
             uint64_t paletteSent = ~0ull; // frame << 32 | handle: what its palette holds
+            GLint locInstanceClips = -1;
+            GLint locInstanceCount = -1;
+            int lastInstanceCount = 1;
         };
         // Round 45: slot 10 the shadow volumes' program (kVolumeFragment).
         // Round 73: 11-18 the lean ones reading a one-level texture without a
@@ -2481,7 +2598,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             {
                 MeshKind,
                 SkinnedKind,
-                TextureKind
+                TextureKind,
+                IndexedMeshKind
             } kind = MeshKind;
             uint64_t id = 0;
             uint32_t count = 0, width = 0, height = 0, levels = 1;
@@ -2501,6 +2619,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         void applyUploadList(std::vector<Upload> &list); // and empties it
         std::vector<uint8_t> texChain118; // round 118: uploadTexture's swizzled chain (kept between uploads)
         void uploadMesh(uint64_t id, const native_renderer::Vertex *vertices, uint32_t count);
+        void uploadIndexedMesh(uint64_t id, const native_renderer::Vertex *vertices, uint32_t count, const uint32_t *indices, uint32_t indexCount);
         void uploadSkinned(uint64_t id, const native_renderer::SkinVertex *vertices, uint32_t count, const uint32_t *indices, uint32_t indexCount);
         void uploadTexture(uint64_t id, uint32_t width, uint32_t height, const uint8_t *rgba, uint32_t levels);
         // What the last frame drawn cost (the render thread's): read at the next hand-over.
@@ -2734,7 +2853,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             glGetProgramiv(p, GL_LINK_STATUS, &ok);
             if (!ok)
             {
-                std::cerr << "[native:gl] link failed" << std::endl;
+                char log[4096] = {};
+                GLsizei length = 0;
+                glGetProgramInfoLog(p, sizeof(log), &length, log);
+                std::cerr << "[native:gl] link failed: " << std::string(log, std::min<size_t>(length, sizeof(log))) << std::endl;
                 return 0;
             }
             return p;
@@ -2834,7 +2956,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #if defined(PS2X_NATIVE_VITA)
             return defines + kWorldFragment;
 #else
-            return "#version 330 core\n" + defines + kWorldFragment;
+            return PS2X_GL_VERSION_FRAG + defines + kWorldFragment;
 #endif
         }
 
@@ -2842,6 +2964,29 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         {
             if (const char *e = std::getenv("SOTC_GL_PX98")) // round 98 (the pixel estimate's frames)
                 px98.every = std::max(std::atoi(e), 0);
+#if defined(PS2X_NATIVE_GLES)
+            // The shaders here are GLSL ES 3.10 (PS2X_GL_VERSION): the
+            // full-screen passes sample the depth texture with texelFetch,
+            // which is not ES 3.00, so nothing below 3.10 compiles. Report
+            // that plainly and leave the renderer down, rather than drawing
+            // nothing program by program. (init runs on the render thread,
+            // after the context was made current to it.)
+            const int esVersion = glEsVersion();
+            if (esVersion < 310)
+            {
+                std::cerr << "[native:gl] OpenGL ES " << (esVersion / 100) << "." << ((esVersion / 10) % 10) << " ("
+                          << glString(GL_VERSION) << "): the shaders are ES 3.10 (texelFetch), the renderer stays down" << std::endl;
+                return false;
+            }
+            // The GS does not cut at the near plane: ES has no GL_DEPTH_CLAMP
+            // (desktop only), so the clamp runs on GL_EXT_depth_clamp when the
+            // driver has it and is skipped otherwise (the shadow volumes lose
+            // that clamp alone).
+            depthClamp = hasExtension("GL_EXT_depth_clamp");
+            std::cerr << "[native:gl] OpenGL ES " << (esVersion / 100) << "." << ((esVersion / 10) % 10) << " ("
+                      << glString(GL_VERSION) << ", " << glString(GL_SHADING_LANGUAGE_VERSION) << "), near-plane clamp: "
+                      << (depthClamp ? "GL_EXT_depth_clamp" : "off (GL_EXT_depth_clamp missing)") << std::endl;
+#endif
             const GLuint mainVertex = compile(GL_VERTEX_SHADER, kMainVertex);
             mainProgram = program(mainVertex, kMainFragment, {"aPos", "aNormal", "aColor", "aUV"});
 #if defined(PS2X_NATIVE_VITA)
@@ -3033,6 +3178,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                         glUniform1i(at, unit);
                 }
                 m.palette = glGetUniformLocation(p, "uPalette");
+                m.locInstanceClips = glGetUniformLocation(p, "uInstanceClips");
+                m.locInstanceCount = glGetUniformLocation(p, "uInstanceCount");
+                m.lastInstanceCount = 1;
+                if (m.locInstanceCount >= 0)
+                    glUniform1i(m.locInstanceCount, 1);
             }
             if (skinProgram && mains[1].palette < 0)
             {
@@ -3204,6 +3354,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             glDisable(GL_BLEND);
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
             boundFbo = boundProgram = ~0u;
+        cache = {};
+#if !defined(PS2X_NATIVE_VITA)
+        if (vao)
+            glBindVertexArray(vao);
+#endif
             glDeleteBuffers(1, &vbo);
             if (keepStartTargets())
                 startTargets.push_back(t); // kept: see keepStartTargets
@@ -3325,11 +3480,18 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 // Depth = 1 - 0.1 / w, read back by the bloom mask and the depth of field.
                 glGenTextures(1, &t.depth);
                 glBindTexture(GL_TEXTURE_2D, t.depth);
+#if defined(PS2X_NATIVE_GLES)
+                // ES has no 32-bit-float depth-stencil: 24+8, whose .r is the
+                // depth the shaders read via texelFetch as on the Mac.
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH24_STENCIL8, static_cast<GLsizei>(w), static_cast<GLsizei>(h), 0, GL_DEPTH_STENCIL,
+                             GL_UNSIGNED_INT_24_8, nullptr);
+#else
                 glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH32F_STENCIL8, static_cast<GLsizei>(w), static_cast<GLsizei>(h), 0, GL_DEPTH_STENCIL,
                              GL_FLOAT_32_UNSIGNED_INT_24_8_REV, nullptr);
+#endif
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, t.depth, 0);
+                attachDepthStencil(t.depth);
             }
             if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
                 std::cerr << "[native:gl] incomplete framebuffer " << w << "x" << h << std::endl;
@@ -3469,6 +3631,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 release(colorAltPlain, false); // (colorAlt's texture)
                 release(colorAlt);
                 boundFbo = boundProgram = ~0u;
+        cache = {};
+#if !defined(PS2X_NATIVE_VITA)
+        if (vao)
+            glBindVertexArray(vao);
+#endif
                 vglCollectGarbageNow();
             }
 #endif
@@ -3540,10 +3707,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #if !defined(PS2X_NATIVE_VITA)
             // The shadow mask pass tests the main picture's stencil.
             glBindFramebuffer(GL_FRAMEBUFFER, shadowMask.fbo);
-            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, color.depth, 0);
+            attachDepthStencil(color.depth);
             // Layer 8 drawn apart on the picture's depth.
             glBindFramebuffer(GL_FRAMEBUFFER, glowLayer.fbo);
-            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, color.depth, 0);
+            attachDepthStencil(color.depth);
 #endif
             if (blurOut.texture)
                 makeBlurOut(w, h); // (the Vita's were let go above: made again at first use)
@@ -3582,6 +3749,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 glFinish();
                 glBindFramebuffer(GL_FRAMEBUFFER, 0);
                 boundFbo = boundProgram = ~0u;
+        cache = {};
+#if !defined(PS2X_NATIVE_VITA)
+        if (vao)
+            glBindVertexArray(vao);
+#endif
                 std::fprintf(stderr, "[native:gl] %u targets made at %ux%u (their first scene) in %.1f ms\n", made, w, h, (native_renderer::nowUs() - start) / 1000.0);
             }
             // Round 55 (SOTC_GL_LAYER_LOG): each target's colour memory.
@@ -3823,8 +3995,12 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         // The region program of `mode` in use (uniform() then finds its uniforms).
         void useRegion(int mode)
         {
+#if defined(PS2X_NATIVE_VITA)
             quadProgram = regionPrograms[mode];
             useProgram(quadProgram);
+#else
+            (void)mode; // (region programs are the Vita's only)
+#endif
         }
 
         // The colour of `from` into `to` (bilinear: reducing blurs it).
@@ -4189,6 +4365,49 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         }
         else if (px98.every)
             px98.pos.erase(id);
+    }
+
+    void Renderer::uploadIndexedMesh(uint64_t id, const native_renderer::Vertex *vertices, uint32_t count, const uint32_t *indices, uint32_t indexCount)
+    {
+        Mesh &mesh = meshes[id];
+        forget(mesh);
+        mesh.used = arenaFrame;
+        mesh.dynamic = false;
+        mesh.skinned = false;
+        mesh.indexed = true;
+        if (mesh.pool >= 0)
+        {
+            poolFree(mesh.pool, mesh.first, mesh.count);
+            mesh.pool = -1;
+        }
+        uint8_t minAlpha = 0xFF, maxAlpha = 0;
+        float lo[3] = {INFINITY, INFINITY, INFINITY}, hi[3] = {-INFINITY, -INFINITY, -INFINITY};
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            minAlpha = std::min(minAlpha, vertices[i].a);
+            maxAlpha = std::max(maxAlpha, vertices[i].a);
+            const float v[3] = {vertices[i].x, vertices[i].y, vertices[i].z};
+            for (int a = 0; a < 3; ++a)
+                lo[a] = std::min(lo[a], v[a]), hi[a] = std::max(hi[a], v[a]);
+        }
+        mesh.minAlpha = count ? minAlpha : 0;
+        mesh.maxAlpha = count ? maxAlpha : 0xFF;
+        mesh.box = count && std::isfinite(lo[0] + lo[1] + lo[2] + hi[0] + hi[1] + hi[2]);
+        std::memcpy(mesh.lo, lo, sizeof(lo));
+        std::memcpy(mesh.hi, hi, sizeof(hi));
+        mesh.first = 0;
+        if (!mesh.buffer)
+            glGenBuffers(1, &mesh.buffer);
+        if (!mesh.indexBuffer)
+            glGenBuffers(1, &mesh.indexBuffer);
+        glBindBuffer(GL_ARRAY_BUFFER, mesh.buffer);
+        uploadStream(GL_ARRAY_BUFFER, vertices, count * sizeof(native_renderer::Vertex), GL_STATIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.indexBuffer);
+        uploadStream(GL_ELEMENT_ARRAY_BUFFER, indices, indexCount * sizeof(uint32_t), GL_STATIC_DRAW);
+        mesh.count = indexCount;
+        mesh.bytes = static_cast<uint64_t>(count) * sizeof(native_renderer::Vertex) + static_cast<uint64_t>(indexCount) * sizeof(uint32_t);
+        meshBytes += mesh.bytes;
+        cache.buffer = ~0u;
     }
 
     // First fit over the pools' free ranges; a new pool when none has room
@@ -4929,6 +5148,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 
     void Renderer::applyUploadList(std::vector<Upload> &list)
     {
+#if !defined(PS2X_NATIVE_VITA)
+        if (vao)
+            glBindVertexArray(vao);
+#endif
         for (const Upload &u : list)
         {
             const uint64_t t0 = h112.log ? native_renderer::nowUs() : 0u;
@@ -4936,6 +5159,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             {
             case Upload::MeshKind:
                 uploadMesh(u.id, reinterpret_cast<const native_renderer::Vertex *>(u.bytes.data()), u.count);
+                break;
+            case Upload::IndexedMeshKind:
+                uploadIndexedMesh(u.id, reinterpret_cast<const native_renderer::Vertex *>(u.bytes.data()), u.count, u.indices.data(),
+                                  static_cast<uint32_t>(u.indices.size()));
                 break;
             case Upload::SkinnedKind:
                 uploadSkinned(u.id, reinterpret_cast<const native_renderer::SkinVertex *>(u.bytes.data()), u.count, u.indices.data(),
@@ -5285,9 +5512,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 std::fprintf(stderr, "[gl:pools] %u pools of %u vertices: %.1f%% free; meshes %u (%.1f MB)\n", live, kPoolVertices,
                              live ? 100.0 * free / (live * double(kPoolVertices)) : 0.0, static_cast<unsigned>(meshes.size()), meshBytes / 1048576.0);
                 const double f = 300.0;
-                std::fprintf(stderr, "[gl:draws] per frame: draws %.0f, GL draw calls %.0f (all passes), merged away %.0f in %.0f ranges + %.0f run copies, "
+                std::fprintf(stderr, "[gl:draws] per frame: draws %.0f, GL draw calls %.0f (all passes), merged away %.0f (ranges %.0f, copies %.0f, instanced %.0f in %.0f batches), "
                                      "no-discard %.0f, discard %.0f (%.0f writing depth), soft cut %.0f, vertex buffer switches %.0f | pools %u, run copies %u (%.0f KB) | program off %.0f, none %.0f\n",
                              drawStats.draws / f, drawStats.calls / f, drawStats.merged / f, drawStats.ranges / f, drawStats.indexed / f,
+                             drawStats.instancedMerged / f, drawStats.instancedDraws / f,
                              drawStats.noDiscard / f, drawStats.cut / f, drawStats.cutDepth / f, drawStats.soft / f, drawStats.bufferSwitches / f, static_cast<unsigned>(pools.size()), static_cast<unsigned>(runs.size()),
                              runVertices * sizeof(native_renderer::Vertex) / 1024.0, drawStats.progOff / f, drawStats.progZero / f);
                 std::fprintf(stderr, "[gl:cut] per frame: vertices through discard %.0f, soft cut %.0f, no cut %.0f, the full program %.0f | the full program's calls by textured 0-5: %.0f %.0f %.0f %.0f %.0f %.0f | depth-writing discards: alpha test %.0f, layer 1's near plane %.0f, least alpha not known: frame mesh %.0f, fresnel %.0f, other %.0f; under 0.03 %.0f | layer 1's near plane: %.0f draws, %.0f wholly past it\n",
@@ -5378,6 +5606,54 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             }
             k = end;
         }
+        if (native_renderer::tuning().glInstancing)
+        {
+            instanceClips.clear();
+            for (size_t k = 0; k < n; )
+            {
+                Planned &leadPlan = plan[k];
+                if (leadPlan.run != 1 || !leadPlan.mesh || leadPlan.mesh->skinned || leadPlan.mesh->dynamic || leadPlan.mesh->indexed || leadPlan.mesh->pool < 0)
+                {
+                    ++k;
+                    continue;
+                }
+                const Draw &leadDraw = drawAt(k);
+                if (leadDraw.state.shadowVolume)
+                {
+                    ++k;
+                    continue;
+                }
+                size_t end = k + 1;
+                constexpr size_t kMaxInstances = 16;
+                while (end < n && (end - k) < kMaxInstances)
+                {
+                    const Planned &oPlan = plan[end];
+                    if (oPlan.run != 1 || oPlan.mesh != leadPlan.mesh || oPlan.tex != leadPlan.tex)
+                        break;
+                    const Draw &oDraw = drawAt(end);
+                    if (!sameState(leadDraw, oDraw))
+                        break;
+                    ++end;
+                }
+                const uint32_t count = static_cast<uint32_t>(end - k);
+                if (count > 1)
+                {
+                    leadPlan.instances = count;
+                    leadPlan.instanceOffset = static_cast<uint32_t>(instanceClips.size());
+                    for (size_t j = k; j < end; ++j)
+                    {
+                        const Draw &d = drawAt(j);
+                        instanceClips.insert(instanceClips.end(), d.clip, d.clip + 16);
+                        if (j > k)
+                        {
+                            plan[j].run = 0;
+                            plan[j].instances = 0;
+                        }
+                    }
+                }
+                k = end;
+            }
+        }
         mergeStats();
     }
 
@@ -5419,6 +5695,18 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 return false;
             if (st.texture && !p.tex)
                 return false;
+            static const bool sortAggressive = []() {
+                const char *e = std::getenv("SOTC_SORT_OPAQUE");
+                return !e || std::atoi(e) != 0;
+            }();
+            if (sortAggressive)
+            {
+                if (st.opacity < 0.95f)
+                    return false;
+                if (st.blend != native_renderer::Blend::Opaque && st.blend != native_renderer::Blend::Normal)
+                    return false;
+                return true;
+            }
             float least = -1.0f; // alpha = texel a x 2 x vertex a / 128 x opacity, at least
             if (p.minAlpha)
             {
@@ -5445,27 +5733,23 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         auto hashState = [&](const Draw &d) -> uint64_t
         {
             const native_renderer::DrawState &x = d.state;
-            uint64_t h = 0xcbf29ce484222325ull;
-            auto mix = [&h](uint64_t v) { h = (h ^ v) * 0x100000001b3ull; h ^= h >> 31; };
-            uint32_t words[16];
-            std::memcpy(words, d.clip, sizeof words);
-            for (uint32_t w : words)
-                mix(w);
-            uint32_t f[6];
-            std::memcpy(f, &x.opacity, sizeof f);
-            for (uint32_t w : f)
-                mix(w);
-            mix(static_cast<uint64_t>(x.clamp) | static_cast<uint64_t>(x.blend) << 8 | static_cast<uint64_t>(x.background) << 16 | static_cast<uint64_t>(x.backgroundFge) << 17 |
-                static_cast<uint64_t>(x.fogged) << 18 | static_cast<uint64_t>(x.writeDepth) << 19 | static_cast<uint64_t>(x.lit) << 20 |
-                static_cast<uint64_t>(x.skinPalette) << 32);
-            if (x.lit)
+            const uint32_t stateBits = static_cast<uint32_t>(x.clamp) |
+                                      (static_cast<uint32_t>(x.blend) << 4) |
+                                      (static_cast<uint32_t>(x.alphaTest) << 8) |
+                                      (x.lit ? (1u << 24) : 0u) |
+                                      (x.writeDepth ? (1u << 25) : 0u);
+            return static_cast<uint64_t>(stateBits);
+        };
+        auto hashClip = [&](const Draw &d) -> uint64_t
             {
-                uint32_t l[32];
-                std::memcpy(l, x.light, sizeof l);
-                for (uint32_t w : l)
-                    mix(w);
-            }
-            return h;
+            uint32_t clipBits[6];
+            clipBits[0] = *reinterpret_cast<const uint32_t *>(&d.clip[0]);
+            clipBits[1] = *reinterpret_cast<const uint32_t *>(&d.clip[5]);
+            clipBits[2] = *reinterpret_cast<const uint32_t *>(&d.clip[10]);
+            clipBits[3] = *reinterpret_cast<const uint32_t *>(&d.clip[12]);
+            clipBits[4] = *reinterpret_cast<const uint32_t *>(&d.clip[13]);
+            clipBits[5] = *reinterpret_cast<const uint32_t *>(&d.clip[14]);
+            return static_cast<uint64_t>(clipBits[0] ^ (clipBits[1] * 31u) ^ (clipBits[2] * 57u) ^ (clipBits[3] * 101u) ^ (clipBits[4] * 151u) ^ (clipBits[5] * 233u));
         };
         size_t k = 0;
         while (k < n)
@@ -5487,8 +5771,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     const Draw &d = drawAt(j);
                     const Mesh *m = plan[j].mesh;
                     const uint64_t where = (m->skinned ? 1ull << 63 : 0ull) | (m->indexed ? 1ull << 62 : 0ull) | (m->dynamic ? 1ull << 61 : 0ull) |
-                                           (static_cast<uint64_t>(static_cast<uint32_t>(m->pool + 1) & 0xFFFFu) << 32) | m->first;
-                    sortKeys.push_back({d.state.texture, hashState(d), where, static_cast<uint32_t>(j)});
+                                           (static_cast<uint64_t>(static_cast<uint32_t>(m->pool + 1) & 0xFFFFu) << 32) | (static_cast<uint64_t>(m->first) << 16) | (m->count & 0xFFFFu);
+                    sortKeys.push_back({d.state.texture, hashState(d), where, hashClip(d), static_cast<uint32_t>(j)});
                 }
                 std::sort(sortKeys.begin(), sortKeys.end(), [](const auto &a, const auto &b)
                 {
@@ -5498,6 +5782,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                         return a.state < b.state;
                     if (a.where != b.where)
                         return a.where < b.where;
+                    if (a.clip != b.clip)
+                        return a.clip < b.clip;
                     return a.k < b.k;
                 });
                 sortOrder.clear();
@@ -6102,6 +6388,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         const bool fewScenes = false;
 #endif
         boundFbo = boundProgram = ~0u;
+        cache = {};
+#if !defined(PS2X_NATIVE_VITA)
+        if (vao)
+            glBindVertexArray(vao);
+#endif
         // (a frame that drew its screen blur on the second picture: the
         // targets back in their places for the next one, whichever way it ends)
         struct PictureBack
@@ -6231,6 +6522,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             phases.arenaUs += native_renderer::nowUs() - arenaStart;
         const bool fogOn = fog.enabled && fog.width > 0.0f;
         bool haveMirror = false, mirrorRead = false;
+        if (native_renderer::tuning().reflections)
+        {
         for (const Draw &d : draws)
         {
             haveMirror = haveMirror || d.state.reflectionSource;
@@ -6247,6 +6540,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         }
         else if (haveMirror)
             ++r93Stats.mirrorDrawn;
+        }
 #if defined(PS2X_NATIVE_VITA)
         // The soft path draws a separate mask that must test the picture's
         // stencil; vitaGL framebuffers cannot share it, so the mask covered
@@ -6323,7 +6617,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     glClearColor(fog.colour[0], fog.colour[1], fog.colour[2], 1.0f);
                 else
                     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-#if defined(PS2X_NATIVE_VITA)
+#if defined(PS2X_NATIVE_VITA) || defined(PS2X_NATIVE_GLES)
                 glClearDepthf(1.0f);
 #else
                 glClearDepth(1.0);
@@ -6435,6 +6729,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 firstAt = static_cast<size_t>(std::partition_point(leaders.begin(), leaders.end(), [&](uint32_t k) { return layerOf(k) < fromOrder; }) - leaders.begin());
                 endAt = static_cast<size_t>(std::partition_point(leaders.begin(), leaders.end(), [&](uint32_t k) { return layerOf(k) < toOrder; }) - leaders.begin());
             }
+            const Mesh *prevFurMesh = nullptr;
+            int furShellCount = 0;
+            const int maxFurShells = native_renderer::tuning().furShells;
             for (size_t li = firstAt; li < endAt; ++li)
             {
                 const size_t k = byLeaders ? leaders[li] : li;
@@ -6485,7 +6782,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     if (reset)
                     {
                         glDepthMask(GL_TRUE);
-#if defined(PS2X_NATIVE_VITA)
+#if defined(PS2X_NATIVE_VITA) || defined(PS2X_NATIVE_GLES)
                         glClearDepthf(1.0f);
 #else
                         glClearDepth(1.0);
@@ -6509,6 +6806,29 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     (skipKind == 7 && planned.mesh->dynamic) || (skipKind >= 100 && skipKind < 200 && d.state.screen && d.state.order == static_cast<uint32_t>(skipKind - 100)) ||
                     (skipKind >= 200 && planned.mesh->dynamic && !planned.mesh->indexed && d.state.order == static_cast<uint32_t>(skipKind - 200)) || (skipKind == 8 && planned.mesh->indexed) || (skipKind == 9 && !planned.mesh->skinned && d.state.order >= 2u && d.state.order <= 3u))
                     continue;
+
+                // Dynamic Fur Shell Clamping (Optimization #1)
+                // When consecutive alpha-tested draws share the same skinned mesh (multi-pass shells),
+                // clamp the layer count to maxFurShells to eliminate TBDR tile overdraw on Mali-G31.
+                if (maxFurShells > 0 && planned.mesh->skinned && d.state.alphaTest && d.state.blend != native_renderer::Blend::Opaque)
+                {
+                    if (planned.mesh == prevFurMesh)
+                    {
+                        ++furShellCount;
+                        if (furShellCount > maxFurShells)
+                            continue;
+                    }
+                    else
+                    {
+                        prevFurMesh = planned.mesh;
+                        furShellCount = 1;
+                    }
+                }
+                else
+                {
+                    prevFurMesh = nullptr;
+                    furShellCount = 0;
+                }
                 Mesh &mesh = *planned.mesh;
                 if (bloomLog() && mesh.dynamic && !mesh.indexed && &target == &color) // (round 65e) the frame's non-indexed per-frame draws
                     std::fprintf(stderr, "[gl:dyn] f=%llu order %u screen %d blend %d tex %llx count %u skinned %d overlay %d mesh %016llx\n",
@@ -6676,8 +6996,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 if (leanOn && !d.state.shadowVolume && textured <= 1 && !d.state.debugColour && !tintThis)
                 {
                     bool cut = true;
-                    if (noDiscard && leastAlpha >= 0.0f && !(guard[0] > 0.0f))
+                    if (noDiscard && !(guard[0] > 0.0f))
+                    {
+                        if (d.state.blend == native_renderer::Blend::Opaque && !(d.state.alphaTest & 1u))
+                            cut = false; // Opaque draws without alpha test never discard: enables Mali FPK & Early-Z
+                        else if (leastAlpha >= 0.0f)
                         cut = !(leastAlpha >= 0.03f) || atSecond || atAllUnder; // the cut-out is at 0.02
+                    }
                     // Round 73 (Tuning glPlainReads): a texture of one level read with no LOD.
                     // Round 98 (Tuning glLod0_98): a mipped texture drawn at level 0
                     // (the draw's maxLod <= 0: the LOD program's lod is 0) read as a
@@ -6754,6 +7079,20 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     }
                 };
                 sendPalette();
+                MainSlot &m = mains[mainSlot];
+                if (m.locInstanceCount >= 0)
+                {
+                    const int count = planned.instances > 1 ? static_cast<int>(planned.instances) : 1;
+                    if (m.lastInstanceCount != count)
+                    {
+                        glUniform1i(m.locInstanceCount, count);
+                        m.lastInstanceCount = count;
+                    }
+                    if (count > 1 && m.locInstanceClips >= 0)
+                    {
+                        glUniform4fv(m.locInstanceClips, count * 4, instanceClips.data() + planned.instanceOffset);
+                    }
+                }
                 uniform4(uClip, d.clip, 4);
                 if (d.state.lit || d.state.fresnel) // read by the vertex program only then
                 {
@@ -6806,7 +7145,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     glStencilOpSeparate(GL_FRONT, GL_KEEP, GL_KEEP, GL_INCR_WRAP);
                     glStencilOpSeparate(GL_BACK, GL_KEEP, GL_KEEP, GL_DECR_WRAP);
 #if !defined(PS2X_NATIVE_VITA)
-                    glEnable(GL_DEPTH_CLAMP); // the GS does not cut at the near plane
+                    // the GS does not cut at the near plane (on ES the clamp
+                    // is GL_EXT_depth_clamp's: init leaves depthClamp off when
+                    // the driver has no such extension, and says so)
+                    if (depthClamp)
+                        glEnable(kDepthClamp);
 #endif
                     drawMesh(mesh, firstVertex);
 #if defined(PS2X_NATIVE_VITA)
@@ -6822,7 +7165,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     if (shadowStats.lastFrame != arenaFrame)
                         shadowStats.lastFrame = arenaFrame, ++shadowStats.framesWithVolumes;
 #if !defined(PS2X_NATIVE_VITA)
-                    glDisable(GL_DEPTH_CLAMP);
+                    if (depthClamp)
+                        glDisable(kDepthClamp);
 #endif
                     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
                     glDisable(GL_STENCIL_TEST);
@@ -7163,7 +7507,18 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     }
                 }
 #endif
-                if (planned.run > 1)
+                if (planned.instances > 1)
+                {
+                    drawStats.instancedDraws += 1;
+                    drawStats.instancedMerged += planned.instances - 1u;
+#if !defined(PS2X_NATIVE_VITA)
+                    glDrawArraysInstanced(GL_TRIANGLES, firstVertex, static_cast<GLsizei>(diagHalf(mesh.count)), static_cast<GLsizei>(planned.instances));
+#else
+                    for (uint32_t inst = 0; inst < planned.instances; ++inst)
+                        drawMesh(mesh, firstVertex);
+#endif
+                }
+                else if (planned.run > 1)
                 {
                     drawStats.merged += planned.run - 1u;
                     ++(planned.runPool >= 0 ? drawStats.indexed : drawStats.ranges);
@@ -7178,7 +7533,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     h112.newVarUs += took;
                     h112.newVarMaxUs = std::max(h112.newVarMaxUs, took);
                 }
-                stats.vertices += planned.run > 1 ? planned.mergedCount : mesh.count;
+                stats.vertices += planned.instances > 1 ? (mesh.count * planned.instances) : (planned.run > 1 ? planned.mergedCount : mesh.count);
                 if (phases.on)
                 {
                     const uint64_t took = native_renderer::nowUs() - callStart;
@@ -7580,7 +7935,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         // (Tuning glGlow98): both in one pass (mode 26) when both are drawn.
         auto glowComposite = [&](const Target &onto)
         {
+#if defined(PS2X_NATIVE_VITA)
             if (native_renderer::tuning().glGlow98 && glow.amountA > 0.0f && glow.amountB > 0.0f && quadPrograms[26])
+#else
+            if (false) // (mode 26 is the Vita's quad program only)
+#endif
             {
                 const float a[4] = {glow.tint[0], glow.tint[1], glow.tint[2], glow.amountA}, b[4] = {glow.tint[0], glow.tint[1], glow.tint[2], glow.amountB};
                 bindTexture(1, glowBlurred->texture);
@@ -8079,12 +8438,15 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         };
         bool haveRefraction = false;
         uint32_t screenCopyOrder = 0;
+        if (native_renderer::tuning().refraction)
+        {
         for (const Draw &d : draws)
         {
             if (d.state.refractionSample)
                 haveRefraction = true;
             if (d.state.screenCopy && !screenCopyOrder)
                 screenCopyOrder = d.state.order;
+        }
         }
         auto doRefraction = [&]
         {
@@ -8921,6 +9283,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 previousTexture = shownTexture;
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
             boundFbo = boundProgram = ~0u;
+        cache = {};
+#if !defined(PS2X_NATIVE_VITA)
+        if (vao)
+            glBindVertexArray(vao);
+#endif
             phaseEnd();
             pendingTexture = shownTexture;
             pendingWidth = w;
@@ -9097,6 +9464,26 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             m_rec.indexArena.count = m_pendingIndexFirst;
         }
         bool canSkin() override { return r->skinProgram != 0; } // set once by init
+        void uploadIndexedMesh(uint64_t id, const native_renderer::Vertex *vertices, uint32_t count, const uint32_t *indices, uint32_t indexCount) override
+        {
+            const auto *from = reinterpret_cast<const uint8_t *>(vertices);
+            Renderer::Upload *u = queue(Renderer::Upload::IndexedMeshKind, id, count, from, count * sizeof(native_renderer::Vertex), indexCount * 4u);
+            if (!u)
+                return;
+            try
+            {
+                u->indices.assign(indices, indices + indexCount);
+            }
+            catch (const std::bad_alloc &)
+            {
+                m_recUploadBytes -= u->bytes.size() + indexCount * 4u;
+                m_rec.uploads.pop_back();
+                ++m_skipped;
+                return;
+            }
+            m_knownMeshes.insert(id);
+            flushIfLarge();
+        }
         void uploadSkinnedMesh(uint64_t id, const native_renderer::SkinVertex *vertices, uint32_t count, const uint32_t *indices, uint32_t indexCount) override
         {
             const auto *from = reinterpret_cast<const uint8_t *>(vertices);
@@ -9172,8 +9559,14 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         void endFrame(uint32_t width, uint32_t height) override
         {
             const bool timed = native_renderer::tuning().frameTiming();
+            const bool threaded = native_renderer::tuning().renderThread;
+            static const bool tripleBuf = [] {
+                const char *e = std::getenv("SOTC_GL_TRIPLE_BUF");
+                return !e || std::atoi(e) != 0;
+            }();
             const uint64_t start = timed ? native_renderer::nowUs() : 0u;
             std::unique_lock<std::mutex> lock(m_mutex);
+            if (!threaded || !tripleBuf)
             waitData(lock);
             // The render thread waits: what it holds changes hands. What the
             // last frame drawn cost goes into this frame's counters.
@@ -9231,20 +9624,29 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     waitIdle(lock);
                 return;
             }
-            std::swap(r->draws, m_rec.draws);
-            std::swap(r->extraMeshes, m_rec.extraMeshes);
-            std::swap(r->arena, m_rec.arena);
-            std::swap(r->indexArena, m_rec.indexArena);
-            std::swap(r->palettes, m_rec.palettes);
-            std::swap(r->blurs, m_rec.blurs);
-            r->uploads.swap(m_rec.uploads); // the render thread left its list empty
-            r->frameMeshes.swap(m_rec.frameMeshes);
-            r->fog = m_rec.fog;
-            r->bloom = m_rec.bloom;
-            r->bloomGameFrame = ps2_stats::vif1Chains.load(std::memory_order_relaxed);
-            r->glow = m_rec.glow;
-            r->dof = m_rec.dof;
-            r->hold = m_rec.hold;
+            if (m_queued && !m_pending.uploads.empty())
+            {
+                m_pending.uploads.insert(m_pending.uploads.end(),
+                                         std::make_move_iterator(m_rec.uploads.begin()),
+                                         std::make_move_iterator(m_rec.uploads.end()));
+                m_rec.uploads.clear();
+            }
+            else
+            {
+                m_pending.uploads.swap(m_rec.uploads);
+            }
+            std::swap(m_pending.draws, m_rec.draws);
+            std::swap(m_pending.extraMeshes, m_rec.extraMeshes);
+            std::swap(m_pending.arena, m_rec.arena);
+            std::swap(m_pending.indexArena, m_rec.indexArena);
+            std::swap(m_pending.palettes, m_rec.palettes);
+            std::swap(m_pending.blurs, m_rec.blurs);
+            m_pending.frameMeshes.swap(m_rec.frameMeshes);
+            m_pending.fog = m_rec.fog;
+            m_pending.bloom = m_rec.bloom;
+            m_pending.glow = m_rec.glow;
+            m_pending.dof = m_rec.dof;
+            m_pending.hold = m_rec.hold;
             m_rec.hold = false;
             clearFrame();
             m_rec.uploads.clear();
@@ -9263,14 +9665,15 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             m_queued = true;
             m_work.notify_one();
             wake105();
-            const bool threaded = native_renderer::tuning().renderThread;
             if (!threaded)
                 waitIdle(lock);
             if (timed)
             {
                 native_renderer::FrameCounters &c = native_renderer::frameCounters();
-                c.waitUs += native_renderer::nowUs() - start;
+                const uint64_t took = native_renderer::nowUs() - start;
+                c.waitUs += took;
                 c.renderThread = threaded;
+                wait143Frame(took);
             }
         }
         void finishFrames() override
@@ -9292,11 +9695,14 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         }
 
     private:
-        // vitaGL is one GL for every thread: the host and this take turns.
+        // vitaGL / Linux SDL2 GLES share one GL for every thread: the host and this take turns.
         struct Lock
         {
 #if defined(PS2X_NATIVE_VITA)
             std::lock_guard<std::recursive_mutex> guard{ps2xVitaGlMutex()};
+#elif defined(PS2X_NATIVE_GLES)
+            Lock() { ps2xLinuxGlLock(); }
+            ~Lock() { ps2xLinuxGlUnlock(); }
 #endif
         };
         static bool noArena()
@@ -9780,9 +10186,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 m_sema105 = sceKernelCreateSema("RenderWake", 0, 0, 1, nullptr);
             }
 #endif
-            if (makeCurrent)
-                makeCurrent();
-            const bool ok = !initThere || r->init();
+            bool ok = false;
+            {
+                Lock gl;
+                if (makeCurrent)
+                    makeCurrent();
+                ok = !initThere || r->init();
+            }
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 m_started = true;
@@ -9839,10 +10249,37 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 }
                 m_queued = false;
                 m_busy = true;
+                m_pickUs = native_renderer::nowUs(); // round 143
                 const uint32_t width = m_width, height = m_height;
                 r->paceSeq = m_paceSeq; // round 110 (read here: a deferred present runs after the next hand-over may begin)
                 const bool uploadsOnly = m_uploadsOnly; // flushUploads (SOTC_GL_FLUSH_WAIT)
                 m_uploadsOnly = false;
+                if (!uploadsOnly)
+                {
+                    std::swap(r->draws, m_pending.draws);
+                    std::swap(r->extraMeshes, m_pending.extraMeshes);
+                    std::swap(r->arena, m_pending.arena);
+                    std::swap(r->indexArena, m_pending.indexArena);
+                    std::swap(r->palettes, m_pending.palettes);
+                    std::swap(r->blurs, m_pending.blurs);
+                    r->uploads.swap(m_pending.uploads);
+                    r->frameMeshes.swap(m_pending.frameMeshes);
+                    r->fog = m_pending.fog;
+                    r->bloom = m_pending.bloom;
+                    r->bloomGameFrame = ps2_stats::vif1Chains.load(std::memory_order_relaxed);
+                    r->glow = m_pending.glow;
+                    r->dof = m_pending.dof;
+                    r->hold = m_pending.hold;
+                    m_pending.draws.clear();
+                    m_pending.extraMeshes.clear();
+                    m_pending.arena.clear();
+                    m_pending.indexArena.clear();
+                    m_pending.palettes.clear();
+                    m_pending.blurs.clear();
+                    m_pending.uploads.clear();
+                    m_pending.frameMeshes.clear();
+                    m_pending.hold = false;
+                }
                 lock.unlock();
                 if (uploadsOnly)
                 {
@@ -9910,6 +10347,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     // the present, still under the GL lock; the next frame
                     // starts when it returns. Its time goes into the counters
                     // under the hand-over's mutex (the game thread reads them there).
+                    sim143(start);
+                    const uint64_t drawUs143 = native_renderer::nowUs() - start;
                     if (r->presentPending)
                     {
                         lock.lock();
@@ -9920,6 +10359,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                         const uint64_t took = r->presentNow();
                         lock.lock();
                         r->stats.presentUs += took;
+                        ++m_w143.presents; // round 143
+                        m_w143.presentUs += took;
+                        m_w143.drawUs += drawUs143;
+                        if (took > 2000u)
+                            ++m_w143.presentsLong, m_w143.presentLongUs += took;
                         m_presenting = false;
                         m_idle.notify_all();
                         lock.unlock();
@@ -9935,6 +10379,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         Renderer *r;
         // The game thread's.
         Recording m_rec;
+        Recording m_pending; // Triple-buffered staging slot (protected by m_mutex)
         native_renderer::IdSet m_knownMeshes, m_knownTextures; // what hasMesh / hasTexture answer
         uint64_t m_meshEvictions = 0;                          // meshEvictions
         size_t m_pendingFirst = 0, m_pendingIndexFirst = 0;
@@ -9995,11 +10440,74 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #if defined(PS2X_NATIVE_VITA)
             ps2x_vita_render_wait(1); // round 132: pace132 (raylib_vita.cpp) sees the game held
 #endif
+            // Round 143 ([wait143], with the frame log): the wait split at the render thread's pick-up
+            // of the frame handed over before (m_pickUs): before it, the render thread was still
+            // presenting the picture before that one (or waking); after it, drawing.
+            const bool diag = native_renderer::tuning().frameTiming();
+            const uint64_t t0 = diag ? native_renderer::nowUs() : 0u;
+            const bool queued = m_queued, presenting = m_presenting;
             while (m_queued || m_busy)
                 m_idle.wait_for(lock, kRecheck);
+            if (diag)
+            {
+                const uint64_t t1 = native_renderer::nowUs();
+                const uint64_t pick = queued ? std::clamp(m_pickUs, t0, t1) : t0;
+                Wait143 &w = m_w143;
+                ++w.waits;
+                w.beforeUs += pick - t0;
+                w.afterUs += t1 - pick;
+                if (queued)
+                    ++(presenting ? w.inPresent : w.queuedOther);
+                if (t1 - t0 >= 1000u)
+                    ++w.over1ms;
+            }
 #if defined(PS2X_NATIVE_VITA)
             ps2x_vita_render_wait(0);
 #endif
+        }
+        // Round 143: the hand-over's account, every 600 frames with the frame log (SOTC_FRAME_LOG).
+        struct Wait143
+        {
+            uint32_t frames = 0, waits = 0, inPresent = 0, queuedOther = 0, over1ms = 0;
+            uint64_t endUs = 0, beforeUs = 0, afterUs = 0;
+            // The render thread's (under m_mutex): presents, the ones over 2 ms (vitaGL's display queue
+            // full: the swap waits for a picture to go on screen), their time.
+            uint32_t presents = 0, presentsLong = 0;
+            uint64_t presentUs = 0, presentLongUs = 0, drawUs = 0;
+        };
+        Wait143 m_w143;
+        uint64_t m_pickUs = 0; // the render thread's last pick-up of a frame (under m_mutex)
+        void wait143Frame(uint64_t endUs)
+        {
+            Wait143 &w = m_w143;
+            w.endUs += endUs;
+            if (++w.frames < 600u)
+                return;
+            const double n = w.frames;
+            std::fprintf(stderr,
+                         "[wait143] %u hand-overs: endFrame %.2f ms a frame, of it waiting %.2f (for the pick-up %.2f, for the drawing %.2f), work %.2f | waits %u "
+                         "(1 ms or more %u; the frame before still queued: behind its present %u, other %u) | render thread: draw %.2f ms a frame, present %.2f "
+                         "(over 2 ms: %u, %.2f ms a frame)\n",
+                         w.frames, w.endUs / n / 1000.0, (w.beforeUs + w.afterUs) / n / 1000.0, w.beforeUs / n / 1000.0, w.afterUs / n / 1000.0,
+                         (static_cast<double>(w.endUs) - static_cast<double>(w.beforeUs + w.afterUs)) / n / 1000.0, w.waits, w.over1ms, w.inPresent, w.queuedOther,
+                         w.presents ? w.drawUs / static_cast<double>(w.presents) / 1000.0 : 0.0, w.presents ? w.presentUs / static_cast<double>(w.presents) / 1000.0 : 0.0,
+                         w.presentsLong, w.presents ? w.presentLongUs / static_cast<double>(w.presents) / 1000.0 : 0.0);
+            m_w143 = Wait143{};
+        }
+        // Round 143, testing (SOTC_WAIT143_RENDER_US=<us>): the render thread's drawing made at least
+        // that long (a busy wait), so that Vita3K's render thread, ~2x the console's speed against the
+        // game thread, meets the display queue and the hand-over as the console's does.
+        static void sim143(uint64_t start)
+        {
+            static const uint64_t us = []
+            {
+                const char *e = ps2_diag::env("SOTC_WAIT143_RENDER_US");
+                return e ? static_cast<uint64_t>(std::max(0, std::atoi(e))) : 0u;
+            }();
+            if (us)
+                while (native_renderer::nowUs() < start + us)
+                {
+                }
         }
         bool m_presenting = false; // round 86: the render thread in a deferred present
         bool m_started = false, m_initOk = false;
