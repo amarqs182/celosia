@@ -462,7 +462,8 @@ namespace
 
 #if !defined(PS2X_NATIVE_VITA)
     // ---- GLSL (macOS) ----
-    const char *kMainVertex = PS2X_GL_VERSION_VERT R"(layout(location = 0) in vec3 aPos;
+    const char *kMainVertex = PS2X_GL_VERSION_VERT R"(#define NOSCREEN 0
+layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec4 aColor;
 layout(location = 3) in vec2 aUV;
@@ -475,7 +476,9 @@ uniform vec4 uInstanceClips[64];
 uniform int uInstanceCount;
 out highp vec4 vUV;        // uv, w, fog x w (the fog factor is linear on the screen, as the GS's)
 out mediump vec4 vColor;
+#if !NOSCREEN
 out highp vec4 vScreen;    // clip x, y, w
+#endif
 void main()
 {
     vec4 c;
@@ -510,7 +513,9 @@ void main()
     // w: the view depth past layer 1's near plane (w - near; linear, so
     // interpolated exactly): a fragment under 0 lies nearer and is cut, as
     // the microcode's clipper cuts the triangle there.
+#if !NOSCREEN
     vScreen = vec4(c.x, c.y, c.w, uGuard.x > 0.0 ? c.w - uGuard.y : 1.0);
+#endif
 }
 )";
 
@@ -595,10 +600,26 @@ void main()
     // variant, for draws whose alpha cannot fall under 0.02). Preceded by
     // "#define BG n" and "#define CUT n" (after the version line).
     const char *kWorldFragment = R"(
+#ifndef NOSCREEN
+#define NOSCREEN 0
+#endif
+#ifndef NOLOD
+#define NOLOD 0
+#endif
+#ifndef SOFT
+#define SOFT 0
+#endif
+#ifndef UNTEX
+#define UNTEX 0
+#endif
 in highp vec4 vUV;
 in mediump vec4 vColor;
+#if !NOSCREEN
 in highp vec4 vScreen;
+#endif
+#if !UNTEX
 uniform sampler2D uTex;
+#endif
 #if BG
 uniform sampler2D uBackground;
 uniform vec4 uFogA;      // start, width, steps, fogged
@@ -613,10 +634,20 @@ void main()
 {
     mediump float textured = uFogColour.w;
     highp float depth = vUV.z;
+#if UNTEX
+    mediump vec4 t = vec4(vec3(128.0 / 255.0), 1.0);
+    mediump float alpha = clamp(vColor.a, 0.0, 1.0);
+#elif NOLOD
+    mediump vec4 t = texture(uTex, vUV.xy);
+    mediump float alpha = clamp(t.a * 2.0 * vColor.a, 0.0, 1.0);
+#else
     mediump float lod = uFogC.w > 0.0 ? clamp(log2(max(depth, 1e-3)) * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
     mediump vec4 t = textured > 0.5 ? textureLod(uTex, vUV.xy, lod) : vec4(vec3(128.0 / 255.0), 1.0); // untextured: the GS takes the vertex colour as is (255 = white)
     mediump float alpha = clamp(t.a * (textured > 0.5 ? 2.0 : 1.0) * vColor.a, 0.0, 1.0);
-#if CUT
+#endif
+#if CUT && SOFT
+    bool away = vScreen.w < 0.0 || alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y);
+#elif CUT
     if (vScreen.w < 0.0) // layer 1 nearer than its near plane (uGuard; such draws take the CUT programs)
         discard;
     if (alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y)) // the cut-out, the GS alpha test's side (DrawState::alphaTest)
@@ -635,7 +666,11 @@ void main()
         rgb = mix(rgb, texture(uBackground, screen).rgb, f);
     }
 #endif
+#if CUT && SOFT
+    oColor = away ? vec4(0.0) : vec4(rgb, alpha);
+#else
     oColor = vec4(rgb, alpha);
+#endif
 }
 )";
 
@@ -2142,6 +2177,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         struct Pool
         {
             GLuint buffer = 0;
+#if !defined(PS2X_NATIVE_VITA)
+            GLuint vao = 0;
+#endif
             uint8_t *mapped = nullptr; // the Vita: its memory, written in place
             // Round 118 (SOTC_RUNSRC118, default 1): the same bytes at the same
             // offsets in cached main RAM (a memory block of its own, outside the
@@ -2438,7 +2476,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         struct DrawCache
         {
             int blend = -1, depthTest = -1, depthMask = -1;
-            GLuint buffer = ~0u, texture = ~0u;
+            GLuint vao = ~0u, buffer = ~0u, texture = ~0u;
         } cache;
         // The main program's per-draw uniforms: locations looked up once, the
         // last values sent (kept across frames: nothing else sets them).
@@ -2500,19 +2538,19 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             const size_t bytes = static_cast<size_t>(count) * 4u * sizeof(float);
             if (m.lastCount[slot] == count)
             {
-                // Word by word, inline (memcmp's library call was ~2.5% of the
-                // render thread on the Vita, round 13): bits, as memcmp.
-                const int n = count * 4;
+                const uint8_t *lp = reinterpret_cast<const uint8_t *>(last);
+                const uint8_t *vp = reinterpret_cast<const uint8_t *>(v);
+                const int qwords = count * 2;
                 int i = 0;
-                for (; i < n; ++i)
+                for (; i < qwords; ++i)
                 {
-                    uint32_t a, b;
-                    std::memcpy(&a, last + i, 4);
-                    std::memcpy(&b, v + i, 4);
+                    uint64_t a, b;
+                    std::memcpy(&a, lp + static_cast<size_t>(i) * 8u, 8);
+                    std::memcpy(&b, vp + static_cast<size_t>(i) * 8u, 8);
                     if (a != b)
                         break;
                 }
-                if (i == n)
+                if (i == qwords)
                     return;
             }
             std::memcpy(last, v, bytes);
@@ -2577,7 +2615,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         Arena<uint32_t> indexArena;
         GLuint arenaBuffers[3] = {};                 // in turn: the GPU may still read the last two
         GLuint indexBuffers[3] = {};                 // the same for indexArena
+#if !defined(PS2X_NATIVE_VITA)
+        GLuint arenaVaos[3] = {};                    // cached plain-vertex VAOs for arenaBuffers
+#endif
         int arenaIndex = 0;
+        std::vector<std::pair<const Mesh *, size_t>> instScratch;
         uint64_t arenaFrame = 0;
         uint32_t paceSeq = 0; // round 110: the frame release this frame started at (native_renderer::g_paceSeq at its hand-over)
         // [gl:tex] every 300 frames (the Vita's log; SOTC_GL_TEX_LOG elsewhere):
@@ -2949,16 +2991,37 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             return head + pose + body;
         }
 
-        static std::string worldFragment(bool bg, bool cut, bool nolod = false, bool soft = false, bool untex = false)
+        static std::string worldFragment(bool bg, bool cut, bool nolod = false, bool soft = false, bool untex = false, bool noscreen = false)
         {
             const std::string defines = std::string("#define BG ") + (bg ? "1" : "0") + "\n#define CUT " + (cut ? "1" : "0") + "\n#define NOLOD " + (nolod ? "1" : "0") +
-                                        "\n#define SOFT " + (soft ? "1" : "0") + "\n#define UNTEX " + (untex ? "1" : "0") + "\n";
+                                        "\n#define SOFT " + (soft ? "1" : "0") + "\n#define UNTEX " + (untex ? "1" : "0") +
+                                        (noscreen ? "\n#define NOSCREEN 1\n" : "\n");
 #if defined(PS2X_NATIVE_VITA)
             return defines + kWorldFragment;
 #else
             return PS2X_GL_VERSION_FRAG + defines + kWorldFragment;
 #endif
         }
+
+#if !defined(PS2X_NATIVE_VITA)
+        static GLuint makePlainVao(GLuint buffer)
+        {
+            GLuint v = 0;
+            glGenVertexArrays(1, &v);
+            glBindVertexArray(v);
+            glBindBuffer(GL_ARRAY_BUFFER, buffer);
+            const GLsizei stride = static_cast<GLsizei>(sizeof(native_renderer::Vertex));
+            glEnableVertexAttribArray(0);
+            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(offsetof(native_renderer::Vertex, x)));
+            glEnableVertexAttribArray(1);
+            glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(offsetof(native_renderer::Vertex, nx)));
+            glEnableVertexAttribArray(2);
+            glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_FALSE, stride, reinterpret_cast<const void *>(offsetof(native_renderer::Vertex, r)));
+            glEnableVertexAttribArray(3);
+            glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(offsetof(native_renderer::Vertex, u)));
+            return v;
+        }
+#endif
 
         bool init()
         {
@@ -3080,7 +3143,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             }
             mains[0].program = mainProgram;
             mains[1].program = skinProgram;
-#if defined(PS2X_NATIVE_VITA)
+#if defined(PS2X_NATIVE_VITA) || defined(PS2X_NATIVE_GLES)
             const int plainKinds = 2; // round 73: the NOLOD ones too
 #else
             const int plainKinds = 1;
@@ -3097,7 +3160,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                                 skinned ? program(skinVertex, fragment.c_str(), {"aPos", "aNormal", "aColor", "aUV", "aBones", "aWeights"})
                                         : program(mainVertex, fragment.c_str(), {"aPos", "aNormal", "aColor", "aUV"});
                         }
-#if defined(PS2X_NATIVE_VITA)
+#if defined(PS2X_NATIVE_VITA) || defined(PS2X_NATIVE_GLES)
             for (int skinned = 0; skinned < 2; ++skinned) // round 75: the cut-out without discard (not BG: see kWorldFragment)
             {
                 if (skinned && !skinProgram)
@@ -3127,20 +3190,30 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                                                                   : program(mainVertex, plainSoft.c_str(), {"aPos", "aNormal", "aColor", "aUV"});
             }
             // Round 92 (Tuning glNoScreen92): the main vertex program without
-            // its screen varying (TEXCOORD2; the uGuard uniform goes with it),
-            // for the lean programs without BG and CUT, whose fragment program
-            // reads no screen position (kWorldFragment's NOSCREEN: the input
-            // not declared, the same arithmetic).
+            // its screen varying (TEXCOORD2 / vScreen), for the lean programs
+            // without BG and CUT, whose fragment program reads no screen position.
             {
                 std::string ns = kMainVertex;
+#if defined(PS2X_NATIVE_VITA)
                 const std::string param = ",\n          float4 out vScreen : TEXCOORD2)";
                 const size_t at = ns.find(param);
                 const size_t line = ns.find("    vScreen = float4(");
                 const size_t lineEnd = line == std::string::npos ? line : ns.find('\n', line);
-                if (at != std::string::npos && lineEnd != std::string::npos)
+                const bool patched = at != std::string::npos && lineEnd != std::string::npos;
+                if (patched)
                 {
                     ns.erase(line, lineEnd + 1 - line);
                     ns.replace(at, param.size(), ")");
+                }
+#else
+                const std::string def0 = "#define NOSCREEN 0\n";
+                const size_t at = ns.find(def0);
+                const bool patched = at != std::string::npos;
+                if (patched)
+                    ns.replace(at, def0.size(), "#define NOSCREEN 1\n");
+#endif
+                if (patched)
+                {
                     const GLuint nsVertex = compile(GL_VERTEX_SHADER, ns.c_str());
                     const std::string nsSkin = skinProgram ? skinnedVertex(ns.c_str()) : std::string();
                     const GLuint nsSkinVertex = nsSkin.empty() ? 0 : compile(GL_VERTEX_SHADER, nsSkin.c_str());
@@ -3149,7 +3222,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                         {
                             if (skinned && !nsSkinVertex)
                                 continue;
-                            const std::string fragment = "#define NOSCREEN 1\n" + worldFragment(false, false, plain == 1, false, plain == 2);
+                            const std::string fragment = worldFragment(false, false, plain == 1, false, plain == 2, true);
                             mains[(plain == 2 ? kUntexNoScreenSlot : kNoScreenSlot + plain * 2) + skinned].program =
                                 skinned ? program(nsSkinVertex, fragment.c_str(), {"aPos", "aNormal", "aColor", "aUV", "aBones", "aWeights"})
                                         : program(nsVertex, fragment.c_str(), {"aPos", "aNormal", "aColor", "aUV"});
@@ -3909,6 +3982,14 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             glUniform4fv(uniform(false, "uA"), 1, a ? a : zero);
             glUniform4fv(uniform(false, "uB"), 1, b ? b : zero);
             glUniform4fv(uniform(false, "uQuad"), 1, quadParams ? quadParams : zero);
+#if !defined(PS2X_NATIVE_VITA)
+            if (vao && cache.vao != vao)
+            {
+                glBindVertexArray(vao);
+                cache.vao = vao;
+                cache.buffer = ~0u;
+            }
+#endif
             glBindBuffer(GL_ARRAY_BUFFER, corners ? blurBuffer : quadBuffer);
             glEnableVertexAttribArray(0);
             glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
@@ -4517,9 +4598,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 if (pending)
                     continue;
                 glDeleteBuffers(1, &pool.buffer);
+#if !defined(PS2X_NATIVE_VITA)
+                if (pool.vao)
+                    glDeleteVertexArrays(1, &pool.vao);
+#endif
                 poolSourceFree(pool); // round 118
                 pool = Pool{};
-                cache.buffer = ~0u;
+                cache.vao = cache.buffer = ~0u;
             }
     }
 
@@ -5681,7 +5766,6 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 return least >= 1.0f;
             };
             constexpr size_t kMaxInstances = 16;
-            std::vector<std::pair<const Mesh *, size_t>> instScratch;
             for (size_t k = 0; k < n; )
             {
                 Planned &leadPlan = plan[k];
@@ -6915,10 +6999,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 glDepthMask(GL_TRUE);
                 shadowAmount = 0.0f;
                 cache.blend = cache.depthTest = cache.depthMask = -1;
-                cache.buffer = cache.texture = ~0u;
+                cache.vao = cache.buffer = cache.texture = ~0u;
             };
             cache.blend = cache.depthTest = cache.depthMask = -1;
-            cache.buffer = cache.texture = ~0u;
+            cache.vao = cache.buffer = cache.texture = ~0u;
             const bool leanOn = native_renderer::tuning().glLeanPrograms, noDiscard = native_renderer::tuning().glNoDiscard;
             const bool untex98 = native_renderer::tuning().glUntex98; // round 98
             const bool opaque88 = native_renderer::tuning().glOpaque88; // round 88
@@ -6929,7 +7013,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             // bloom's mask: keepAlpha) or not read again (the shadows' and the
             // bloom's masks overwrite all of it first; copies, fog, mirror and
             // display read the colour only).
-#if defined(PS2X_NATIVE_VITA)
+#if defined(PS2X_NATIVE_VITA) || defined(PS2X_NATIVE_GLES)
             const bool softOn = native_renderer::tuning().glSoftCut && &target != &glowLayer;
 #else
             const bool softOn = false;
@@ -7118,31 +7202,64 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 const GLint firstVertex = runCopy ? static_cast<GLint>(planned.runFirst) : (mesh.dynamic || mesh.pool >= 0 ? static_cast<GLint>(mesh.first) : 0);
                 const GLuint vertexBuffer = runCopy ? pools[static_cast<size_t>(planned.runPool)].buffer
                                                     : (mesh.dynamic ? arenaBuffers[arenaIndex] : (mesh.pool >= 0 ? pools[static_cast<size_t>(mesh.pool)].buffer : mesh.buffer));
-                if (vertexBuffer != cache.buffer) // the frame's dynamic meshes share one buffer, the kept ones a few: set once
+#if !defined(PS2X_NATIVE_VITA)
+                const bool plainPoolOrArena = !skinned && !mesh.indexed && (runCopy || mesh.dynamic || mesh.pool >= 0);
+                if (plainPoolOrArena)
                 {
-                    cache.buffer = vertexBuffer;
-                    ++drawStats.bufferSwitches;
-                    glBindBuffer(GL_ARRAY_BUFFER, vertexBuffer);
-                    glEnableVertexAttribArray(0);
-                    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(base + offsetof(native_renderer::Vertex, x)));
-                    glEnableVertexAttribArray(1);
-                    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(base + offsetof(native_renderer::Vertex, nx)));
-                    glEnableVertexAttribArray(2);
-                    glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_FALSE, stride, reinterpret_cast<const void *>(base + offsetof(native_renderer::Vertex, r)));
-                    glEnableVertexAttribArray(3);
-                    glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(base + offsetof(native_renderer::Vertex, u)));
-                    for (GLuint i = 4; i < 6; ++i)
+                    GLuint &targetVao = runCopy ? pools[static_cast<size_t>(planned.runPool)].vao
+                                                : (mesh.dynamic ? arenaVaos[arenaIndex] : pools[static_cast<size_t>(mesh.pool)].vao);
+                    if (!targetVao)
                     {
-                        if (!skinned)
-                        {
-                            glDisableVertexAttribArray(i);
-                            continue;
-                        }
-                        glEnableVertexAttribArray(i);
-                        glVertexAttribPointer(i, 3, GL_FLOAT, GL_FALSE, stride,
-                                              reinterpret_cast<const void *>(i == 4 ? offsetof(native_renderer::SkinVertex, bone) : offsetof(native_renderer::SkinVertex, weight)));
+                        targetVao = makePlainVao(vertexBuffer);
+                        cache.vao = targetVao;
+                        cache.buffer = vertexBuffer;
+                        ++drawStats.bufferSwitches;
+                    }
+                    else if (cache.vao != targetVao)
+                    {
+                        glBindVertexArray(targetVao);
+                        cache.vao = targetVao;
+                        cache.buffer = vertexBuffer;
+                        ++drawStats.bufferSwitches;
                     }
                 }
+                else
+                {
+                    if (vao && cache.vao != vao)
+                    {
+                        glBindVertexArray(vao);
+                        cache.vao = vao;
+                        cache.buffer = ~0u;
+                    }
+#endif
+                    if (vertexBuffer != cache.buffer) // the frame's dynamic meshes share one buffer, the kept ones a few: set once
+                    {
+                        cache.buffer = vertexBuffer;
+                        ++drawStats.bufferSwitches;
+                        glBindBuffer(GL_ARRAY_BUFFER, vertexBuffer);
+                        glEnableVertexAttribArray(0);
+                        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(base + offsetof(native_renderer::Vertex, x)));
+                        glEnableVertexAttribArray(1);
+                        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(base + offsetof(native_renderer::Vertex, nx)));
+                        glEnableVertexAttribArray(2);
+                        glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_FALSE, stride, reinterpret_cast<const void *>(base + offsetof(native_renderer::Vertex, r)));
+                        glEnableVertexAttribArray(3);
+                        glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(base + offsetof(native_renderer::Vertex, u)));
+                        for (GLuint i = 4; i < 6; ++i)
+                        {
+                            if (!skinned)
+                            {
+                                glDisableVertexAttribArray(i);
+                                continue;
+                            }
+                            glEnableVertexAttribArray(i);
+                            glVertexAttribPointer(i, 3, GL_FLOAT, GL_FALSE, stride,
+                                                  reinterpret_cast<const void *>(i == 4 ? offsetof(native_renderer::SkinVertex, bone) : offsetof(native_renderer::SkinVertex, weight)));
+                        }
+                    }
+#if !defined(PS2X_NATIVE_VITA)
+                }
+#endif
                 Texture *tex = planned.tex;
                 const int textured = (skipKind == 4 && mesh.skinned) ? 0 : d.state.previousFrame ? 5 : d.state.reflectionSample ? 2 : (d.state.refractionSample ? 3 : (d.state.screenCopy ? 4 : (tex ? 1 : 0)));
                 const bool vertexFog = fog.vertexFog && !d.state.screen && (!d.state.background || bgFog || (d.state.backgroundFge && bgFgeOn()));
@@ -7891,6 +8008,14 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     }
                 }
             }
+#if !defined(PS2X_NATIVE_VITA)
+            if (vao && cache.vao != vao)
+            {
+                glBindVertexArray(vao);
+                cache.vao = vao;
+                cache.buffer = ~0u;
+            }
+#endif
             for (GLuint i = 1; i < 6; ++i)
                 glDisableVertexAttribArray(i);
         };
