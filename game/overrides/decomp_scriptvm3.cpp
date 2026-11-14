@@ -247,7 +247,13 @@ namespace decomp_scriptvm3
         thisSubThread(rdram, ctx, runtime, 0x013CFC30u, 0x013CFC38u);
         move(ctx, 16, 2); // s0 = the object
         move(ctx, 4, 16);
-        callGuest(rdram, ctx, runtime, jalTarget(rdram, 0x013CFC3Cu), 0x013CFC44u, kWorkStack); // GetCharacterClass
+        {
+            const uint32_t t = jalTarget(rdram, 0x013CFC3Cu);
+            if (t == kGetCharacterClass)
+                sotc_decomp::characterClassFast(rdram, ctx, runtime, GPR_U32(ctx, 16), 0x013CFC44u, kWorkStack);
+            else
+                callGuest(rdram, ctx, runtime, t, 0x013CFC44u, kWorkStack); // GetCharacterClass
+        }
         li(ctx, 5, 0x014659C0u);
         move(ctx, 4, 16);
         move(ctx, 18, 2); // s2 = the character class
@@ -272,7 +278,13 @@ namespace decomp_scriptvm3
         else
             callGuest(rdram, ctx, runtime, jalTarget(rdram, 0x013CFC50u), 0x013CFC58u, kWorkStack); // ExecCharaGeometry
         move(ctx, 4, 16);
-        callGuest(rdram, ctx, runtime, jalTarget(rdram, 0x013CFC58u), 0x013CFC60u, kWorkStack); // GetLayoutClass
+        {
+            const uint32_t t = jalTarget(rdram, 0x013CFC58u);
+            if (t == kGetLayoutClass)
+                sotc_decomp::layoutClassFast(rdram, ctx, runtime, GPR_U32(ctx, 16), 0x013CFC60u, kWorkStack);
+            else
+                callGuest(rdram, ctx, runtime, t, 0x013CFC60u, kWorkStack); // GetLayoutClass
+        }
         SET_GPR_S32(ctx, 4, (int32_t)READ32(GPR_U32(ctx, 2) + 0x134u)); // the layout's area
         callGuest(rdram, ctx, runtime, kAreaExist, 0x013CFC68u, kWorkStack);
         WRITE8(GPR_U32(ctx, 18) + 0x539u, (uint8_t)GPR_U32(ctx, 2));
@@ -342,7 +354,13 @@ namespace decomp_scriptvm3
         thisSubThread(rdram, ctx, runtime, 0x013CF538u, 0x013CF540u);
         move(ctx, 17, 2); // s1 = the object
         move(ctx, 4, 17);
-        callGuest(rdram, ctx, runtime, jalTarget(rdram, 0x013CF544u), 0x013CF54Cu, kWorkStack); // GetCharacterClass
+        {
+            const uint32_t t = jalTarget(rdram, 0x013CF544u);
+            if (t == kGetCharacterClass)
+                sotc_decomp::characterClassFast(rdram, ctx, runtime, GPR_U32(ctx, 17), 0x013CF54Cu, kWorkStack);
+            else
+                callGuest(rdram, ctx, runtime, t, 0x013CF54Cu, kWorkStack); // GetCharacterClass
+        }
         move(ctx, 16, 2); // s0 = the character class
         callGuest(rdram, ctx, runtime, kGetCamera, 0x013CF554u, kWorkStack);
         li(ctx, 3, kGlobals);
@@ -356,12 +374,24 @@ namespace decomp_scriptvm3
         if (GPR_U64(ctx, 2) == 0u)
             goto l670;
         move(ctx, 4, 17);
-        callGuest(rdram, ctx, runtime, jalTarget(rdram, 0x013CF574u), 0x013CF57Cu, kWorkStack); // GetCharacterClass
+        {
+            const uint32_t t = jalTarget(rdram, 0x013CF574u);
+            if (t == kGetCharacterClass)
+                sotc_decomp::characterClassFast(rdram, ctx, runtime, GPR_U32(ctx, 17), 0x013CF57Cu, kWorkStack);
+            else
+                callGuest(rdram, ctx, runtime, t, 0x013CF57Cu, kWorkStack); // GetCharacterClass
+        }
         SET_GPR_S32(ctx, 3, (int32_t)READ32(GPR_U32(ctx, 2) + 0x1170u));
         if (GPR_U64(ctx, 3) == 0u)
             goto l648;
         move(ctx, 4, 17);
-        callGuest(rdram, ctx, runtime, jalTarget(rdram, 0x013CF588u), 0x013CF590u, kWorkStack); // GetLayoutClass
+        {
+            const uint32_t t = jalTarget(rdram, 0x013CF588u);
+            if (t == kGetLayoutClass)
+                sotc_decomp::layoutClassFast(rdram, ctx, runtime, GPR_U32(ctx, 17), 0x013CF590u, kWorkStack);
+            else
+                callGuest(rdram, ctx, runtime, t, 0x013CF590u, kWorkStack); // GetLayoutClass
+        }
         SET_GPR_S32(ctx, 4, (int32_t)READ32(GPR_U32(ctx, 2) + 0x134u));
         callGuest(rdram, ctx, runtime, kAreaExist, 0x013CF598u, kWorkStack);
         {
@@ -374,7 +404,13 @@ namespace decomp_scriptvm3
         if (GPR_U64(ctx, 3) == GPR_U64(ctx, 2))
             goto l648;
         move(ctx, 4, 17);
-        callGuest(rdram, ctx, runtime, jalTarget(rdram, 0x013CF5ACu), 0x013CF5B4u, kWorkStack); // GetLayoutClass
+        {
+            const uint32_t t = jalTarget(rdram, 0x013CF5ACu);
+            if (t == kGetLayoutClass)
+                sotc_decomp::layoutClassFast(rdram, ctx, runtime, GPR_U32(ctx, 17), 0x013CF5B4u, kWorkStack);
+            else
+                callGuest(rdram, ctx, runtime, t, 0x013CF5B4u, kWorkStack); // GetLayoutClass
+        }
         // The layout's geometry parent's type: 13 / 9 / 22 -> 1, else 0.
         move(ctx, 4, 2);
         SET_GPR_U64(ctx, 2, 0u);
@@ -651,12 +687,12 @@ namespace decomp_scriptvm3
     inline bool controlTarget(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t sp, uint32_t ra0, uint32_t ra1, uint32_t ra2,
                               uint32_t ra3)
     {
-        callGuest(rdram, ctx, runtime, kGetCharacterClass, ra0, sp);
+        sotc_decomp::characterClassFast(rdram, ctx, runtime, GPR_U32(ctx, 4), ra0, sp);
         move(ctx, 4, 16);
         if (GPR_U64(ctx, 2) != 0u)
             return false;
         SET_GPR_U64(ctx, 16, 0u);
-        callGuest(rdram, ctx, runtime, kGetLayoutClass, ra1, sp);
+        sotc_decomp::layoutClassFast(rdram, ctx, runtime, GPR_U32(ctx, 4), ra1, sp);
         SET_GPR_S32(ctx, 3, (int32_t)READ32(GPR_U32(ctx, 2) + 0x124u));
         SET_GPR_S32(ctx, 4, (int32_t)(GPR_U32(ctx, 2) + 0xC0u));
         if (GPR_U64(ctx, 3) != 0u)
@@ -668,7 +704,7 @@ namespace decomp_scriptvm3
             move(ctx, 4, 2);
             if (chara)
             {
-                callGuest(rdram, ctx, runtime, kGetCharacterClass, ra3, sp);
+                sotc_decomp::characterClassFast(rdram, ctx, runtime, GPR_U32(ctx, 4), ra3, sp);
                 move(ctx, 16, 2);
             }
         }

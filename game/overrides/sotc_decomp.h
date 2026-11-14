@@ -910,8 +910,10 @@ namespace sotc_decomp
         constexpr explicit NativeCount(const char *n) : name(n) {}
         inline __attribute__((always_inline)) void hit()
         {
+#if !SOTC_RELEASE
             if (__builtin_expect(calls++ == 0u, 0))
                 enrol();
+#endif
         }
         void enrol();
     };
@@ -994,3 +996,63 @@ namespace sotc_decomp
 // A context switch that returns into the other context (sleep).
 #define SOTC_DECOMP_SWITCH_ONCE_FUNCTION(address, name, fn) \
     static const ::sotc_decomp::Registrar sotc_decomp_registrar_##name{address, #name, fn, false, true, true}
+
+namespace sotc_decomp
+{
+    // Inline plain-type lookups for GetCharacterClass (0x010C0A70) and GetLayoutClass (0x010F1A20).
+    // Matches decomp_walk.cpp's verified plain-type table while preserving worker spies and non-plain fallbacks.
+    inline uint32_t characterClassFast(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t object, uint32_t ra, uint32_t sp)
+    {
+        if (!ps2_worker::isShell(runtime) && object != 0u && object < PS2_RAM_SIZE - 0x100u)
+        {
+            const uint8_t type = rdram[object + 8u];
+            const uint32_t res = (type == 9u || type == 0x16u) ? (object + 0x90u) : 0u;
+            SET_GPR_S32(ctx, 2, static_cast<int32_t>(res));
+            return res;
+        }
+        SET_GPR_S32(ctx, 4, static_cast<int32_t>(object));
+        callGuest(rdram, ctx, runtime, 0x010C0A70u, ra, sp);
+        return GPR_U32(ctx, 2);
+    }
+    inline bool layoutClassPlainOnly(const uint8_t *rdram, uint32_t object, uint32_t &out)
+    {
+        if (object == 0u || object >= PS2_RAM_SIZE - 0x100u)
+            return false;
+        const uint32_t index = static_cast<uint32_t>(rdram[object + 8u]) - 9u;
+        if (index >= 0xEu)
+        {
+            out = 0u;
+            return true;
+        }
+        uint32_t target;
+        std::memcpy(&target, rdram + 0x01194070u + index * 4u, 4);
+        if (target == 0x010F1A58u)
+        {
+            out = object + 0x20u;
+            return true;
+        }
+        if (target == 0x010F1A98u)
+        {
+            out = object + 0x90u;
+            return true;
+        }
+        if (target == 0x010F1AA0u)
+        {
+            out = 0u;
+            return true;
+        }
+        return false;
+    }
+    inline uint32_t layoutClassFast(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t object, uint32_t ra, uint32_t sp)
+    {
+        uint32_t res = 0u;
+        if (!ps2_worker::isShell(runtime) && layoutClassPlainOnly(rdram, object, res))
+        {
+            SET_GPR_S32(ctx, 2, static_cast<int32_t>(res));
+            return res;
+        }
+        SET_GPR_S32(ctx, 4, static_cast<int32_t>(object));
+        callGuest(rdram, ctx, runtime, 0x010F1A20u, ra, sp);
+        return GPR_U32(ctx, 2);
+    }
+}

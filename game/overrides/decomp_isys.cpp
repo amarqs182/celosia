@@ -441,7 +441,7 @@ namespace decomp_isys
         SET_GPR_U32(ctx, 5, group);
         SET_GPR_U64(ctx, 6, 0u);
         SET_GPR_U64(ctx, 7, 0u);
-        sotc_decomp::callGuest(rdram, ctx, runtime, kAdd, 0x001C0108u, sp);
+        sotc_decomp::callNative(rdram, ctx, runtime, kAdd, &addGroup, 0x001C0108u, sp);
         SET_GPR_U64(ctx, 16, s0);
         SET_GPR_U64(ctx, 17, s1);
         const uint32_t counter = (m.u32(kDl + 0x18u) << 2) + kDl + 0x28u;

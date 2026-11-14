@@ -5095,6 +5095,18 @@ namespace sotc_native
         }
         std::fprintf(stderr, "[gcov] frame %llu: %u .gcda files written\n", static_cast<unsigned long long>(frame), static_cast<unsigned>(files));
     }
+#elif defined(__linux__)
+    extern "C" void __gcov_dump(void) __attribute__((weak));
+    void gcovDump(uint64_t frame)
+    {
+        static const uint64_t every = std::getenv("SOTC_GCOV_DUMP_FRAME") ? std::strtoull(std::getenv("SOTC_GCOV_DUMP_FRAME"), nullptr, 10) : 0u;
+        static bool dumped = false;
+        if (!every || dumped || frame < every || !__gcov_dump)
+            return;
+        dumped = true;
+        __gcov_dump();
+        std::fprintf(stderr, "[gcov] frame %llu: __gcov_dump() complete\n", static_cast<unsigned long long>(frame));
+    }
 #else
     void gcovDump(uint64_t) {}
 #endif
@@ -5985,7 +5997,8 @@ namespace sotc_native
             char104::frameTick(frame);     // round 104
             sotc_decomp::g_gameFrame = frame;
 #if defined(__GNUC__)
-            if (frame > 0 && frame % 600 == 0 && __gcov_dump)
+            static const bool hasGcovTarget = std::getenv("SOTC_GCOV_DUMP_FRAME") && std::strtoull(std::getenv("SOTC_GCOV_DUMP_FRAME"), nullptr, 10) > 0u;
+            if (!hasGcovTarget && frame > 0 && frame % 600 == 0 && __gcov_dump)
                 __gcov_dump();
 #endif
             sotc_decomp::fastStatsTick(frame);
@@ -6766,6 +6779,7 @@ namespace sotc_native
     void gsRegHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const uint32_t ra = GPR_U32(ctx, 31);
+#if !SOTC_RELEASE
         gsRegCensus(ra);
         // SOTC_LOG_GSREG=<reg>: who writes that register, in which layer, with what (debugging).
         static const int logReg = std::getenv("SOTC_LOG_GSREG") ? static_cast<int>(std::strtol(std::getenv("SOTC_LOG_GSREG"), nullptr, 0)) : -1;
@@ -6776,12 +6790,18 @@ namespace sotc_native
                 std::fprintf(stderr, "[gsreg-log] ra %08x layer %u value %016llx\n", ra, g_layers.empty() ? 99u : g_layers.back(),
                              static_cast<unsigned long long>(GPR_U64(ctx, 5)));
         }
+#endif
         if (ra >= 0x0109E2A0u && ra < 0x0109FB08u)
             g_bloomRan = true;
         if (ra >= 0x01089BF8u && ra < 0x0108A0E0u)
         {
             // feedbackBlur / feedbackBlur2 (layer 29): the display buffer, the
             // last frame shown, laid over the new one (FIX or vertex alpha).
+            if (!native_renderer::tuning().feedback)
+            {
+                g_gsReg(rdram, ctx, runtime);
+                return;
+            }
             syncFrame(rdram);
             hookJoin(hookjobs::k_gsreg_feedback);
             // SOTC_FEEDBACK_LOG=1 (debugging, round 12): the frames that use it.
@@ -6793,11 +6813,6 @@ namespace sotc_native
                     std::fprintf(stderr, "[feedback] frame %llu ra %08x a0 %02x a1 %016llx\n", (unsigned long long)g_frame, ra, GPR_U32(ctx, 4) & 0xFFu,
                                  (unsigned long long)GPR_U64(ctx, 5));
                 lastLogged = g_frame;
-            }
-            if (!native_renderer::tuning().feedback)
-            {
-                g_gsReg(rdram, ctx, runtime);
-                return;
             }
             const uint32_t requested = g_requested;
             g_requested = kPreviousFrame;

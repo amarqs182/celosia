@@ -960,6 +960,35 @@ if(PS2X_IS_LINUX AND PS2X_IS_AARCH64_TARGET)
         endforeach()
     endif()
 
+    set(PS2X_LINUX_PGO "OFF" CACHE STRING "Linux/aarch64 PGO mode: OFF, gen, or collected profile directory")
+    set(PS2X_LINUX_PGO_OPTS "")
+    file(TO_NATIVE_PATH "${CMAKE_BINARY_DIR}" PS2X_LINUX_PGO_PREFIX)
+    if(PS2X_LINUX_PGO STREQUAL "gen")
+        message(STATUS "Linux/aarch64: PGO generate (runtime + overrides + lean_part_t*, prefix=${PS2X_LINUX_PGO_PREFIX})")
+        set(PS2X_LINUX_PGO_OPTS
+            -fprofile-generate=/tmp/sotc_pgo/
+            -fprofile-prefix-path=${PS2X_LINUX_PGO_PREFIX}
+            -fprofile-update=single
+            -fno-profile-values
+            -fno-profile-reorder-functions)
+        list(APPEND PS2X_LINUX_OVERRIDE_OPTS ${PS2X_LINUX_PGO_OPTS})
+        target_compile_options(ps2_runtime PRIVATE ${PS2X_LINUX_PGO_OPTS})
+        target_link_options(ps2EntryRunner PRIVATE -fprofile-generate=/tmp/sotc_pgo/ -Wl,-u,__gcov_dump)
+    elseif(NOT PS2X_LINUX_PGO STREQUAL "" AND NOT PS2X_LINUX_PGO STREQUAL "OFF")
+        get_filename_component(PS2X_LINUX_PGO_USE_DIR "${PS2X_LINUX_PGO}" ABSOLUTE)
+        message(STATUS "Linux/aarch64: PGO use from ${PS2X_LINUX_PGO_USE_DIR} (prefix=${PS2X_LINUX_PGO_PREFIX})")
+        set(PS2X_LINUX_PGO_OPTS
+            -fprofile-use=${PS2X_LINUX_PGO_USE_DIR}
+            -fprofile-prefix-path=${PS2X_LINUX_PGO_PREFIX}
+            -fprofile-partial-training
+            -fprofile-correction
+            -fno-profile-values
+            -fno-profile-reorder-functions
+            -fno-vpt)
+        list(APPEND PS2X_LINUX_OVERRIDE_OPTS ${PS2X_LINUX_PGO_OPTS})
+        target_compile_options(ps2_runtime PRIVATE ${PS2X_LINUX_PGO_OPTS})
+    endif()
+
     get_target_property(PS2X_RUNNER_SOURCES ps2EntryRunner SOURCES)
     foreach(PS2X_SOURCE IN LISTS PS2X_RUNNER_SOURCES)
         if(PS2X_SOURCE MATCHES "/overrides/lean_part[0-9]+\\.cpp$")
