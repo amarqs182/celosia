@@ -445,7 +445,7 @@ namespace native_renderer
         // read back for each tile it touches). The same positions, the same
         // fragment arithmetic. SOTC_GL_NOSCREEN92=0/1 (default 1 on the
         // Vita); A/B name `noscreen92` (its window turns it off; r92all too).
-#if defined(__vita__)
+#if defined(__vita__) || defined(__linux__)
         bool glNoScreen92 = true;
 #else
         bool glNoScreen92 = false;
@@ -577,7 +577,7 @@ namespace native_renderer
         // at AREF or over only to be cut). Differs only where an earlier
         // surface lies at exactly the same depth as the draw's own cut
         // pixels. SOTC_GL_AT98=0/1; A/B `at98` (r98all too).
-#if defined(__vita__)
+#if defined(__vita__) || defined(__linux__)
         bool glAt98 = true;
 #else
         bool glAt98 = false;
@@ -588,7 +588,7 @@ namespace native_renderer
         // read) before dropping it for the untextured values; now through
         // programs with those values alone (the same arithmetic after them).
         // SOTC_GL_UNTEX98=0/1; A/B `untex98` (r98all too).
-#if defined(__vita__)
+#if defined(__vita__) || defined(__linux__)
         bool glUntex98 = true;
 #else
         bool glUntex98 = false;
@@ -621,7 +621,7 @@ namespace native_renderer
         // psoft98: the plain (one-level read) draws get round 75's cut-out
         // without discard too (only the LOD programs had it).
         // SOTC_GL_PSOFT98=0/1; A/B `psoft98`. (All in r98all.)
-#if defined(__vita__)
+#if defined(__vita__) || defined(__linux__)
         bool glNoFog98 = true;
         bool glLod0_98 = true;
         bool glPlainSoft98 = true;
