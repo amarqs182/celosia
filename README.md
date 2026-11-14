@@ -30,6 +30,7 @@ it talks to (DMA, IOP, SPU2) is reimplemented as host code.
 | New Game, intro, riding Agro, gameplay | ✅ |
 | Performance, Mac (M4 Pro) | 60 fps, drawn at 1536×1344 |
 | PS Vita | ✅ builds and runs (18–25 fps in Vita3K's intro); fidelity and speed in progress |
+| R36S (RK3326, aarch64) | ✅ builds and runs (`29.40 FPS` median on 1:1 Shrine gameplay benchmark, `59.8–60.1 FPS` in menus/light scenes; GLES 3.2 via ARM libmali over SDL2 KMSDRM; [docs/r36s_port.md](docs/r36s_port.md), [SOTC_OPTIMIZATION_LOG.md](SOTC_OPTIMIZATION_LOG.md)) |
 | Decompilation | started: software doubles rewritten and proven ([docs/decomp.md](docs/decomp.md)) |
 
 ## Requirements
@@ -549,8 +550,11 @@ xychart-beta
 | `SOTC_INPUT_REPLAY=<file>` | (input replay) plays a recording back: the recorded timer count, pad state, disc read timing and VBlank count in each logic frame (any frame rate); `[rstate]` lines to compare; `tools/replay_compare.sh <file>` does the three replays and the page |
 | `SOTC_REPLAY_SHOTS=-6,-3,0,3,6`, `SOTC_REPLAY_SHOT_TICKS=t,t,...` | (input replay) the frames pictured: offsets around each mark, and absolute ticks; the Mac saves `snap_<tick>.png` (and `native_snap_<tick>.png` with `SOTC_NATIVE=2`) in `PS2X_SNAPSHOT_DIR`, the Vita holds the frame `SOTC_REPLAY_HOLD_MS` (1500) with `[replay] hold <tick>` in the log for a window capture (`SOTC_REPLAY_FB=1`: the display buffer to a file too, console only) |
 | `SOTC_REPLAY_EXIT=1`, `SOTC_REPLAY_TRACE=1`, `SOTC_INPUT_STATE_EVERY=<n>` | (input replay) leave at the recording's end; a `[rtick]` line per frame; the state check every n frames (30) |
-| `SOTC_FPS_CAP=n` | (R36S / Linux SDL2, default `60`, `0` uncapped) software frame limiter using `CLOCK_MONOTONIC` / `clock_nanosleep` in `EndDrawing`; paired with `PS2X_SWAP_INTERVAL` defaulting to `0` on Linux (VSync off) so KMSDRM / libmali does not stall below target FPS |
-| `SOTC_CAM_INVERT_X=0/1` | (R36S / Linux SDL2, default `1`) invert the gamepad right-stick horizontal axis before PS2 pad packing so right-stick right pans the camera right (`0` restores original PS2 SCUS-97472 horizontal camera; menus and Y axis unchanged) |
+| `PS2X_SWAP_INTERVAL=0/1` | (R36S / Linux SDL2, default `0`) passes `0` or `1` to `SDL_GL_SetSwapInterval` (`1` to lock to VSync). Measured on RK3326 KMSDRM + ARM libmali: `SDL_GL_SetSwapInterval(0)` returns `0` while `SDL_GL_GetSwapInterval()` stays `1` (`actual=1`, ~16.3–18.5 ms page-flip cadence); logged once as `[linux] swap interval req=... setRc=... actual=...` |
+| `SOTC_FPS_CAP=n` | (R36S / Linux SDL2, default `60`, `0` uncapped) software frame limiter using `clock_gettime(CLOCK_MONOTONIC)` / `clock_nanosleep(..., TIMER_ABSTIME, ...)` in `EndDrawing`; locks light/menu scenes to 59.8–60.1 FPS with `wait 0.0` even when swap interval `0` is honored, with zero overhead below 60 FPS |
+| `SOTC_CAM_INVERT_X=0/1` | (R36S / Linux SDL2, default `1`) invert `SDL_CONTROLLER_AXIS_RIGHTX` before PS2 pad packing so right-stick right pans the camera right (`0` restores original PS2 SCUS-97472 horizontal camera; menus and Y axis unchanged) |
+| `SOTC_GCOV_DUMP_FRAME=<n>` | (R36S / Linux aarch64 PGO-gen builds) triggers `__gcov_dump()` once at logic frame `n` and suppresses the periodic `frame % 600 == 0` dump so runtime PGO profiles accumulate through gameplay (`213/213` `.gcda` TUs) |
+| `-DPS2X_LINUX_RELEASE=ON`, `-DPS2X_LINUX_PGO=OFF\|gen\|<dir>`, `-DPS2X_LINUX_GAME_OPT=-Os`, `-DPS2X_LINUX_FUNCTION_SECTIONS=ON`, `-DPS2X_LINUX_HOT_ORDER=<file>` | (CMake, Linux aarch64) release build (`SOTC_RELEASE=1` diagnostics compiled out across `ps2_runtime`, `ps2_iop`, and `overrides/*.cpp`), portable `-fprofile-generate=/tmp/sotc_pgo/` / `-fprofile-use=<dir>` with `-fprofile-prefix-path`, cold/warm opt split (`-Os` cold TUs, `-O3` runtime/overrides/`lean_part_t*`, `-O2` `vu1rec_*`), and `--section-ordering-file` (defaults to `game/overrides/linux_hot_order.ld`) |
 
 With `SOTC_FRAME_LOG=1` the `[frame]` lines also end in `| sync ... | joins ...`: the game
 thread's work at the frame's change by part (the join, endFrame, the frame log, the sound log,

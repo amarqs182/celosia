@@ -79,8 +79,8 @@ Compared the real user gameplay session on Pass 6 (`/tmp/sotc_pass6_play.log`, 3
 
 ## Phase 2B — Real R36S PGO + `linux_hot_order.ld` Regeneration
 
-- **Root cause fixed for R36S PGO-gen:** `PS2Recomp/ps2xRuntime/CMakeLists.txt` (`PS2X_LINUX_PGO_GEN`) now passes `-Wl,-u,__gcov_dump` so strong `__gcov_dump` is linked from `libgcov.a` and triggered cleanly at `SOTC_GCOV_DUMP_FRAME=5050` via `GCOV_PREFIX=/tmp/sotc_pgo GCOV_PREFIX_STRIP=1` (`213/213` `.gcda` files collected on real R36S gameplay, `933K` archive).
-- **Build configuration:** Built with `-DPS2X_LINUX_PGO=ON -DPS2X_LINUX_PGO_USE_DIR=.../pgo_pass8b` with `-Wmissing-profile` and `-Wcoverage-mismatch` active (`0` missing/mismatched profile warnings across all 213 TUs). Regenerated `game/overrides/linux_hot_order.ld` from `guest_pass8a_det125s.prof` (`8,866` ordered symbols, `34.61 MB`).
+- **Root cause fixed for R36S PGO-gen:** `PS2Recomp/ps2xRuntime/CMakeLists.txt` (`PS2X_LINUX_PGO=gen`) now passes `-Wl,-u,__gcov_dump` so strong `__gcov_dump` is linked from `libgcov.a` and triggered cleanly at `SOTC_GCOV_DUMP_FRAME=5050` via `/tmp/sotc_pgo/` + `-fprofile-prefix-path` (`213/213` `.gcda` files collected on real R36S gameplay, `933K` archive).
+- **Build configuration:** Built with `-DPS2X_LINUX_PGO=.../pgo_pass8b` with `-Wmissing-profile` and `-Wcoverage-mismatch` active (`0` missing/mismatched profile warnings across all 213 TUs). Regenerated `game/overrides/linux_hot_order.ld` from `guest_pass8a_det125s.prof` (`8,866` ordered symbols, `34.61 MB`).
 - **Binary:** `ps2sotc_aarch64_pie_sdl` (`77,718,984` bytes stripped, MD5 `3b47a44712f8e22f881dcf4f1ea15b88`).
 - **1:1 Deterministic R36S Benchmark (`bench_pass8b_125s.log` vs `bench_pass8a_125s.log`, identical `f=4458..5298`, 15 buckets = 900 frames, `draws=853..1130`):**
   - FPS: min `25.50` (+1.70), med **`27.00`** (**+1.40 FPS / +5.5%**), avg `26.98` (+1.38), max `28.00` (+1.40)
