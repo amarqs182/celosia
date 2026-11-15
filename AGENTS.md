@@ -22,27 +22,27 @@ This repository is `amarqs182/celosia`, the maintained fork for the R36S adaptat
 Before every push:
 1. Run `git remote -v` and inspect push URLs.
 2. Ensure no push URL points to `HenryKun55/celosia`.
-3. Ensure the local branch is not `main`.
-4. Use the repository's `.githooks/pre-push` hook (see `CONTRIBUTING.md`).
+3. Work, commit, and push directly on `main` (`git push origin main`); do not create new topic branches unless explicitly requested.
+4. Keep the repository's `.githooks/pre-push` hook enabled (see `CONTRIBUTING.md`) so pushes to `HenryKun55/celosia` remain blocked.
 
-Before every PR creation or update:
+Before any PR creation or update (if a contributor submits a fork PR):
 1. Explicitly set the target repository to `amarqs182/celosia`.
 2. Explicitly set the target branch to `main`.
 3. Verify the resulting PR's base repository and branch after creation.
 4. With GitHub CLI, use `gh pr create --repo amarqs182/celosia --base main`.
 
-External contributors may push their working branch to their own fork. Their PR must still target `amarqs182/celosia:main`. Contributors with write access may push topic branches to this repository. Nobody should push directly to `main`.
+Maintainers work directly on `amarqs182/celosia:main` to avoid branch sprawl. External contributors may still open PRs targeting `amarqs182/celosia:main`.
 
 Do not automatically synchronize `main` from `HenryKun55/celosia` or merge upstream changes into it. If upstream changes are needed, fetch and inspect them first, then propose a deliberate integration PR to this fork. Do not send R36S changes upstream.
 
 ## Hard rules
 
-1. **Never push to `upstream`.** Only `origin` is writable. Push with
-   `git push origin <branch>`. Do not run `git push upstream` under any
+1. **Never push to `upstream`.** Only `origin` is writable. Push directly
+   to `main` with `git push origin main`. Do not run `git push upstream` under any
    circumstances.
-2. **Never force-push `main`.** `main` on `origin` is the fork's integration
-   branch: upstream's work plus this fork's. Work on topic branches:
-   `git switch -c feat/<slug>`.
+2. **Never force-push `main`.** `main` on `origin` is the single active
+   branch for this fork. Work, commit, and push directly on `main`; do not
+   create topic branches unless explicitly asked.
 3. **Do not sync `main` from upstream automatically.** `git fetch upstream` and
    read the diff first; if upstream's changes are needed here, land them
    through a deliberate integration PR (see the contribution boundary above).
@@ -295,7 +295,7 @@ one commit = one idea, fully explained.
 - Keep changes minimal and focused; follow KISS, YAGNI, and existing project conventions.
 - State assumptions and acceptance criteria; resolve ambiguities that could change the implementation.
 - Build and run the narrowest relevant tests. Do not claim a test passed unless it was actually run.
-- Use a dedicated topic branch for each change. Never commit directly to `main`.
+- Use `main` as the single working branch in `amarqs182/celosia`; do not create topic branches unless explicitly requested. Never force-push `main`.
 - Review the final diff and check for accidental credentials, machine-specific paths, generated files, and unrelated edits.
 - Review `git diff --check`, the complete diff and repository status before committing.
 - Report exactly what changed, what was tested, and what remains unverified. Distinguish passed, failed, blocked and unexecuted checks.
