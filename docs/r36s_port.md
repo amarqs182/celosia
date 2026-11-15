@@ -34,6 +34,8 @@ Do **not** target or debug technologies that are broken or absent on the R36S so
 Full phase-by-phase notes, A/B comparisons, and raw log findings are recorded in [`SOTC_OPTIMIZATION_LOG.md`](../SOTC_OPTIMIZATION_LOG.md).
 
 ### Summary of Implemented Optimizations
+
+For the active R36S-only backlog and the full waste audit (PS2-inherited vs. generic runtime choices), see [`worklist.md`](worklist.md) and [`r36s_native_audit.md`](r36s_native_audit.md).
 - **Build & Code Layout (Pass 7 + Pass 8A + Pass 8B + Phase 4, [`CMakeLists.txt`](../PS2Recomp/ps2xRuntime/CMakeLists.txt)):**
   - `PS2X_LINUX_RELEASE=ON` defines `SOTC_RELEASE=1` across `ps2_runtime`, `ps2_iop`, and `overrides/*.cpp`, compiling out diagnostic timers/logging/counts while retaining `SOTC_FRAME_LOG=1` (drop in `hooks` from `1.10 ms` to `0.00 ms`).
   - Cold recompiled batches and non-trust fallback `lean_part[0-9]*.cpp` compile at `-Os`, `vu1rec_*` at `-O2`, and `ps2_runtime`, `overrides/*.cpp`, and `lean_part_t*.cpp` at `-O3`.
