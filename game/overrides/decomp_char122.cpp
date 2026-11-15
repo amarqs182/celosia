@@ -790,8 +790,9 @@ namespace char122
                     {
                         const size_t j = (static_cast<size_t>(i) * cols + k) * 4u + l;
                         const double p = rdf(ram, pa + static_cast<uint32_t>(k) * 16u + l * 4u), v = rdf(ram, va + static_cast<uint32_t>(k) * 16u + l * 4u);
-                        dp = std::max(dp, std::fabs(p - np[j]));
-                        dv = std::max(dv, std::fabs(v - nv[j]));
+                        const double a = p - np[j], b = v - nv[j];
+                        dp = std::isnan(a) ? 1e30 : std::max(dp, std::fabs(a));
+                        dv = std::isnan(b) ? 1e30 : std::max(dv, std::fabs(b));
                         span = std::max(span, std::fabs(p));
                     }
             }
@@ -801,7 +802,7 @@ namespace char122
             rDiff += rSame ? 0u : 1u;
             worstP = std::max(worstP, dp);
             worstV = std::max(worstV, dv);
-            if (n % 300u == 1u || dp > 1e-3)
+            if (n % 300u == 1u || dp > 1e-3 || !rSame)
                 std::fprintf(stderr, "[cloth122c] frame %llu cloths %llu worst pos %.3g vel %.3g this pos %.3g vel %.3g (|pos| up to %.1f, %dx%d) R differ %llu\n",
                              (unsigned long long)sotc_decomp::g_gameFrame, (unsigned long long)n, worstP, worstV, dp, dv, span, rows, cols, (unsigned long long)rDiff);
         }
@@ -823,8 +824,13 @@ namespace char122
             const uint32_t a0 = GPR_U32(ctx, 4), a2 = GPR_U32(ctx, 6);
             const uint64_t a1 = GPR_U64(ctx, 5);
             const float dt = ctx->f[12], f13 = ctx->f[13];
-            const uint32_t sp = GPR_U32(ctx, 29) - 0x50u;
+            const uint32_t sp0 = GPR_U32(ctx, 29), ra0 = GPR_U32(ctx, 31);
+            const uint32_t sp = sp0 - 0x50u;
+            // layoutClassFast falls back to callGuest (overwriting $sp/$ra) for non-plain objects such as
+            // scripted layout entities; restore $sp/$ra so returnTo(ctx) does not jump back to 0x01137AAC.
             const uint32_t owner = sotc_decomp::layoutClassFast(rdram, ctx, runtime, a0, 0x01137AACu, sp);
+            SET_GPR_U32(ctx, 29, sp0);
+            SET_GPR_U32(ctx, 31, ra0);
             uint32_t v0 = 0u;
             if (rd32(rdram, owner + 0x180u) != 0u)
             {

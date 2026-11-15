@@ -638,7 +638,7 @@ namespace native_renderer
         debugToggle("dbg_lighting", "Lighting", "Iluminação", "Off: lit models at their vertex colour.", "Desligado: modelos iluminados na cor do vértice.",
                     &Tuning::lighting);
         debugToggle("dbg_additive", "Additive draws", "Desenhos aditivos", "Draws that add light (glows, light shafts).",
-                    "Desenhos que somam luz (brilhos, feixes).", &Tuning::additive);
+                    "Desenhos que somam luz (brilhos, feixes).", &Tuning::additive, "SOTC_NATIVE_NOADDITIVE");
         debugToggle("dbg_subtract", "Subtract draws", "Desenhos subtrativos", "Draws that darken by subtracting.", "Desenhos que escurecem subtraindo.",
                     &Tuning::subtract);
         debugToggle("dbg_overlays", "Second passes", "Segundas passadas", "A second pass drawn over the same geometry.",
