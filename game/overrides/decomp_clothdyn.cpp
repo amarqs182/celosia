@@ -243,8 +243,7 @@ namespace decomp_clothdyn
             {
                 const uint32_t s1 = s3 + 0x10u;
                 SET_GPR_U64(ctx, 4, s7);
-                callGuest(rdram, ctx, runtime, kGetLayoutClass, 0x0113774Cu, sp);
-                const uint32_t layout = GPR_U32(ctx, 2);
+                const uint32_t layout = sotc_decomp::layoutClassFast(rdram, ctx, runtime, static_cast<uint32_t>(s7), 0x0113774Cu, sp);
                 __m128 *vf = ctx->vu0_vf;
                 vf[5] = ram.q(s3);
                 vf[6] = ram.q(s1);

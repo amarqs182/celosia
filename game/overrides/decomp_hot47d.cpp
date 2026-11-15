@@ -170,7 +170,16 @@ namespace decomp_hot47d
         const uint64_t entrySp = GPR_U64(ctx, 29);
         const uint32_t sp = static_cast<uint32_t>(entrySp) - 0x110u;
         const uint64_t spX = sx(sp); // daddu rX, sp: the register's 64-bit value
-        auto call = [&](uint32_t target, uint32_t ret) { callGuest(rdram, ctx, runtime, target, ret, sp); };
+        auto call = [&](uint32_t target, uint32_t ret)
+        {
+            uint32_t res = 0u;
+            if (target == kLayoutClass && !ps2_worker::isShell(runtime) && sotc_decomp::layoutClassPlainOnly(rdram, GPR_U32(ctx, 4), res))
+            {
+                SET_GPR_S32(ctx, 2, static_cast<int32_t>(res));
+                return;
+            }
+            callGuest(rdram, ctx, runtime, target, ret, sp);
+        };
 
         // The prologue: the saves, s2 = t1, s4 = a2, s5 = a3, s6 = the kind
         // words' lui, fp = a1, f23..f20 = f12..f15, a0 / t0 into the frame.

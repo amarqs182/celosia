@@ -1055,4 +1055,101 @@ namespace sotc_decomp
         callGuest(rdram, ctx, runtime, 0x010F1A20u, ra, sp);
         return GPR_U32(ctx, 2);
     }
+
+    // Inline packet write matching decomp_hot44g::gsReg (0x001C5B00): appends an
+    // 8-byte value / register pair to *0x001E11A4 unless +0x1C is closed.
+    inline void gsRegWrite(uint8_t *rdram, R5900Context *ctx)
+    {
+        constexpr uint32_t kPacket = 0x001E11A4u;
+        const auto sx32 = [](uint32_t v) -> uint64_t {
+            return static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(v)));
+        };
+        SET_GPR_U64(ctx, 7, sx32(kPacket));
+        uint32_t record;
+        std::memcpy(&record, rdram + (kPacket & PS2_RAM_MASK), 4);
+        SET_GPR_U64(ctx, 3, sx32(record));
+        uint32_t closed;
+        std::memcpy(&closed, rdram + ((record + 0x1Cu) & PS2_RAM_MASK), 4);
+        SET_GPR_U64(ctx, 6, sx32(record + 0xCu));
+        if (closed != 0u)
+        {
+            SET_GPR_U64(ctx, 2, sx32(closed));
+            returnTo(ctx);
+            return;
+        }
+        uint32_t at;
+        std::memcpy(&at, rdram + ((record + 0xCu) & PS2_RAM_MASK), 4);
+        const uint64_t v1 = GPR_U64(ctx, 5);
+        std::memcpy(rdram + (at & PS2_RAM_MASK), &v1, 8);
+        at += 8u;
+        std::memcpy(rdram + ((record + 0xCu) & PS2_RAM_MASK), &at, 4);
+        std::memcpy(&record, rdram + (kPacket & PS2_RAM_MASK), 4);
+        record += 0xCu;
+        SET_GPR_U64(ctx, 3, sx32(record));
+        std::memcpy(&at, rdram + (record & PS2_RAM_MASK), 4);
+        const uint64_t v0 = GPR_U64(ctx, 4);
+        std::memcpy(rdram + (at & PS2_RAM_MASK), &v0, 8);
+        const uint32_t nextAt = at + 8u;
+        SET_GPR_U64(ctx, 2, sx32(nextAt));
+        std::memcpy(rdram + (record & PS2_RAM_MASK), &nextAt, 4);
+        returnTo(ctx);
+    }
+}
+
+namespace decomp_charageo
+{
+    void execCharaGeometry(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+}
+namespace decomp_skeleton
+{
+    void motionMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+}
+namespace decomp_layout
+{
+    void updateLayoutClassGeometry(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+}
+namespace decomp_layoutclass
+{
+    void getLayoutClass(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+}
+namespace decomp_nodeinterp
+{
+    void calcNodeInterp(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+}
+namespace decomp_hot47a
+{
+    void childNodes(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+}
+namespace decomp_hot47c
+{
+    void rootDynamicsAfter(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+}
+namespace rest81
+{
+    void rootDynamics(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+}
+namespace char122::cloth
+{
+    void dynamics(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+}
+namespace decomp_quat
+{
+    void invMatrix(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+}
+namespace decomp_isys
+{
+    void forFirst(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void forExit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+}
+namespace decomp_group
+{
+    void groupForNext(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+}
+namespace decomp_sema
+{
+    void signalSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+}
+namespace sotc_native
+{
+    void modelDispHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
 }

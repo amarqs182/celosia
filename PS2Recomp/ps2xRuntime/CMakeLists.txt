@@ -984,7 +984,9 @@ if(PS2X_IS_LINUX AND PS2X_IS_AARCH64_TARGET)
             -fprofile-correction
             -fno-profile-values
             -fno-profile-reorder-functions
-            -fno-vpt)
+            -fno-vpt
+            -Wno-missing-profile
+            -Wno-coverage-mismatch)
         list(APPEND PS2X_LINUX_OVERRIDE_OPTS ${PS2X_LINUX_PGO_OPTS})
         target_compile_options(ps2_runtime PRIVATE ${PS2X_LINUX_PGO_OPTS})
     endif()

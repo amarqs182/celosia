@@ -141,7 +141,7 @@ namespace decomp_isys
     void signal(const M &m, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t ra, uint32_t sp)
     {
         SET_GPR_U32(ctx, 4, m.u32(kSemaWord));
-        sotc_decomp::callGuest(rdram, ctx, runtime, kSignalSema, ra, sp);
+        sotc_decomp::callNative(rdram, ctx, runtime, kSignalSema, &decomp_sema::signalSema, ra, sp);
     }
     // The callee-saved registers s0..s(n-1) and ra into a frame as a prologue
     // writes them (s at +8 i, ra at raAt).

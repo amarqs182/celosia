@@ -100,8 +100,7 @@ namespace decomp_hot43c
         uint32_t layoutClass(uint32_t layoutId, uint32_t ra)
         {
             args({layoutId});
-            call(kLayoutClass, ra);
-            return GPR_U32(ctx, 2);
+            return sotc_decomp::layoutClassFast(rdram, ctx, runtime, layoutId, ra, sp);
         }
         // qmtc2.ni of a GPR just set by mfc1 f21: the scale (sign-extended)
         // in the low 64 bits, the register's upper half as it was.

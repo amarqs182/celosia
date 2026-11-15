@@ -102,7 +102,16 @@ namespace decomp_hot44a
         void vput(uint32_t a, __m128 v) const { WRITE128(a, _mm_castps_si128(v)); }
         void setC(bool c) const { ctx->fcr31 = c ? (ctx->fcr31 | 0x800000u) : (ctx->fcr31 & ~0x800000u); }
         bool c() const { return (ctx->fcr31 & 0x800000u) != 0u; }
-        void call(uint32_t target, uint32_t ra) const { callGuest(rdram, ctx, runtime, target, ra, sp); }
+        void call(uint32_t target, uint32_t ra) const
+        {
+            uint32_t res = 0u;
+            if (target == kLayoutClass && !ps2_worker::isShell(runtime) && sotc_decomp::layoutClassPlainOnly(rdram, GPR_U32(ctx, 4), res))
+            {
+                SET_GPR_S32(ctx, 2, static_cast<int32_t>(res));
+                return;
+            }
+            callGuest(rdram, ctx, runtime, target, ra, sp);
+        }
         // qmfc2 v0, vfN; mtc1 v0, f: the register's 128 bits into v0, its x into f.
         float toFpr(__m128 v) const
         {

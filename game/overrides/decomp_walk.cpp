@@ -2110,7 +2110,7 @@ namespace decomp_walk
             return lodRecord != 0u && m.u32(lodRecord + 0x3Cu) != 0u;
         };
         if (s0 == 0u && sotc_decomp::solid103On() && sotc_native::nativeDraws() &&
-            (m.u32(m.u32(s1 + 0x144u) + 0x280u) == 0u || !native_renderer::tuning().shadows) && !lensScaled())
+            (!native_renderer::tuning().shadows || m.u32(m.u32(s1 + 0x144u) + 0x280u) == 0u) && !lensScaled())
         {
             const int32_t s2 = m.s16(s1 + 0x1B4u);
             SET_GPR_S32(ctx, 18, s2);
@@ -2263,7 +2263,7 @@ namespace decomp_walk
         {
             g.a(4, geo);
             g.a(5, m.u32(s1 + 0x15Cu));
-            g.call(kModelDisp, 0x010F3C64u, sp);
+            g.callNative(&sotc_native::modelDispHook, kModelDisp, 0x010F3C64u, sp);
         }
         v0 = static_cast<uint64_t>(static_cast<int64_t>(m.s32(s1 + 0x194u)));
         if (v0 != 0u)

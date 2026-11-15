@@ -37,7 +37,8 @@ Full phase-by-phase notes, A/B comparisons, and raw log findings are recorded in
 | Pass 8B (Release + PGO v1) | `25.50 / 27.00 / 26.98 / 28.00` | `37.00 ms` | `36.90 ms` | `0.00 ms` | `15.90 ms` | `18.50 ms` |
 | Pass 8C-1 (Hot inlining, no PGO) | `25.10 / 26.40 / 26.60 / 28.00` | `37.70 ms` | `37.70 ms` | `0.00 ms` | `17.30 ms` | `18.50 ms` |
 | Pass 9 (Mali-G31 + Cap, no PGO) | `24.90 / 27.30 / 26.97 / 28.60` | `36.60 ms` | `36.50 ms` | `0.00 ms` | `14.90 ms` | `18.60 ms` |
-| **Final Pass 9 + PGO** (`0d0f7ab8b766d879fc9d18d0a966166a`) | **`27.50 / 29.40 / 29.25 / 30.30`** | **`33.90 ms`** | **`33.80 ms`** | `0.00 ms` | `15.50 ms` | `18.50 ms` |
+| Pass 9 + PGO (`0d0f7ab8b766d879fc9d18d0a966166a`) | `27.50 / 29.40 / 29.25 / 30.30` | `33.90 ms` | `33.80 ms` | `0.00 ms` | `15.50 ms` | `18.50 ms` |
+| **Pass 9.5 + `pgo_pass95`** (`8f1377e4b1b40d1e34a546921cd0971a`, `f=4458..5418`, `453..3221 draws`) | **`27.30 / 29.20 / 29.90 / 34.70`** (`3041..3221` ext: `29.60` med / `31.50` max) | `34.10 ms` | `34.10 ms` (`33.65 ms` ext) | `0.00 ms` | `19.60 ms` (`wait 0.0`) | `16.10 ms` |
 
 Light/menu scenes run locked at **`59.8–60.1 FPS`** (`16.6–16.7 ms`, `wait 0.0`).
 
@@ -61,9 +62,10 @@ Light/menu scenes run locked at **`59.8–60.1 FPS`** (`16.6–16.7 ms`, `wait 0
    ninja -C build/linux-aarch64 ps2EntryRunner
    ```
 
-### Remaining Bottlenecks (Pass 9.5 Targets)
-- **Game thread CPU (`33.80 ms` median in Shrine):** still the primary limiter on Cortex-A35. `scratch/pass9.prof` (`35,140` samples, EE `86.9%`) places the top remaining hotspots in `gsReg` (`2.92%`), `spriteDrawSprite` (`2.89%`), `manager_sub_010F3A08` (`2.30%`), `GetLayoutClass` (`2.04%`, non-plain fallback path), `DispDispObjGroupModel` (`1.92%`), `isysWakeupSubThread` (`1.87%`), `ExecCharaGeometry` (`1.42%`), `gamecore_sub_013CFBE0` (`1.38%`), and `ClipCollisionDirectCallBack` (`1.23%`).
-- **KMSDRM 60 Hz page-flip (`present 18.50 ms` med):** runs asynchronously (`wait 0.0`) so it does not stall the game thread below `16.67 ms`, though `actual=1` caps single-flip cadence to 60 Hz scanout.
+### Remaining Bottlenecks & Pass 9.5 Results
+- **Pass 9.5 updates (`feat/r36s-pass95-cpu`, [`SOTC_OPTIMIZATION_LOG.md`](../SOTC_OPTIMIZATION_LOG.md)):** Added `SOTC_GLEND_ASYNC` (default `1`), native `spriteDrawSprite` (`game/overrides/decomp_sprite.cpp`, `1196` natives active), direct `callNative`/`callDirect` chaining (`execCharaGeometry`, `GetMotionMatrix`, `CalcNodeInterp`, `UpdateLayoutClassGeometry`, `GetClothDynamics`, `invMatrix`, `isysGroupFor*`, `signalSema`, `modelDispHook`), `!shadows` early-out in `solidDisp`, `coll125::validate138` dedup, rebuilt with fresh R36S `pgo_pass95` (`214` `.gcda` TUs, `0` warnings) and regenerated `linux_hot_order.ld` (`8,883` symbols, `35.04 MB`).
+- **Game thread CPU (`33.1–34.1 ms` median, `29.2–29.9 FPS` avg):** Still the sole frame limiter on Cortex-A35 (`wait 0.0` even at `3,041–3,221` exterior draws). Fresh R36S `PS2X_PROFILE` (`gp_b2_game.prof`, `26,375` samples / 26 s, EE busy 99.7%) shows a flat distribution across `ClipCollisionDirectCallBack` (`2.19%`), `ClipCollisionFinderCallBack` (`1.97%`), `GetCollisionDBCallBack` (`1.95%`), `DispDispObjGroupModel` (`1.75%`), `manager_sub_0111C810` (`1.72%`), `ExecCharaGeometry` (`1.69%`), `manager_sub_010F3A08` (`1.63%`), `gamecore_sub_013CFBE0` (`1.61%`), `manager_sub_010F3CF0` (`1.35%`), `ClipCollisionFinder` (`1.25%`), `GetMotionMatrix` (`1.14%`), `gamecore_sub_013E3840` (`1.08%`), and `GetLayoutClass` (`1.08%`).
+- **KMSDRM 60 Hz page-flip (`present 16.10–18.50 ms` med):** runs asynchronously (`wait 0.0`) so it does not stall the game thread below `16.67 ms`, though `actual=1` caps single-flip cadence to 60 Hz scanout.
 
 ## Runtime and profiling
 Separate CPU emulation/recompilation, VU work, renderer submission, GPU execution, synchronization, and presentation. Aggregate CPU utilization can hide a saturated main thread. Validate GPU telemetry before drawing conclusions from a reported 0%.

@@ -499,10 +499,18 @@ namespace coll125
     }
     inline unsigned validate138(const G g, const Meta &m, const Entry &e)
     {
-        prefetch138(g, m);
+        if (__builtin_expect(pf141::g_cur != nullptr && pf141::g_coll, 0))
+        {
+            const uint8_t *r = g.rdram;
+            pf141::noteGuest(r, m.plane, 16u);
+            pf141::noteGuest(r, m.bnd, 16u);
+            pf141::noteGuest(r, m.vtx[0], 16u);
+            pf141::noteGuest(r, m.vtx[1], 16u);
+            pf141::noteGuest(r, m.vtx[2], 16u);
+        }
         const uint32_t s3 = m.w1 & 0x00FFFFFFu, s1 = (m.w1 >> 24) & 0x7Fu;
-        uint32_t cls = 0u;
-        bool chain = g.u8(m.w0 + 8u) == m.type && layoutClass(g, m.w0, cls) && cls == m.cls;
+        // m.cls was derived from (m.w0, m.type) via static table 0x01194070, so unchanged m.type preserves cls.
+        bool chain = g.u8(m.w0 + 8u) == m.type;
         chain = chain & (g.u32(m.cls + 0x174u) == m.work) & (g.u32(m.cls + 0x184u) == m.rec);
         bool addr;
         if (m.indep)
