@@ -214,6 +214,7 @@ namespace native_renderer
     {
         uint64_t ids[2] = {0, 0};
         uint32_t idCount = 0;
+        bool priority = false; // high-priority (e.g. terrain layers 1-3) queued ahead of normal props
         virtual ~AsyncWork() = default;
         virtual void work() = 0;
         virtual void finish() = 0;

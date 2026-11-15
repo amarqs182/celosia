@@ -561,19 +561,46 @@ namespace sotc_native
     {
         static const int mode = []() {
             const char *e = std::getenv("SOTC_MESHOPT");
-            if (!e) return 2; // Default to 2: overdraw-optimized triangle stream into batching pools
+            if (!e) return 0; // Safe default off; SOTC_MESHOPT=1 uses indexed pipeline
             return std::atoi(e);
         }();
         return mode;
     }
 
+    inline bool meshoptVcacheOn()
+    {
+        static const bool on = std::getenv("SOTC_MESHOPT_VCACHE") && std::atoi(std::getenv("SOTC_MESHOPT_VCACHE")) != 0;
+        return on;
+    }
+
+    inline bool meshoptOverdrawOn()
+    {
+        static const bool on = std::getenv("SOTC_MESHOPT_OVERDRAW") && std::atoi(std::getenv("SOTC_MESHOPT_OVERDRAW")) != 0;
+        return on;
+    }
+
     inline bool optStaticMeshWithMeshopt(
         const std::vector<native_renderer::Vertex> &in_vertices,
         std::vector<native_renderer::Vertex> &out_vertices,
-        std::vector<uint32_t> &out_indices)
+        std::vector<uint32_t> &out_indices,
+        bool reorderSafe)
     {
         if (meshoptMode() == 0 || in_vertices.size() < 3 || (in_vertices.size() % 3) != 0)
             return false;
+
+        // Any vertex with partial alpha may belong to fading cards/foliage/hair;
+        // preserve original triangle order.
+        if (reorderSafe)
+        {
+            for (const native_renderer::Vertex &v : in_vertices)
+            {
+                if (v.a < 128u)
+                {
+                    reorderSafe = false;
+                    break;
+                }
+            }
+        }
 
         const size_t vertex_count = in_vertices.size();
         std::vector<unsigned int> remap(vertex_count);
@@ -607,22 +634,28 @@ namespace sotc_native
             remap.data()
         );
 
-        meshopt_optimizeVertexCache(
-            out_indices.data(),
-            out_indices.data(),
-            vertex_count,
-            unique_verts
-        );
+        if (reorderSafe && meshoptVcacheOn())
+        {
+            meshopt_optimizeVertexCache(
+                out_indices.data(),
+                out_indices.data(),
+                vertex_count,
+                unique_verts
+            );
+        }
 
-        meshopt_optimizeOverdraw(
-            out_indices.data(),
-            out_indices.data(),
-            vertex_count,
-            &out_vertices[0].x,
-            unique_verts,
-            sizeof(native_renderer::Vertex),
-            1.05f
-        );
+        if (reorderSafe && meshoptOverdrawOn())
+        {
+            meshopt_optimizeOverdraw(
+                out_indices.data(),
+                out_indices.data(),
+                vertex_count,
+                &out_vertices[0].x,
+                unique_verts,
+                sizeof(native_renderer::Vertex),
+                1.05f
+            );
+        }
 
         meshopt_optimizeVertexFetch(
             out_vertices.data(),
@@ -636,7 +669,7 @@ namespace sotc_native
         return true;
     }
 
-    inline void uploadOptimizedStaticMesh(uint64_t id, const std::vector<native_renderer::Vertex> &verts)
+    inline void uploadOptimizedStaticMesh(uint64_t id, const std::vector<native_renderer::Vertex> &verts, bool reorderSafe)
     {
         const int mode = meshoptMode();
         if (mode == 0)
@@ -646,14 +679,14 @@ namespace sotc_native
         }
         std::vector<native_renderer::Vertex> opt_verts;
         std::vector<uint32_t> opt_indices;
-        if (optStaticMeshWithMeshopt(verts, opt_verts, opt_indices))
+        if (optStaticMeshWithMeshopt(verts, opt_verts, opt_indices, reorderSafe))
         {
             if (mode == 1)
             {
                 native_renderer::uploadIndexedMesh(id, opt_verts.data(), static_cast<uint32_t>(opt_verts.size()),
                                                    opt_indices.data(), static_cast<uint32_t>(opt_indices.size()));
             }
-            else // mode 2: overdraw-optimized triangle stream into batching pools
+            else // mode 2: expanded triangle stream (legacy opt-in)
             {
                 std::vector<native_renderer::Vertex> reordered(opt_indices.size());
                 for (size_t i = 0; i < opt_indices.size(); ++i)
@@ -2825,6 +2858,9 @@ namespace sotc_native
         bool rewritten = false; // packetId saw it rewritten in place: asked every frame
         bool resolved = false;  // skinned / ready / lit known for `id`
         bool ready = false, readyTwo = false, lit = false;
+        bool twoPasses = false;
+        uint64_t completeId = 0; // last complete static packet kept while a replacement builds
+        bool hasComplete = false, completeTwoPasses = false, completeLit = false;
     };
     struct ModelPlan
     {
@@ -9622,7 +9658,7 @@ namespace sotc_native
         std::vector<uint8_t> bytes;
         uint32_t base = 0, data = 0, size = 0;
         uint64_t id = 0;
-        bool twoPasses = false, ok = false, isSkinned = false, isLit = false;
+        bool twoPasses = false, reorderSafe = false, ok = false, isSkinned = false, isLit = false;
         std::vector<native_renderer::Vertex> vertices, second;
         std::vector<native_renderer::Vertex> opt_verts, opt_second_verts;
         std::vector<uint32_t> opt_indices, opt_second_indices;
@@ -9653,11 +9689,11 @@ namespace sotc_native
                     const int mode = meshoptMode();
                     if (mode == 1)
                     {
-                        indexed = optStaticMeshWithMeshopt(vertices, opt_verts, opt_indices);
+                        indexed = optStaticMeshWithMeshopt(vertices, opt_verts, opt_indices, reorderSafe);
                     }
                     else if (mode == 2)
                     {
-                        if (optStaticMeshWithMeshopt(vertices, opt_verts, opt_indices))
+                        if (optStaticMeshWithMeshopt(vertices, opt_verts, opt_indices, reorderSafe))
                         {
                             std::vector<native_renderer::Vertex> reordered(opt_indices.size());
                             for (size_t i = 0; i < opt_indices.size(); ++i)
@@ -9667,16 +9703,16 @@ namespace sotc_native
                             opt_indices.clear();
                         }
                     }
-                    if (twoPasses) // two textures: the second pass's mesh, with the second coordinates
+                    if (twoPasses) // two textures: second pass never reorders triangles
                     {
                         triangulate(strips, place, second, true);
                         if (mode == 1)
                         {
-                            indexed_second = optStaticMeshWithMeshopt(second, opt_second_verts, opt_second_indices);
+                            indexed_second = optStaticMeshWithMeshopt(second, opt_second_verts, opt_second_indices, false);
                         }
                         else if (mode == 2)
                         {
-                            if (optStaticMeshWithMeshopt(second, opt_second_verts, opt_second_indices))
+                            if (optStaticMeshWithMeshopt(second, opt_second_verts, opt_second_indices, false))
                             {
                                 std::vector<native_renderer::Vertex> reordered(opt_second_indices.size());
                                 for (size_t i = 0; i < opt_second_indices.size(); ++i)
@@ -9716,18 +9752,18 @@ namespace sotc_native
                 native_renderer::uploadIndexedMesh(id, opt_verts.data(), static_cast<uint32_t>(opt_verts.size()),
                                                    opt_indices.data(), static_cast<uint32_t>(opt_indices.size()));
             else
-            native_renderer::uploadMesh(id, vertices.data(), static_cast<uint32_t>(vertices.size()));
+                native_renderer::uploadMesh(id, vertices.data(), static_cast<uint32_t>(vertices.size()));
             if (twoPasses)
             {
                 if (indexed_second)
                     native_renderer::uploadIndexedMesh(id ^ (1ull << 61), opt_second_verts.data(), static_cast<uint32_t>(opt_second_verts.size()),
                                                        opt_second_indices.data(), static_cast<uint32_t>(opt_second_indices.size()));
                 else
-                native_renderer::uploadMesh(id ^ (1ull << 61), second.data(), static_cast<uint32_t>(second.size()));
-        }
+                    native_renderer::uploadMesh(id ^ (1ull << 61), second.data(), static_cast<uint32_t>(second.size()));
+            }
         }
     };
-    bool buildPacketAsync(uint64_t id, uint32_t data, uint32_t size, bool twoPasses)
+    bool buildPacketAsync(uint64_t id, uint32_t data, uint32_t size, bool twoPasses, bool reorderSafe, bool highPriority)
     {
         SOTC_READ_SITE(11);
         if (!native_renderer::tuning().asyncBuilds)
@@ -9740,6 +9776,8 @@ namespace sotc_native
         job->size = size;
         job->id = id;
         job->twoPasses = twoPasses;
+        job->reorderSafe = reorderSafe;
+        job->priority = highPriority;
         const uint32_t bytes = (data - job->base) + size + 64u; // and a little after (read as the game's would be)
         try
         {
@@ -11566,36 +11604,61 @@ namespace sotc_native
                     skinnedPacket = &found->second;
             }
             const bool twoPasses = detailTexturesOn() && ((info ? info->texMode : word(s + 0x1Cu)) == 2u);
-            const bool needsBuild = !skinnedPacket && ((!(known && e->ready) && !native_renderer::hasMesh(id)) ||
-                                                       (twoPasses && !(known && e->readyTwo) && !native_renderer::hasMesh(id ^ (1ull << 61))));
+            if (e)
+                e->twoPasses = twoPasses;
+            const uint32_t pktLayer = info ? info->layer[fading ? 1 : 0] : surfaceLayer(header, s, fading);
+            const native_renderer::Blend pktBlend = info ? info->blend : surfaceBlend(s);
+            uint64_t pktFlags = 0;
+            if (info)
+                pktFlags = info->flags;
+            else
+                noteRead((s + 0x18u) & ~7u, 8u), std::memcpy(&pktFlags, g_ram + ((s + 0x18u) & 0x1FFFFF8u), 8);
+            const bool isTerrainPkt = pktLayer >= 1u && pktLayer <= 3u;
+            const bool reorderSafe = !twoPasses && pktBlend == native_renderer::Blend::Opaque &&
+                                     pktLayer >= 2u && pktLayer <= 11u &&
+                                     ((pktFlags & 0x2200u) != 0x2200u) && (((pktFlags >> 17) & 1u) == 0u);
+            const bool ready1 = skinnedPacket || (known && e->ready) || native_renderer::meshKnown(id);
+            const bool ready2 = !twoPasses || (known && e->readyTwo) || native_renderer::meshKnown(id ^ (1ull << 61));
+            const bool needsBuild = !skinnedPacket && ((!ready1 && !native_renderer::hasMesh(id)) ||
+                                                       (twoPasses && !ready2 && !native_renderer::hasMesh(id ^ (1ull << 61))));
+            const bool fallbackReady = e && e->hasComplete && !skinnedPacket && native_renderer::meshKnown(e->completeId) &&
+                                       (!twoPasses || (e->completeTwoPasses && native_renderer::meshKnown(e->completeId ^ (1ull << 61))));
+            bool usingFallback = false;
             // Round 27: the terrain's packets (layers 1-3) are built here, up
             // to a time budget a frame, rather than on the worker: a few of them
             // missing held the whole picture (or, before, showed holes).
             bool here = false;
             if (needsBuild && !changedInPlace && native_renderer::tuning().asyncBuilds)
             {
-                const uint32_t l = info ? info->layer[fading ? 1 : 0] : surfaceLayer(header, s, fading);
-                here = l >= 1u && l <= 3u && terrainBuildBudgetLeft();
+                here = isTerrainPkt && terrainBuildBudgetLeft();
                 if (!here && !native_renderer::asyncBudgetLeft())
                 {
-                    // This frame's builds are spent (round 12, the area change):
-                    // left out like a draw still on the worker, built next frame.
-                    ++native_renderer::frameCounters().heldDraws;
-                    if (l >= 1u && l <= 3u)
-                        ++native_renderer::frameCounters().heldTerrain;
-                    return;
+                    if (fallbackReady)
+                        usingFallback = true;
+                    else
+                    {
+                        // This frame's builds are spent (round 12, the area change):
+                        // left out like a draw still on the worker, built next frame.
+                        ++native_renderer::frameCounters().heldDraws;
+                        if (isTerrainPkt)
+                            ++native_renderer::frameCounters().heldTerrain;
+                        return;
+                    }
                 }
             }
             const uint64_t buildStart = here ? native_renderer::nowUs() : 0u;
             bool queued = false;
-            if (needsBuild && !changedInPlace && !here)
+            if (needsBuild && !usingFallback && !changedInPlace && !here)
             {
                 SOTC_PROF_SCOPE(kHookQueue);
-                queued = buildPacketAsync(id, data, size, twoPasses);
+                queued = buildPacketAsync(id, data, size, twoPasses, reorderSafe, isTerrainPkt);
             }
             if (queued)
-                ; // on the worker: this packet is left out until it is taken up
-            else if (needsBuild)
+            {
+                if (fallbackReady)
+                    usingFallback = true;
+            }
+            else if (needsBuild && !usingFallback)
             {
                 SOTC_PROF_SCOPE(kHookBuild);
                 strips.clear();
@@ -11630,27 +11693,47 @@ namespace sotc_native
                         o.nz = v.nz;
                     };
                     triangulate(strips, place, vertices);
-                    uploadOptimizedStaticMesh(id, vertices);
-                    if (twoPasses) // two textures: the second pass's mesh, with the second coordinates
+                    uploadOptimizedStaticMesh(id, vertices, reorderSafe);
+                    if (twoPasses) // two textures: second pass never reorders triangles
                     {
                         vertices.clear();
                         triangulate(strips, place, vertices, true);
-                        uploadOptimizedStaticMesh(id ^ (1ull << 61), vertices);
+                        uploadOptimizedStaticMesh(id ^ (1ull << 61), vertices, false);
                     }
                 }
                 if (here)
                     terrainBuildSpent(native_renderer::nowUs() - buildStart);
             }
-            if (e && (!e->resolved || (twoPasses && !e->readyTwo)))
+            if (!usingFallback && e && (!e->resolved || (twoPasses && !e->readyTwo)))
             {
-                // Known from now on (until the id changes, or meshes / skinned packets go).
+                // Publish as resolved only once all required passes are complete.
                 e->skinned = skinnedPacket;
                 e->ready = skinnedPacket || native_renderer::meshKnown(id);
-                e->readyTwo = native_renderer::meshKnown(id ^ (1ull << 61));
+                e->readyTwo = !twoPasses || native_renderer::meshKnown(id ^ (1ull << 61));
                 e->lit = g_litPackets.count(id);
-                e->resolved = e->ready;
+                e->resolved = e->ready && e->readyTwo;
+                if (e->resolved && !skinnedPacket)
+                {
+                    e->completeId = id;
+                    e->completeTwoPasses = twoPasses;
+                    e->completeLit = e->lit;
+                    e->hasComplete = true;
+                }
             }
-            uint64_t mesh = id;
+            const bool activeComplete = skinnedPacket || usingFallback || (native_renderer::meshKnown(id) && (!twoPasses || native_renderer::meshKnown(id ^ (1ull << 61))));
+            if (!activeComplete && !changedInPlace)
+            {
+                // Replacement or new build in flight with no fallback: hold atomically so pass 1
+                // is never drawn without pass 2.
+                if (native_renderer::hasMesh(id) || (twoPasses && native_renderer::hasMesh(id ^ (1ull << 61))))
+                {
+                    ++native_renderer::frameCounters().heldDraws;
+                    if (isTerrainPkt)
+                        ++native_renderer::frameCounters().heldTerrain;
+                }
+                return;
+            }
+            uint64_t mesh = usingFallback ? e->completeId : id;
             const float *transform = clip;
             bool posed = false;                         // skinned: camera space
             uint32_t skinPalette = 0, skinPaletteCount = 0; // posed by the GPU: its palette
@@ -11925,7 +12008,7 @@ namespace sotc_native
                                  real(ret + 16u), real(ret + 20u), real(ret + 28u), real(ret + 64u), real(ret + 36u), real(ret + 68u), real(ret + 72u), real(ret + 76u));
             }
             state.fogged = false; // zFog is a pass over the picture (layer 4), as the game does it
-            if (known ? e->lit : g_litPackets.count(id))
+            if (usingFallback ? e->completeLit : (known ? e->lit : g_litPackets.count(id)))
             {
                 // The instance's lights (its own 15 qwords, unpacked to VU1
                 // 0x3d8): the light matrix, then colours and ambient; read
@@ -11966,7 +12049,7 @@ namespace sotc_native
                 noteRead((s + 0x18u) & ~7u, 8u), std::memcpy(&sflags, g_ram + ((s + 0x18u) & 0x1FFFFF8u), 8);
             const bool layer14 = ((sflags >> 25) & 1u) != 0;
             const bool reflective = (layer14 || (sflags & 0x2200u) == 0x2200u) && !noReflect && !state.debugColour;
-            if (runs && e && e->resolved && !posed && !twoTextures && !reflective && info && (!detailTexturesOn() || info->texMode != 2u) && mesh == id)
+            if (runs && e && e->resolved && !usingFallback && !posed && !twoTextures && !reflective && info && (!detailTexturesOn() || info->texMode != 2u) && mesh == id)
             {
                 // The first packet of a run (planPackets adds the next ones).
                 g_planRun.flush();
@@ -12012,7 +12095,7 @@ namespace sotc_native
                 }
                 second.writeDepth = false;
                 second.overlay = true;
-                native_renderer::draw(id ^ (1ull << 61), transform, second);
+                native_renderer::draw((usingFallback ? e->completeId : id) ^ (1ull << 61), transform, second);
                 ++g_frameDraws;
             }
             // Reflecting surfaces (flags 0x2200, modelDisp): their pass packet
@@ -12203,13 +12286,23 @@ namespace sotc_native
                     e.rewritten = g_packetRewritten;
                     if (id != e.id)
                     {
+                        if (e.resolved && e.ready && !e.skinned && (!e.twoPasses || e.readyTwo))
+                        {
+                            e.completeId = e.id;
+                            e.completeTwoPasses = e.twoPasses;
+                            e.completeLit = e.lit;
+                            e.hasComplete = true;
+                        }
                         e.id = id;
                         e.resolved = false;
+                        e.ready = false;
+                        e.readyTwo = false;
+                        e.twoPasses = false;
                     }
                     ++g_planStats.asked;
                 }
                 e.idFrame = g_frame;
-                if (g_planRun.n && runs && e.resolved && e.ready && !e.skinned && e.s == g_planRun.s && e.lit == g_planRun.lit && id == e.id && !changedInPlace)
+                if (g_planRun.n && runs && e.resolved && e.ready && !e.twoPasses && !e.skinned && e.s == g_planRun.s && e.lit == g_planRun.lit && id == e.id && !changedInPlace)
                 {
                     // The run's draw, for this packet's mesh too.
                     g_planRun.ids.push_back(id);
