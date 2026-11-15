@@ -1558,11 +1558,17 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         uint64_t alphaFrame = ~0ull;
         uint8_t frameMinAlpha = 0, frameMaxAlpha = 0xFF;
         uint32_t count = 0;
+        uint32_t vertexCount = 0;
         bool dynamic = false; // in this frame's arena, from vertex `first`
         uint32_t first = 0;
         bool indexed = false; // `count` indices: dynamic from indexArena[firstIndex], else in indexBuffer
         uint32_t firstIndex = 0;
         GLuint indexBuffer = 0;
+        // Cached RAM source for static indexed meshes so glMergeDraws can pack
+        // repeated multi-draw indexed runs into one VBO+IBO without expanding triangles.
+        std::vector<native_renderer::Vertex> srcVerts;
+        std::vector<uint32_t> srcIndices;
+        uint64_t srcBytes = 0;
         bool skinned = false; // uploadSkinnedMesh: SkinVertex, posed by skinProgram
         uint64_t frame = 0;   // the arena it went into (debugging)
         uint64_t used = 0;    // the last frame that drew it (eviction)
@@ -2258,9 +2264,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             Mesh *mesh = nullptr;
             Texture *tex = nullptr;
             uint32_t run = 1;          // the leader: draws merged into it (itself included); 0: merged into an earlier one
-            uint32_t mergedCount = 0;  // run > 1: vertices
+            uint32_t mergedCount = 0;  // run > 1: vertices (or indices when runIbo != 0)
             int runPool = -1;          // run > 1, meshes apart: its copy (runs), in this pool from runFirst
             uint32_t runFirst = 0;
+            GLuint runVbo = 0;         // run > 1, indexed run copy VBO
+            GLuint runIbo = 0;         // run > 1, indexed run copy IBO (0: non-indexed)
             uint8_t minAlpha = 0;      // the least vertex alpha of its mesh(es) (0: not known)
             uint8_t maxAlpha = 0xFF;   // round 45: the greatest (0xFF: not known)
             float minW = -1.0f;        // round 75: a background draw's least clip w over its mesh(es)' bounds (-1: not known)
@@ -2278,6 +2286,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         {
             int pool = -1; // -1: seen, not copied yet
             uint32_t first = 0, count = 0;
+            bool indexed = false;
+            GLuint vbo = 0, ibo = 0;
+            uint64_t bytes = 0;
             uint64_t used = 0;
             uint32_t frames = 0; // frames in a row it was drawn (copied from kRunFrames on)
             uint32_t made = 0;   // round 118: times copied (churn: made again after its copy went)
@@ -2313,6 +2324,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         uint64_t runScanFrame = 0; // round 36: the frame of the last scan for room that found none
         bool copyRun(size_t from, size_t to, uint32_t total, RunCopy &copy);
         bool copyRunBody(size_t from, size_t to, uint32_t total, RunCopy &copy);
+        bool copyIndexedRun(size_t from, size_t to, uint32_t totalIndices, uint32_t totalVerts, RunCopy &copy);
+        static constexpr uint64_t kMaxIndexedSrcBytes = 20ull * 1024ull * 1024ull;
+        static constexpr uint64_t kMaxIndexedRunBytes = 8ull * 1024ull * 1024ull;
         static bool runSourceOn();
         void poolSourceMake(Pool &p);
         void poolSourceFree(Pool &p);
@@ -2421,11 +2435,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         // What they hold (GPU memory: on the Vita vitaGL's pools, else the
         // newlib heap), kept as they change: the eviction budget and [gl:mem].
         uint64_t textureBytes = 0, textureHeapBytes = 0, meshBytes = 0, skinnedBytes = 0;
+        uint64_t indexedSrcBytes = 0, indexedRunBytes = 0;
         void forget(const Mesh &m)
         {
             meshBytes -= m.bytes;
             if (m.skinned)
                 skinnedBytes -= m.bytes;
+            indexedSrcBytes -= m.srcBytes;
         }
         void forget(const Texture &t)
         {
@@ -4381,6 +4397,15 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         {
             if (r.used + 600u >= arenaFrame)
                 return false;
+            if (r.indexed)
+            {
+                if (r.vbo)
+                    glDeleteBuffers(1, &r.vbo);
+                if (r.ibo)
+                    glDeleteBuffers(1, &r.ibo);
+                indexedRunBytes -= r.bytes;
+                return true;
+            }
             if (r.pool >= 0)
             {
                 poolFree(r.pool, r.first, r.count);
@@ -4408,8 +4433,15 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     {
         Mesh &mesh = meshes[id];
         forget(mesh);
+        if (mesh.srcBytes)
+        {
+            std::vector<native_renderer::Vertex>().swap(mesh.srcVerts);
+            std::vector<uint32_t>().swap(mesh.srcIndices);
+            mesh.srcBytes = 0;
+        }
         mesh.used = arenaFrame;
         mesh.dynamic = mesh.indexed = mesh.skinned = false;
+        mesh.vertexCount = count;
         if (mesh.pool >= 0) // made again: the old range goes (the GPU may still read it)
         {
             poolFree(mesh.pool, mesh.first, mesh.count);
@@ -4485,10 +4517,17 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     {
         Mesh &mesh = meshes[id];
         forget(mesh);
+        if (mesh.srcBytes)
+        {
+            std::vector<native_renderer::Vertex>().swap(mesh.srcVerts);
+            std::vector<uint32_t>().swap(mesh.srcIndices);
+            mesh.srcBytes = 0;
+        }
         mesh.used = arenaFrame;
         mesh.dynamic = false;
         mesh.skinned = false;
         mesh.indexed = true;
+        mesh.vertexCount = count;
         if (mesh.pool >= 0)
         {
             poolFree(mesh.pool, mesh.first, mesh.count);
@@ -4514,6 +4553,14 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             glGenBuffers(1, &mesh.buffer);
         if (!mesh.indexBuffer)
             glGenBuffers(1, &mesh.indexBuffer);
+#if !defined(PS2X_NATIVE_VITA)
+        if (vao && cache.vao != vao)
+        {
+            glBindVertexArray(vao);
+            cache.vao = vao;
+            cache.buffer = ~0u;
+        }
+#endif
         glBindBuffer(GL_ARRAY_BUFFER, mesh.buffer);
         uploadStream(GL_ARRAY_BUFFER, vertices, count * sizeof(native_renderer::Vertex), GL_STATIC_DRAW);
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.indexBuffer);
@@ -4521,6 +4568,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         mesh.count = indexCount;
         mesh.bytes = static_cast<uint64_t>(count) * sizeof(native_renderer::Vertex) + static_cast<uint64_t>(indexCount) * sizeof(uint32_t);
         meshBytes += mesh.bytes;
+        if (native_renderer::tuning().glMergeDraws && count && indexCount && indexedSrcBytes + mesh.bytes <= kMaxIndexedSrcBytes)
+        {
+            mesh.srcVerts.assign(vertices, vertices + count);
+            mesh.srcIndices.assign(indices, indices + indexCount);
+            mesh.srcBytes = mesh.bytes;
+            indexedSrcBytes += mesh.srcBytes;
+        }
         cache.buffer = ~0u;
     }
 
@@ -4776,10 +4830,17 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     {
         Mesh &mesh = meshes[id];
         forget(mesh);
+        if (mesh.srcBytes)
+        {
+            std::vector<native_renderer::Vertex>().swap(mesh.srcVerts);
+            std::vector<uint32_t>().swap(mesh.srcIndices);
+            mesh.srcBytes = 0;
+        }
         mesh.used = arenaFrame;
         mesh.dynamic = false;
         mesh.skinned = true;
         mesh.indexed = true;
+        mesh.vertexCount = count;
         mesh.box = false; // posed by its palette
         uint8_t minAlpha = 0xFF, maxAlpha = 0;
         for (uint32_t i = 0; i < count; ++i)
@@ -5398,7 +5459,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     static bool sameState(const Draw &a, const Draw &b)
     {
         const native_renderer::DrawState &x = a.state, &y = b.state;
-        if (x.texture != y.texture || x.clamp != y.clamp || x.blend != y.blend || x.order != y.order || !sameFloats(x, y) ||
+        if (x.texture != y.texture || x.clamp != y.clamp || x.blend != y.blend || x.order != y.order || x.alphaTest != y.alphaTest || !sameFloats(x, y) ||
             x.background != y.background || x.backgroundFge != y.backgroundFge || x.fogged != y.fogged || x.writeDepth != y.writeDepth || x.noDepthWrite != y.noDepthWrite ||
             x.overlay != y.overlay || x.screen != y.screen || x.screenDepthTest != y.screenDepthTest || x.shadowVolume || y.shadowVolume ||
             x.reflectionSource != y.reflectionSource || x.reflectionSample != y.reflectionSample || x.refractionSample != y.refractionSample ||
@@ -5409,6 +5470,74 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             return false;
         if ((x.lit || x.fresnel) && !sameBits<sizeof(x.light)>(x.light, y.light))
             return false;
+        return true;
+    }
+
+    static inline bool sortOpaqueEnabled()
+    {
+        static const bool on = []()
+        {
+            const char *e = std::getenv("SOTC_SORT_OPAQUE");
+            return e && std::atoi(e) != 0;
+        }();
+        return on;
+    }
+
+    // Consistent opaque-material classification shared by sorting and instancing.
+    // A draw is never considered freely reorderable merely because opacity >= 0.95
+    // or blend == Normal; alpha-test state, texel/vertex minimum alpha, and
+    // multipass/special state must all guarantee single-pass solid coverage.
+    static inline bool isSafeOpaqueDraw(const Renderer::Planned &p, const Draw &d)
+    {
+        const Mesh *m = p.mesh;
+        if (!m || !m->count)
+            return false;
+        const native_renderer::DrawState &st = d.state;
+        if (st.background || st.overlay || st.screen || st.screenDepthTest || st.noDepthWrite || st.writeDepth ||
+            st.shadowVolume || st.reflectionSource || st.reflectionSample || st.refractionSample ||
+            st.screenCopy || st.previousFrame || st.fresnel || st.debugColour || st.skinPalette)
+            return false;
+        if (st.texture && !p.tex)
+            return false;
+        if (st.opacity < 1.0f)
+            return false;
+        float least = -1.0f; // alpha = texel a x 2 x vertex a / 128 x opacity, at least
+        if (p.minAlpha)
+        {
+            least = static_cast<float>(p.minAlpha) / 128.0f * st.opacity;
+            if (st.texture)
+                least *= static_cast<float>(p.tex->minAlpha) / 255.0f * 2.0f;
+        }
+        if (st.blend == native_renderer::Blend::Normal)
+        {
+            if (!(least >= 1.0f))
+                return false;
+        }
+        else if (st.blend != native_renderer::Blend::Opaque)
+            return false;
+        const uint32_t at = st.alphaTest;
+        if (at & 1u)
+        {
+            const uint32_t atst = (at >> 1) & 7u;
+            if (atst != 1u) // not ALWAYS
+            {
+                if (!p.minAlpha)
+                    return false;
+                const float aref = static_cast<float>((at >> 4) & 0xFFu) / 128.0f;
+                if (atst == 5u) // GEQUAL
+                {
+                    if (!(least >= aref))
+                        return false;
+                }
+                else if (atst == 6u) // GREATER
+                {
+                    if (!(least > aref))
+                        return false;
+                }
+                else
+                    return false;
+            }
+        }
         return true;
     }
 
@@ -5656,13 +5785,23 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         // SOTC_GL_MERGE_MODE (debugging): bit 0 meshes side by side, bit 1 run copies, bit 2 the frame's own meshes.
         static const int mode = std::getenv("SOTC_GL_MERGE_MODE") ? std::atoi(std::getenv("SOTC_GL_MERGE_MODE")) : 7;
         auto plainMesh = [](const Mesh *m) { return m && !m->skinned && !m->indexed && ((m->dynamic && (mode & 4)) || m->pool >= 0); };
+        auto indexedStaticMesh = [](const Mesh *m) { return m && !m->skinned && m->indexed && !m->dynamic && !m->srcVerts.empty() && !m->srcIndices.empty(); };
+#if defined(PS2X_NATIVE_GLES)
+        constexpr uint32_t kDefaultRunFrames = 2;
+#else
+        constexpr uint32_t kDefaultRunFrames = kRunFrames;
+#endif
+        static const uint32_t runFrames = std::getenv("SOTC_GL_RUN_FRAMES") ? std::max(1, std::atoi(std::getenv("SOTC_GL_RUN_FRAMES"))) : kDefaultRunFrames;
         for (size_t k = 0; k < n;)
         {
             const Draw &lead = drawAt(k);
             const Mesh *m = plan[k].mesh;
             size_t end = k + 1;
             uint32_t total = m ? m->count : 0u;
-            if (plainMesh(m))
+            const bool isPlain = plainMesh(m);
+            const bool isIndexed = !isPlain && (mode & 2) && indexedStaticMesh(m);
+            uint32_t totalVerts = isIndexed ? m->vertexCount : 0u;
+            if (isPlain)
                 while (end < n)
                 {
                     const Mesh *o = plan[end].mesh;
@@ -5680,17 +5819,31 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     total += o->count;
                     ++end;
                 }
+            else if (isIndexed)
+                while (end < n)
+                {
+                    const Mesh *o = plan[end].mesh;
+                    if (!indexedStaticMesh(o) || total + o->count > 0xC000u || totalVerts + o->vertexCount > 0xFFFFu || plan[end].tex != plan[k].tex ||
+                        !((!shareOff && end - 1u > k && recAt(end) == recAt(end - 1u)) || sameDraw(lead, drawAt(end))))
+                        break;
+                    total += o->count;
+                    totalVerts += o->vertexCount;
+                    ++end;
+                }
             if (end - k > 1)
             {
                 Planned &p = plan[k];
-                bool contiguous = true;
+                bool contiguous = isPlain;
                 uint32_t next = m->first;
-                uint64_t key = 0x9E3779B97F4A7C15ull;
+                uint64_t key = isIndexed ? 0x494E44589E3779B9ull : 0x9E3779B97F4A7C15ull;
                 for (size_t j = k; j < end; ++j)
                 {
                     const Mesh *o = plan[j].mesh;
-                    contiguous = contiguous && o->first == next && o->pool == m->pool;
-                    next = o->first + o->count;
+                    if (isPlain)
+                    {
+                        contiguous = contiguous && o->first == next && o->pool == m->pool;
+                        next = o->first + o->count;
+                    }
                     p.minAlpha = std::min(p.minAlpha, plan[j].minAlpha);
                     p.maxAlpha = std::max(p.maxAlpha, plan[j].maxAlpha);
                     p.minW = std::min(p.minW, plan[j].minW); // (-1 if any is not known)
@@ -5698,7 +5851,23 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     key = (key ^ meshAt(j)) * 0xff51afd7ed558ccdull;
                     key ^= key >> 29;
                 }
-                if (!contiguous)
+                if (isIndexed)
+                {
+                    RunCopy *copy = &runs[key];
+                    if (copy->used != arenaFrame)
+                        copy->frames = copy->used + 1u == arenaFrame ? copy->frames + 1u : 1u;
+                    copy->used = arenaFrame;
+                    if (!copy->vbo && copy->frames >= runFrames && !copyIndexedRun(k, end, total, totalVerts, *copy))
+                        copy->frames = 0;
+                    if (!copy->vbo || !copy->ibo || copy->count != total)
+                    {
+                        k = end;
+                        continue;
+                    }
+                    p.runVbo = copy->vbo;
+                    p.runIbo = copy->ibo;
+                }
+                else if (!contiguous)
                 {
                     // Kept meshes apart: drawn from a copy of the run.
                     RunCopy *copy = nullptr;
@@ -5708,13 +5877,6 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                         if (copy->used != arenaFrame) // (the same run twice in a frame counts once)
                             copy->frames = copy->used + 1u == arenaFrame ? copy->frames + 1u : 1u;
                         copy->used = arenaFrame;
-                        // SOTC_GL_RUN_FRAMES=<n>: frames in a row before the copy (kRunFrames; 2 on GLES to skip 1-frame churn).
-#if defined(PS2X_NATIVE_GLES)
-                        constexpr uint32_t kDefaultRunFrames = 2;
-#else
-                        constexpr uint32_t kDefaultRunFrames = kRunFrames;
-#endif
-                        static const uint32_t runFrames = std::getenv("SOTC_GL_RUN_FRAMES") ? std::max(1, std::atoi(std::getenv("SOTC_GL_RUN_FRAMES"))) : kDefaultRunFrames;
                         if (copy->pool < 0 && copy->frames >= runFrames && !copyRun(k, end, total, *copy))
                             copy->frames = 0; // no room: tried again later
                     }
@@ -5770,53 +5932,31 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         if (native_renderer::tuning().glInstancing)
         {
             instanceClips.clear();
-            static const bool sortAggressive = []() {
-                const char *e = std::getenv("SOTC_SORT_OPAQUE");
-                return !e || std::atoi(e) != 0;
-            }();
-            auto isOpaquePlan = [&](const Planned &p, const Draw &d) -> bool
-            {
-                const native_renderer::DrawState &st = d.state;
-                if (st.background || st.overlay || st.screen || st.screenDepthTest || st.noDepthWrite || st.shadowVolume ||
-                    st.reflectionSource || st.reflectionSample || st.refractionSample || st.screenCopy || st.previousFrame ||
-                    st.fresnel || st.debugColour)
-                    return false;
-                if (st.texture && !p.tex)
-                    return false;
-                if (sortAggressive)
-                    return st.opacity >= 0.95f && (st.blend == native_renderer::Blend::Opaque || st.blend == native_renderer::Blend::Normal);
-                if ((st.alphaTest & 1u) != 0u)
-                    return false;
-                if (st.blend == native_renderer::Blend::Opaque)
-                    return true;
-                if (st.blend != native_renderer::Blend::Normal || !p.minAlpha)
-                    return false;
-                float least = static_cast<float>(p.minAlpha) / 128.0f * st.opacity;
-                if (p.tex)
-                    least *= static_cast<float>(p.tex->minAlpha) / 255.0f * 2.0f;
-                return least >= 1.0f;
-            };
+            const bool sortOpaque = sortOpaqueEnabled();
+            auto instancableStatic = [](const Mesh *m) { return m && !m->skinned && !m->dynamic && (m->pool >= 0 || (m->indexed && m->buffer && m->indexBuffer)); };
             constexpr size_t kMaxInstances = 16;
             for (size_t k = 0; k < n; )
             {
                 Planned &leadPlan = plan[k];
+                if (leadPlan.run == 0 || leadPlan.instances == 0)
+                {
+                    ++k;
+                    continue;
+                }
                 const Draw &leadDraw = drawAt(k);
                 if (leadDraw.state.shadowVolume)
                 {
                     ++k;
                     continue;
                 }
-                // For opaque depth-writing (tex, state) blocks, scan the entire
-                // contiguous same-(tex, state) group in O(B log B) so sorting by
-                // (tex, state, clip, where) can merge multi-mesh objects by clip
-                // without sacrificing instancing of identical single meshes.
-                if (isOpaquePlan(leadPlan, leadDraw))
+                // Non-adjacent opaque block grouping is strictly opt-in (SOTC_SORT_OPAQUE=1)
+                // and limited to draws passing isSafeOpaqueDraw.
+                if (sortOpaque && isSafeOpaqueDraw(leadPlan, leadDraw))
                 {
                     size_t blockEnd = k + 1;
                     while (blockEnd < n && plan[blockEnd].tex == leadPlan.tex &&
                            sameState(leadDraw, drawAt(blockEnd)) &&
-                           drawAt(blockEnd).state.alphaTest == leadDraw.state.alphaTest &&
-                           isOpaquePlan(plan[blockEnd], drawAt(blockEnd)))
+                           isSafeOpaqueDraw(plan[blockEnd], drawAt(blockEnd)))
                         ++blockEnd;
                     if (blockEnd - k > 1)
                     {
@@ -5824,7 +5964,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                         for (size_t s = k; s < blockEnd; ++s)
                         {
                             const Planned &op = plan[s];
-                            if (op.run == 1 && op.mesh && !op.mesh->skinned && !op.mesh->dynamic && !op.mesh->indexed && op.mesh->pool >= 0)
+                            if (op.run == 1 && instancableStatic(op.mesh))
                                 instScratch.push_back({op.mesh, s});
                         }
                         if (instScratch.size() > 1)
@@ -5862,7 +6002,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     k = blockEnd;
                     continue;
                 }
-                if (leadPlan.run != 1 || !leadPlan.mesh || leadPlan.mesh->skinned || leadPlan.mesh->dynamic || leadPlan.mesh->indexed || leadPlan.mesh->pool < 0)
+                if (leadPlan.run != 1 || !instancableStatic(leadPlan.mesh) || !isSafeOpaqueDraw(leadPlan, leadDraw))
                 {
                     ++k;
                     continue;
@@ -5874,7 +6014,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     if (oPlan.run != 1 || oPlan.mesh != leadPlan.mesh || oPlan.tex != leadPlan.tex)
                         break;
                     const Draw &oDraw = drawAt(end);
-                    if (!sameState(leadDraw, oDraw) || oDraw.state.alphaTest != leadDraw.state.alphaTest)
+                    if (!sameState(leadDraw, oDraw) || !isSafeOpaqueDraw(oPlan, oDraw))
                         break;
                     ++end;
                 }
@@ -5918,6 +6058,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     // the same each frame for the same draws).
     void Renderer::sortFree()
     {
+        if (!sortOpaqueEnabled())
+            return;
         const size_t n = drawOrder.size();
         if (n < 3)
             return;
@@ -5925,54 +6067,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         sortStats.frames++;
         auto freeDraw = [&](size_t k) -> bool
         {
-            const Planned &p = plan[k];
-            const Mesh *m = p.mesh;
-            if (!m || !m->count)
-                return false;
-            const native_renderer::DrawState &st = drawAt(k).state;
-            // Layer 1's far scenery and sky meet at the far plane (their
-            // depths round to 1.0 there): ties everywhere, so they keep their
-            // order (a frozen frame showed a 2 x 2 pixel speck of far landscape
-            // swapped with them sorted).
-            if (st.background || st.overlay || st.screen || st.screenDepthTest || st.noDepthWrite || st.shadowVolume || st.reflectionSource || st.reflectionSample ||
-                st.refractionSample || st.screenCopy || st.previousFrame || st.fresnel || st.debugColour)
-                return false;
-            if (st.texture && !p.tex)
-                return false;
-            static const bool sortAggressive = []() {
-                const char *e = std::getenv("SOTC_SORT_OPAQUE");
-                return !e || std::atoi(e) != 0;
-            }();
-            if (sortAggressive)
-            {
-                if (st.opacity < 0.95f)
-                    return false;
-                if (st.blend != native_renderer::Blend::Opaque && st.blend != native_renderer::Blend::Normal)
-                    return false;
-                return true;
-            }
-            float least = -1.0f; // alpha = texel a x 2 x vertex a / 128 x opacity, at least
-            if (p.minAlpha)
-            {
-                least = static_cast<float>(p.minAlpha) / 128.0f * st.opacity;
-                if (p.tex)
-                    least *= static_cast<float>(p.tex->minAlpha) / 255.0f * 2.0f;
-            }
-            if (st.blend == native_renderer::Blend::Normal)
-            {
-                if (!(least >= 1.0f))
-                    return false;
-            }
-            else if (st.blend != native_renderer::Blend::Opaque)
-                return false;
-            const uint32_t at = st.alphaTest;
-            if (at & 1u)
-            {
-                const float aref = static_cast<float>((at >> 4) & 0xFFu) / 128.0f;
-                if (!(least >= aref))
-                    return false;
-            }
-            return true;
+            return isSafeOpaqueDraw(plan[k], drawAt(k));
         };
         auto hashState = [&](const Draw &d) -> uint64_t
         {
@@ -6335,6 +6430,77 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #endif
         p.source = nullptr;
         p.sourceBlock = -1;
+    }
+
+    bool Renderer::copyIndexedRun(size_t from, size_t to, uint32_t totalIndices, uint32_t totalVerts, RunCopy &copy)
+    {
+        const uint64_t bytes = static_cast<uint64_t>(totalVerts) * sizeof(native_renderer::Vertex) +
+                               static_cast<uint64_t>(totalIndices) * sizeof(uint32_t);
+        if (indexedRunBytes + bytes > kMaxIndexedRunBytes)
+        {
+            std::vector<std::pair<uint64_t, uint64_t>> old;
+            runs.forEach([&](uint64_t key, const RunCopy &r)
+            {
+                if (r.indexed && r.vbo && r.used + 2u < arenaFrame)
+                    old.push_back({r.used, key});
+            });
+            std::sort(old.begin(), old.end());
+            for (const auto &[used, key] : old)
+            {
+                if (indexedRunBytes + bytes <= kMaxIndexedRunBytes)
+                    break;
+                RunCopy *r = runs.find(key);
+                if (r->vbo)
+                    glDeleteBuffers(1, &r->vbo);
+                if (r->ibo)
+                    glDeleteBuffers(1, &r->ibo);
+                indexedRunBytes -= r->bytes;
+                r->vbo = r->ibo = 0;
+                r->bytes = r->count = r->frames = 0;
+            }
+            if (indexedRunBytes + bytes > kMaxIndexedRunBytes)
+                return false;
+        }
+        static std::vector<native_renderer::Vertex> packedVerts;
+        static std::vector<uint32_t> packedIndices;
+        packedVerts.clear();
+        packedIndices.clear();
+        packedVerts.reserve(totalVerts);
+        packedIndices.reserve(totalIndices);
+        for (size_t j = from; j < to; ++j)
+        {
+            const Mesh *m = plan[j].mesh;
+            if (!m || m->srcVerts.empty() || m->srcIndices.empty())
+                return false;
+            const uint32_t baseVert = static_cast<uint32_t>(packedVerts.size());
+            packedVerts.insert(packedVerts.end(), m->srcVerts.begin(), m->srcVerts.end());
+            for (uint32_t idx : m->srcIndices)
+                packedIndices.push_back(baseVert + idx);
+        }
+        if (!copy.vbo)
+            glGenBuffers(1, &copy.vbo);
+        if (!copy.ibo)
+            glGenBuffers(1, &copy.ibo);
+#if !defined(PS2X_NATIVE_VITA)
+        if (vao && cache.vao != vao)
+        {
+            glBindVertexArray(vao);
+            cache.vao = vao;
+            cache.buffer = ~0u;
+        }
+#endif
+        glBindBuffer(GL_ARRAY_BUFFER, copy.vbo);
+        uploadStream(GL_ARRAY_BUFFER, packedVerts.data(), packedVerts.size() * sizeof(native_renderer::Vertex), GL_STATIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, copy.ibo);
+        uploadStream(GL_ELEMENT_ARRAY_BUFFER, packedIndices.data(), packedIndices.size() * sizeof(uint32_t), GL_STATIC_DRAW);
+        cache.buffer = ~0u;
+        copy.indexed = true;
+        copy.pool = -1;
+        copy.first = 0;
+        copy.count = totalIndices;
+        copy.bytes = bytes;
+        indexedRunBytes += bytes;
+        return true;
     }
 
     bool Renderer::copyRun(size_t from, size_t to, uint32_t total, RunCopy &copy)
@@ -7230,11 +7396,12 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 const size_t base = 0u;
                 // A merged run whose meshes lie apart is drawn from its copy (runs).
                 const bool runCopy = planned.run > 1 && planned.runPool >= 0;
-                const GLint firstVertex = runCopy ? static_cast<GLint>(planned.runFirst) : (mesh.dynamic || mesh.pool >= 0 ? static_cast<GLint>(mesh.first) : 0);
+                const bool indexedRun = planned.run > 1 && planned.runIbo != 0;
+                const GLint firstVertex = runCopy ? static_cast<GLint>(planned.runFirst) : (indexedRun ? 0 : (mesh.dynamic || mesh.pool >= 0 ? static_cast<GLint>(mesh.first) : 0));
                 const GLuint vertexBuffer = runCopy ? pools[static_cast<size_t>(planned.runPool)].buffer
-                                                    : (mesh.dynamic ? arenaBuffers[arenaIndex] : (mesh.pool >= 0 ? pools[static_cast<size_t>(mesh.pool)].buffer : mesh.buffer));
+                                                    : (indexedRun ? planned.runVbo : (mesh.dynamic ? arenaBuffers[arenaIndex] : (mesh.pool >= 0 ? pools[static_cast<size_t>(mesh.pool)].buffer : mesh.buffer)));
 #if !defined(PS2X_NATIVE_VITA)
-                const bool plainPoolOrArena = !skinned && !mesh.indexed && (runCopy || mesh.dynamic || mesh.pool >= 0);
+                const bool plainPoolOrArena = !skinned && !mesh.indexed && !indexedRun && (runCopy || mesh.dynamic || mesh.pool >= 0);
                 if (plainPoolOrArena)
                 {
                     GLuint &targetVao = runCopy ? pools[static_cast<size_t>(planned.runPool)].vao
@@ -7903,7 +8070,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     drawStats.instancedDraws += 1;
                     drawStats.instancedMerged += planned.instances - 1u;
 #if !defined(PS2X_NATIVE_VITA)
-                    glDrawArraysInstanced(GL_TRIANGLES, firstVertex, static_cast<GLsizei>(diagHalf(mesh.count)), static_cast<GLsizei>(planned.instances));
+                    if (mesh.indexed)
+                    {
+                        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.indexBuffer);
+                        glDrawElementsInstanced(GL_TRIANGLES, static_cast<GLsizei>(diagHalf(mesh.count)), GL_UNSIGNED_INT, nullptr, static_cast<GLsizei>(planned.instances));
+                    }
+                    else
+                        glDrawArraysInstanced(GL_TRIANGLES, firstVertex, static_cast<GLsizei>(diagHalf(mesh.count)), static_cast<GLsizei>(planned.instances));
 #else
                     for (uint32_t inst = 0; inst < planned.instances; ++inst)
                         drawMesh(mesh, firstVertex);
@@ -7912,8 +8085,14 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 else if (planned.run > 1)
                 {
                     drawStats.merged += planned.run - 1u;
-                    ++(planned.runPool >= 0 ? drawStats.indexed : drawStats.ranges);
-                    glDrawArrays(GL_TRIANGLES, firstVertex, static_cast<GLsizei>(diagHalf(planned.mergedCount)));
+                    ++(planned.runPool >= 0 || planned.runIbo ? drawStats.indexed : drawStats.ranges);
+                    if (planned.runIbo)
+                    {
+                        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, planned.runIbo);
+                        glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(diagHalf(planned.mergedCount)), GL_UNSIGNED_INT, nullptr);
+                    }
+                    else
+                        glDrawArrays(GL_TRIANGLES, firstVertex, static_cast<GLsizei>(diagHalf(planned.mergedCount)));
                 }
                 else
                     drawMesh(mesh, firstVertex);
@@ -7994,14 +8173,28 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     if (planned.instances > 1)
                     {
 #if !defined(PS2X_NATIVE_VITA)
-                        glDrawArraysInstanced(GL_TRIANGLES, firstVertex, static_cast<GLsizei>(diagHalf(mesh.count)), static_cast<GLsizei>(planned.instances));
+                        if (mesh.indexed)
+                        {
+                            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.indexBuffer);
+                            glDrawElementsInstanced(GL_TRIANGLES, static_cast<GLsizei>(diagHalf(mesh.count)), GL_UNSIGNED_INT, nullptr, static_cast<GLsizei>(planned.instances));
+                        }
+                        else
+                            glDrawArraysInstanced(GL_TRIANGLES, firstVertex, static_cast<GLsizei>(diagHalf(mesh.count)), static_cast<GLsizei>(planned.instances));
 #else
                         for (uint32_t inst = 0; inst < planned.instances; ++inst)
                             drawMesh(mesh, firstVertex);
 #endif
                     }
                     else if (planned.run > 1)
-                        glDrawArrays(GL_TRIANGLES, firstVertex, static_cast<GLsizei>(diagHalf(planned.mergedCount)));
+                    {
+                        if (planned.runIbo)
+                        {
+                            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, planned.runIbo);
+                            glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(diagHalf(planned.mergedCount)), GL_UNSIGNED_INT, nullptr);
+                        }
+                        else
+                            glDrawArrays(GL_TRIANGLES, firstVertex, static_cast<GLsizei>(diagHalf(planned.mergedCount)));
+                    }
                     else
                         drawMesh(mesh, firstVertex);
                     if (less98)

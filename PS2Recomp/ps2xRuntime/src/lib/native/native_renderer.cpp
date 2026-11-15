@@ -138,7 +138,7 @@ namespace native_renderer
                                           {"SOTC_NATIVE_NOFEEDBACK", &Tuning::feedback}, {"SOTC_NATIVE_NOREFLECT", &Tuning::reflections},
                                           {"SOTC_NATIVE_NOREFRACT", &Tuning::refraction}})
             if (on(name))
-                d.*field = false;
+                d.*field = !flag(name);
         if (on("SOTC_NATIVE_NOHAZE"))
             d.heatHaze = !flag("SOTC_NATIVE_NOHAZE");
         if (on("SOTC_BODY_SHADOWS"))
@@ -184,7 +184,7 @@ namespace native_renderer
             d.shadowAllSides = on("SOTC_SHADOW_ALLSIDES") && std::atoi(std::getenv("SOTC_SHADOW_ALLSIDES")) != 0;
             if (on("SOTC_BG_DEPTH"))
                 d.backgroundDepth = std::atoi(std::getenv("SOTC_BG_DEPTH")) != 0;
-            d.additive = !on("SOTC_NATIVE_NOADDITIVE");
+            d.additive = !(on("SOTC_NATIVE_NOADDITIVE") && std::atoi(std::getenv("SOTC_NATIVE_NOADDITIVE")) != 0);
             d.mipmaps = !on("SOTC_NATIVE_NOMIPS");
             d.textureScroll = !on("SOTC_NATIVE_NOROW");
             d.rawMirror = on("SOTC_RAW_MIRROR");
@@ -638,7 +638,7 @@ namespace native_renderer
         debugToggle("dbg_lighting", "Lighting", "Iluminação", "Off: lit models at their vertex colour.", "Desligado: modelos iluminados na cor do vértice.",
                     &Tuning::lighting);
         debugToggle("dbg_additive", "Additive draws", "Desenhos aditivos", "Draws that add light (glows, light shafts).",
-                    "Desenhos que somam luz (brilhos, feixes).", &Tuning::additive);
+                    "Desenhos que somam luz (brilhos, feixes).", &Tuning::additive, "SOTC_NATIVE_NOADDITIVE");
         debugToggle("dbg_subtract", "Subtract draws", "Desenhos subtrativos", "Draws that darken by subtracting.", "Desenhos que escurecem subtraindo.",
                     &Tuning::subtract);
         debugToggle("dbg_overlays", "Second passes", "Segundas passadas", "A second pass drawn over the same geometry.",
@@ -2124,6 +2124,7 @@ namespace native_renderer
         };
         std::mutex mutex;
         std::condition_variable wake;
+        std::deque<Job> todoUrgent;
         std::deque<Job> todo;
         std::vector<Job> done;
         bool started = false;
@@ -2143,7 +2144,12 @@ namespace native_renderer
             {
                 std::lock_guard<std::mutex> lock(mutex);
                 for (Job &job : staged)
-                    todo.push_back(std::move(job));
+                {
+                    if (job.w && job.w->priority)
+                        todoUrgent.push_back(std::move(job));
+                    else
+                        todo.push_back(std::move(job));
+                }
                 sleeper = sleeping;
             }
             staged.clear();
@@ -2168,7 +2174,7 @@ namespace native_renderer
                 Job job;
                 {
                     std::unique_lock<std::mutex> lock(mutex);
-                    while (todo.empty())
+                    while (todoUrgent.empty() && todo.empty())
                     {
 #if defined(__vita__)
                         // Round 105 (build105): idle on a kernel semaphore
@@ -2189,11 +2195,21 @@ namespace native_renderer
                             sleeping = false;
                             continue;
                         }
-#endif
                         wake.wait_for(lock, std::chrono::milliseconds(2));
+#else
+                        wake.wait(lock);
+#endif
                     }
-                    job = std::move(todo.front());
-                    todo.pop_front();
+                    if (!todoUrgent.empty())
+                    {
+                        job = std::move(todoUrgent.front());
+                        todoUrgent.pop_front();
+                    }
+                    else
+                    {
+                        job = std::move(todo.front());
+                        todo.pop_front();
+                    }
                 }
                 if (job.w)
                     job.w->work();
