@@ -146,6 +146,27 @@ Consequences for your work:
 - Shared memory is **895 MiB**, not 1 GB. Budget renderer pools against the
   measured figure.
 
+### Kernel 4.4.189 & Platform Capabilities Audit (2026-11-15)
+
+Probed directly on the R36S (`Linux 4.4.189 #1 SMP`, Debian 13.7 trixie, `glibc 2.41`, `systemd 257`):
+
+- **Vulkan is offscreen-only (`present support = false`, NO WSI):** `mali_icd.json` (`libmali.so -> libMali.so`, `r13p0-gbm`) exposes `Mali-G31` (`Vulkan 1.0.108`, `apiVersion 1.0.108`, 2 `GRAPHICS|COMPUTE|TRANSFER` queues, `894.91 MiB` heap, `VK_KHR_external_memory_fd`), **without** `vk_icdGetInstanceProcAddr` and **without** `VK_KHR_surface`, `VK_KHR_display`, Wayland/Xlib surfaces, or `VK_KHR_swapchain`. Standard Vulkan apps/emulators cannot create an on-screen swapchain here. `panfrost_icd.json` fails (`ERROR_INITIALIZATION_FAILED`, requires mainline `panfrost` DRM kernel driver ≥ 5.2), and `lvp_icd.json` (`llvmpipe`) is CPU software rendering (`1.4.305`).
+- **Desktop OpenGL / GLX / X11 / Wayland are unusable on GPU:** Mesa `panfrost_dri.so` / `libEGL_mesa.so.0` have no `panfrost` DRM device (`/dev/dri/renderD128` is `rockchip-drm` display-only); no X11 or Wayland server runs; SDL2 (`2.32.10`) only provides `KMSDRM` + `librga` + `opengles2` + `ALSA`.
+- **OpenCL ICD loader is broken (`/etc/OpenCL/vendors/` empty):** `libOpenCL.so.1` fails with `-1001` (`CL_PLATFORM_NOT_FOUND_KHR`). Only direct `libMali.so` (`libOpenCL.so -> libMali.so`) exposes OpenCL 2.0 (`1` platform).
+- **Hardware video decode via FFmpeg/V4L2 does not work:** `/dev/vpu_service` exists (`root`-only), but `librockchip_mpp.so` is absent, `/dev/video*` M2M nodes do not exist, and Debian FFmpeg's `*_v4l2m2m` decoders have no kernel device.
+- **No Bluetooth controller** detected; audio uses **ALSA** directly (`rockchip,rk817-codec`, `card 0, device 0`, no PulseAudio/PipeWire daemon); both `aarch64` and `armhf` `libMali.so` / linkers are installed; `511 MiB` ZRAM (`/dev/zram0`) active.
+- **Kernel `4.4.189` syscall & subsystem gaps (`libc.syscall()` verified):**
+  - `io_uring_setup` (NR 425, Linux 5.1) → `ENOSYS`
+  - `clone3` (NR 435, Linux 5.3) → `ENOSYS`
+  - `pidfd_open` (NR 434, Linux 5.3) → `ENOSYS`
+  - `statx` (NR 291, Linux 4.11) → `ENOSYS` (emulated by glibc 2.41, fails if invoked directly without fallback)
+  - `bpf` (NR 280) → `ENOSYS`
+  - `memfd_create` (NR 279) → supported (`OK`)
+  - Missing kernel features: `memory`/`io`/`pids` cgroup controllers (only `cpuset, cpu, cpuacct, devices, freezer, net_cls` exist), PSI (`/proc/pressure/*`), `overlayfs`, `f2fs`, `binfmt_misc`, and `/proc/config.gz`. Never depend on containers (`overlay` + memory/pids cgroups), `io_uring`, eBPF, `clone3`-only runtimes, or `systemd-oomd`/`PSI` on this target.
+  - Because `r36s-sysroot` carries newer Debian trixie kernel headers (6.1) than the running kernel (`4.4.189`), **never rely on compile-time `SYS_*` checks alone** for `io_uring`, `clone3`, `pidfd_open`, `statx`, or `bpf`.
+
+See [`docs/r36s_port.md`](docs/r36s_port.md) for the full compatibility matrix.
+
 ### The device is reachable over SSH
 
 Use the maintainer's local SSH configuration or an interactive credential

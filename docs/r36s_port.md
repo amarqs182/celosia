@@ -2,13 +2,32 @@
 
 ## Target
 - SoC: Rockchip RK3326 (`rockchip,rk3326-odroidgo3-linux`)
-- CPU: quad-core Cortex-A35 (`fp asimd`, no FMA/fp16/SVE)
-- GPU: Mali-G31 (Bifrost r0p0, GPU ID `0x7093`) via ARM `libmali` (`OpenGL ES 3.2 v1.r13p0-01rel0`)
-- Memory: 895 MiB shared RAM (~726 MiB available)
-- Display: 640×480 KMSDRM scanout at 60 Hz (`card0`/`renderD128` via `rockchip-drm`)
-- Platform: aarch64 Debian 13 (trixie) Linux, glibc 2.41, SDL2 KMSDRM, GLES 3.2
+- CPU: quad-core Cortex-A35 (`fp asimd`, no FMA/fp16/SVE; `1008–1512 MHz`)
+- GPU: Mali-G31 (Bifrost r0p0, GPU ID `0x7093`, `400–600 MHz`) via ARM `libmali` (`OpenGL ES 3.2 v1.r13p0-01rel0`, `-gbm` variant)
+- Memory: 895 MiB shared RAM (~708–726 MiB available) + 511 MiB ZRAM (`/dev/zram0`)
+- Display: 640×480 KMSDRM scanout at 60 Hz (`card0`/`renderD128` via `rockchip-drm`) + RGA (`/dev/rga`, `librga 2.0.0`)
+- Platform: aarch64 Debian 13.7 (trixie) Linux, glibc 2.41, systemd 257, kernel `4.4.189 #1 SMP` (plus `armhf` 32-bit `libMali.so` / linker)
 
 The target is stable 60 FPS with headroom, not merely a momentary 60 FPS. Use a 16.67 ms frame budget and measure frame-time percentiles.
+
+## Platform Capabilities & Kernel `4.4.189` Limitations (Measured 2026-11-15)
+
+Do **not** target or debug technologies that are broken or absent on the R36S software/kernel stack:
+
+| Subsystem / API | Status on R36S | Root Cause / Constraint |
+| --- | --- | --- |
+| **OpenGL ES 3.2 / ES 1.1 (`libMali.so`)** | ✅ Works | Only hardware-accelerated 3D graphics path (`libEGL.so.1`, `libGLESv2.so.2`, `libGLESv3.so.3` → `libMali.so`). |
+| **SDL2 (`2.32.10`) KMSDRM + `librga` + ALSA** | ✅ Works | Built with `KMSDRM` (with `KMSDRM_InitRotateBuffer` via `/dev/rga`), `opengles2`, and `ALSA`. Note `SDL_GL_SetSwapInterval(0)` keeps `actual=1` (~60 Hz KMSDRM flip). |
+| **Audio (`ALSA` `rockchip,rk817-codec`)** | ✅ Works | Direct ALSA `card 0, device 0`; no PulseAudio/PipeWire daemon runs by default. |
+| **Vulkan (`mali_icd.json` → `libMali.so`)** | ⚠️ Offscreen compute/render only; **NO display WSI** | Exposes `Mali-G31` Vulkan `1.0.108` (`GRAPHICS\|COMPUTE\|TRANSFER`, `VK_KHR_external_memory_fd`), missing `vk_icdGetInstanceProcAddr` (falls back to `vkGetInstanceProcAddr`), **`present support = false`**, and **0 surface/swapchain extensions** (`VK_KHR_surface`, `VK_KHR_display`, `VK_KHR_swapchain` are absent in this `-gbm.so` blob). Normal Vulkan apps/emulators cannot create a swapchain without manual `dma_buf` + DRM/EGL composition. |
+| **Vulkan (`panfrost_icd.json` / `lvp_icd.json`)** | ❌ Broken (Panfrost) / CPU-only (Lavapipe) | `libvulkan_panfrost.so` fails with `ERROR_INITIALIZATION_FAILED` (needs mainline `panfrost` DRM kernel ≥ 5.2); `libvulkan_lvp.so` (`1.4.305`) runs on CPU only (`llvmpipe`). |
+| **OpenGL Desktop / Mesa DRI / Wayland / X11** | ❌ Broken / Absent | No X11 or Wayland server; Mesa `panfrost_dri.so` / `libEGL_mesa.so.0` have no `panfrost` kernel device (`renderD128` is `rockchip-drm` display-only); `libMali.so` does not implement desktop OpenGL (`gl4es` is not installed system-wide). |
+| **OpenCL 2.0 (`libMali.so` vs `libOpenCL.so.1`)** | ⚠️ Broken via ICD loader | `/etc/OpenCL/vendors/` is empty, so `libOpenCL.so.1` fails with `-1001` (`CL_PLATFORM_NOT_FOUND_KHR`). Direct `dlopen("libMali.so")` (`libOpenCL.so -> libMali.so`) returns `1` OpenCL 2.0 platform. |
+| **VPU / Hardware Video Decode (`FFmpeg`)** | ❌ Broken / Incomplete | `/dev/vpu_service` is `root`-only (`600`), `librockchip_mpp.so` is absent, `/dev/video*` V4L2 M2M nodes do not exist, and Debian FFmpeg lacks `rkmpp`. |
+| **EGL/GBM directly on `/dev/dri/renderD128`** | 💥 Fatal Kernel Oops | Calling `eglInitialize` on `EGL_PLATFORM_GBM_KHR` (`renderD128`) NULL-dereferences in kernel (`Oops: 96000005`) and hangs the device until hard power-off; always use SDL2 KMSDRM. |
+| **Bluetooth** | ❌ Absent | No Bluetooth controller detected (`wlan0` Wi-Fi works via `NetworkManager`/`wpa_supplicant`). |
+| **Kernel `4.4.189` syscalls (`ENOSYS`)** | ❌ Missing (with glibc 2.41 header mismatch) | Probed `libc.syscall()` returns `errno 38 (ENOSYS)` for `io_uring_setup` (NR 425), `clone3` (NR 435), `pidfd_open` (NR 434), `statx` (NR 291), and `bpf` (NR 280); `memfd_create` (NR 279) works. Never gate code solely on compile-time `r36s-sysroot` 6.1 headers without runtime `ENOSYS` fallback. |
+| **Kernel `4.4.189` cgroups / FS / sysfs** | ⚠️ Incomplete | `/proc/cgroups` only has `cpuset, cpu, cpuacct, devices, freezer, net_cls` (**no `memory`, `io`, `pids`**); **no `PSI`** (`/proc/pressure/*`), **no `overlayfs`**, **no `f2fs`**, **no `binfmt_misc`**, **no `/proc/config.gz`** (`ext2/3/4, squashfs, vfat, exfat, btrfs, xfs, fuse` exist). Scanning `/proc/[0-9]*/fd/*` freezes the device. |
 
 ## Optimization State (Passes 7–9.5 & Phase 6)
 
