@@ -146,7 +146,7 @@ namespace decomp_hot48c
         uint32_t sp;
         uint64_t s2; // the output record (daddu a0, then addiu +0x10)
         uint64_t s4; // the id record
-        void call(uint32_t ra) const { callGuest(rdram, ctx, runtime, kGetLayoutClass, ra, sp); }
+        void call(uint32_t ra) const { sotc_decomp::layoutClassFast(rdram, ctx, runtime, GPR_U32(ctx, 4), ra, sp); }
         // The part record of class v0's DB (+0x184 -> +0x20 -> +8, 0x90 bytes a part).
         uint32_t dbOf(uint32_t cls) const { return READ32(READ32(cls + 0x184u) + 0x20u); }
     };

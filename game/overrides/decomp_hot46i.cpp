@@ -294,7 +294,16 @@ namespace decomp_hot46i
         const uint32_t sp0 = GPR_U32(ctx, 29), sp = sp0 - 0xF0u;
         const uint64_t object64 = GPR_U64(ctx, 4), owner64 = GPR_U64(ctx, 5); // s4, fp
         const uint32_t object = static_cast<uint32_t>(object64);
-        auto call = [&](uint32_t target, uint32_t ra) { callGuest(rdram, ctx, runtime, target, ra, sp); };
+        auto call = [&](uint32_t target, uint32_t ra)
+        {
+            uint32_t res = 0u;
+            if (target == kGetLayoutClass && !ps2_worker::isShell(runtime) && sotc_decomp::layoutClassPlainOnly(rdram, GPR_U32(ctx, 4), res))
+            {
+                SET_GPR_S32(ctx, 2, static_cast<int32_t>(res));
+                return;
+            }
+            callGuest(rdram, ctx, runtime, target, ra, sp);
+        };
 
         // The prologue (its order).
         WRITE64(sp + 0x80u, GPR_U64(ctx, 16));
@@ -498,7 +507,16 @@ namespace decomp_hot46i
         const uint64_t animId64 = GPR_U64(ctx, 5), node64 = GPR_U64(ctx, 6); // s5, s2
         const uint32_t record = GPR_U32(ctx, 7);                              // s0
         const uint32_t pos = record + 0x10u, quat = record + 0x20u;          // s4 (fp), s7
-        auto call = [&](uint32_t target, uint32_t ra) { callGuest(rdram, ctx, runtime, target, ra, sp); };
+        auto call = [&](uint32_t target, uint32_t ra)
+        {
+            uint32_t res = 0u;
+            if (target == kGetLayoutClass && !ps2_worker::isShell(runtime) && sotc_decomp::layoutClassPlainOnly(rdram, GPR_U32(ctx, 4), res))
+            {
+                SET_GPR_S32(ctx, 2, static_cast<int32_t>(res));
+                return;
+            }
+            callGuest(rdram, ctx, runtime, target, ra, sp);
+        };
 
         // The prologue (its order).
         WRITE64(sp + 0xA8u, GPR_U64(ctx, 21));

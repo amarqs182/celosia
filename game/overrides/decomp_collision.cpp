@@ -693,6 +693,17 @@ namespace decomp_collision
         guestCall(g.rdram, g.ctx, g.runtime, target, ra, sp);
     }
 
+    void callNative(const G g, PS2Runtime::RecompiledFunction known, uint32_t target, uint32_t ra, uint32_t sp, std::initializer_list<uint32_t> args)
+    {
+        int r = 4;
+        for (uint32_t a : args)
+        {
+            SET_GPR_U32(g.ctx, r, a);
+            ++r;
+        }
+        sotc_decomp::callNative(g.rdram, g.ctx, g.runtime, target, known, ra, sp);
+    }
+
     // EntryModifiedManager (0x11478b8, round 39): the index put in the
     // cache's modified list (+0 the count, +8 the flags, +0xc the index size
     // 1 / 2 / 4, +0x10 the list; another size: only the flag), the flag byte
@@ -4393,7 +4404,7 @@ namespace decomp_collision
         const uint32_t objFilter = Array ? GPR_U32(ctx, 9) : GPR_U32(ctx, 8), partFilter = Array ? GPR_U32(ctx, 10) : GPR_U32(ctx, 9),
                        surfFilter = Array ? GPR_U32(ctx, 11) : GPR_U32(ctx, 10), idFilt = Array ? g.u32(spIn) : GPR_U32(ctx, 11);
         const uint32_t user = Array ? g.u32(spIn + 8u) : g.u32(spIn);
-        call(g, 0x01133548u, Array ? 0x0112E1ECu : 0x0112D5FCu, sp, {sp + 0x40u, sp, start, end}); // GetArbitraryDirectionInverseMatrix
+        callNative(g, &decomp_quat::invMatrix, 0x01133548u, Array ? 0x0112E1ECu : 0x0112D5FCu, sp, {sp + 0x40u, sp, start, end}); // GetArbitraryDirectionInverseMatrix
         const float length = ctx->f[0];
         auto finish = [&](uint64_t v0)
         {
@@ -4736,7 +4747,7 @@ namespace decomp_collision
             }
             return finish(anyHit ? 1u : 0u);
         }
-        call(g, 0x001C7110u, 0x0112D628u, sp, {group, 0u}); // isysGroupForFirst
+        callNative(g, &decomp_isys::forFirst, 0x001C7110u, 0x0112D628u, sp, {group, 0u}); // isysGroupForFirst
         uint32_t entry = GPR_U32(ctx, 2), last = 0u;
         while (entry != 0u)
         {
@@ -4758,13 +4769,13 @@ namespace decomp_collision
                 SET_GPR_S32(ctx, 2, static_cast<int32_t>(nextEntry));
             else
             {
-                call(g, 0x001C76D0u, 0x0112E11Cu, sp, {entry, 0u}); // isysGroupForNext
+                callNative(g, &decomp_group::groupForNext, 0x001C76D0u, 0x0112E11Cu, sp, {entry, 0u}); // isysGroupForNext
                 nextEntry = GPR_U32(ctx, 2);
             }
             entry = nextEntry;
         }
         if (last != 0u)
-            call(g, 0x001C77B8u, 0x0112E140u, sp, {last, 0u}); // isysGroupForExit
+            callNative(g, &decomp_isys::forExit, 0x001C77B8u, 0x0112E140u, sp, {last, 0u}); // isysGroupForExit
         finish(anyHit ? 1u : 0u);
     }
     void directCallBack125(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) { obj125Run<false>(rdram, ctx, runtime); }

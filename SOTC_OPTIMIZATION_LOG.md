@@ -152,5 +152,42 @@ Compared the real user gameplay session on Pass 6 (`/tmp/sotc_pass6_play.log`, 3
 
 - **Net measured gain across Phases 2–4 (identical 125s deterministic route):** **`25.60 → 29.40 FPS`** (**+3.80 FPS / +14.8% median**, **`23.80 → 27.50` minimum FPS**), **`game` `38.90 → 33.80 ms`** (**-5.10 ms / -13.1%**), light/menu scenes locked at **`59.8–60.1 FPS`**, and `SOTC_RELEASE=1` + `PS2X_SWAP_INTERVAL=0` + `SOTC_FPS_CAP=60` + `SOTC_CAM_INVERT_X=1` verified active on real R36S hardware.
 - **Remaining bottlenecks & next-frontier constraints:**
-  1. **Game thread CPU (`33.80 ms` median in Shrine):** still the primary frame-rate limiter on 4× Cortex-A35 @ 1.512 GHz (~55% of samples remain in recompiled MIPS/game logic, top remaining native hotspots include `ClipCollisionDirectCallBack`, `GetLayoutClass` non-plain paths, `manager_sub_010F3A08`, `DispDispObjGroupModel`, `ExecCharaGeometry`, `ClipCollisionFinderCallBack`). Pushing significantly past ~30 FPS in heavy scenes requires further deep MIPS-to-C++ decompilation or algorithmic collision/culling reduction.
+  1. **Game thread CPU (`33.80 ms` median in Shrine):** still the primary limiter on 4× Cortex-A35 @ 1.512 GHz (~55% of samples remain in recompiled MIPS/game logic, top remaining native hotspots include `ClipCollisionDirectCallBack`, `GetLayoutClass` non-plain paths, `manager_sub_010F3A08`, `DispDispObjGroupModel`, `ExecCharaGeometry`, `ClipCollisionFinderCallBack`). Pushing significantly past ~30 FPS in heavy scenes requires further deep MIPS-to-C++ decompilation or algorithmic collision/culling reduction.
   2. **Mali-G31 + KMSDRM scanout (`render` `15.50 ms` med / `max 25.60 ms`, `present` `18.50 ms` med):** runs asynchronously (`wait 0.0`) so it does not stall `game`, though `SDL_GL_SetSwapInterval(0)` is overridden to `actual=1` by the RK3326 KMSDRM/libmali flip path (`18.5 ms`), capping peak single-flip cadence to the 60 Hz display scanout.
+
+---
+
+## Phase 5 — Pass 9.5: Direct Native Chaining, `spriteDrawSprite`, Collision/Pose Cleanups & Fresh PGO (`pgo_pass95`)
+
+Executed after Pass 9 + PGO showed `game` (`33.80 ms` med) still gating 3D Shrine frame rate on Cortex-A35 (`wait 0.0`).
+
+- **Implemented optimizations across Batches 1–4 (`feat/r36s-pass95-cpu`):**
+  - **Batch 1 (`SOTC_GLEND_ASYNC` & sync/fallback bypasses):** Added `SOTC_GLEND_ASYNC` (default `1`, async `gsRegEnd` / end-of-frame hook path) in `game/overrides/sotc_native.cpp`; bypassed table-dispatch `callGuest` overhead when direct native targets apply; tuned `PS2Recomp/ps2xRuntime/CMakeLists.txt`.
+  - **Batch 2 (`decomp_sprite.cpp` — `spriteDrawSprite`):** Added native `spriteDrawSprite` (`game/overrides/decomp_sprite.cpp`, raising `[sotc:decomp]` from `1195` to `1196` functions), verified `+0.40 FPS` over `SOTC_DECOMP_SKIP=spriteDrawSprite` (`29.20` vs `28.80 FPS`) on the deterministic route.
+  - **Off-by-default switch audits (rejected):** A/B tested `SOTC_FIND84` and `SOTC_TEXR128` on real R36S hardware; both measured slower/non-beneficial and remain off by default.
+  - **Batch 3 (Direct native chaining & `coll125` micro-optimizations):**
+    - Added native forward declarations and direct C++ call wiring (`sotc_decomp::callNative` / `callDirect` / `g.callNative`) in `game/overrides/sotc_decomp.h`, `decomp_scriptvm3.cpp` (`execCharaGeometry`), `decomp_charageo.cpp` (`rest81::rootDynamics`, `CalcNodeInterp`, `GetCharaRootDynamicsAfter`, `GetMotionMatrix`, `UpdateLayoutClassGeometry`, `childNodes`, `GetClothDynamics`), `decomp_collision.cpp` (`invMatrix`, `isysGroupForFirst`, `isysGroupForNext`, `isysGroupForExit`), `decomp_isys.cpp` (`signalSema`), and `decomp_walk.cpp` (`sotc_native::modelDispHook`, plus early `!native_renderer::tuning().shadows` short-circuit in `solidDisp` before two guest RAM reads).
+    - `game/overrides/coll125.h` (`validate138`): removed redundant same-iteration `prefetch138` (keeping `pf141::noteGuest` and lookahead `k+1` prefetch in `run()`) and removed the redundant second `layoutClass` lookup (keeping the `g.u8(m.w0 + 8u) == m.type` check).
+  - **Batch 4 (`game/overrides/decomp_skinpal.cpp`):** Wired direct `sotc_decomp::callNative(..., &sotc_native::modelDispHook, ...)` when `dispTarget == 0x01097118u`.
+- **Fresh R36S `pgo_pass95` & `linux_hot_order.ld` Regeneration:**
+  - Built `PS2X_LINUX_PGO=gen` (stripped upload `99,120,976` bytes, MD5 `911b04d4e330cc091a082889d560a275`) and ran real Save-Shrine gameplay on R36S with `SOTC_GCOV_DUMP_FRAME=4900` (`[gcov] frame 4900: __gcov_dump() complete`, `draws=1208..1255`), collecting `214/214` `.gcda` files (`6.0M`).
+  - Rebuilt `build/linux-aarch64` with `PS2X_LINUX_PGO=build/linux-aarch64/pgo_pass95` with **zero** missing-profile / coverage-mismatch warnings across all 214 PGO units.
+  - Regenerated `game/overrides/linux_hot_order.ld` via `tools/linux_hot_order.py` against fresh R36S gameplay profile `gp_b2_game.prof` (`8,883` ordered symbols, `35.04 MB`: `7.70 MB` Zone A critical + `20.68 MB` Zone B warm + `6.65 MB` Zone C `lift_d1`).
+- **Final Pass 9.5 + PGO Binary:** `/roms/ports/.SotC_Celosia/ps2sotc_aarch64_pie_sdl` (`78,177,360` bytes stripped, MD5 `8f1377e4b1b40d1e34a546921cd0971a`).
+
+### Pass 9.5 Deterministic R36S Benchmarks (125s Save-Shrine Route, `r36s_run_bench.py`)
+
+| Stage | Window / Scene | `draws` | FPS (min / med / avg / max) | `game` med | `render` med |
+| --- | --- | --- | --- | --- | --- |
+| **Pass 9 + PGO** | `f=4458..4818` / `4458..5418` (Shrine) | `852..1128` | `27.50 / 29.30 / 29.04 / 30.30` (`4458..5418`: `29.40 / 29.26`) | `34.00 ms` (`33.80 ms`) | `16.80 ms` |
+| **Pass 9.5 B1** | `f=4458..4818` / `4458..5418` (Shrine) | `790..1129` | `27.60 / 29.00 / 29.04 / 30.50` (`4458..5418`: `29.70 / 29.54`) | `34.30 ms` (`33.50 ms`) | `16.50 ms` (`14.50 ms`) |
+| **Pass 9.5 B2** (`+spriteDrawSprite`) | `f=4458..4818` / `4458..5418` (Shrine) | `790..1130` | `27.40 / 28.90 / 28.84 / 30.40` (`4458..5418`: `29.20 / 29.18`) | `34.50 ms` (`34.10 ms`) | `13.90 ms` (`14.50 ms`) |
+| **Pass 9.5 B3** (clean, stale PGO) | `f=3378..4278` (Shrine before early pause) | `932..933` | `29.15` med (`16` buckets) | `34.15 ms` | — |
+| **Final Pass 9.5 + `pgo_pass95`** (`8f1377e4`) | `f=4458..4818` (matched Shrine draws) | `775..1146` | `28.20 / 29.20 / 29.17 / 30.70` | `34.10 ms` | `18.70 ms` |
+| **Final Pass 9.5 + `pgo_pass95`** (`8f1377e4`) | `f=4458..5418` (Shrine exit → Forbidden Lands) | `453..3221` | `27.30 / 29.20 / 29.90 / 34.70` | `34.10 ms` | `19.60 ms` |
+| **Final Pass 9.5 + `pgo_pass95`** (`8f1377e4`) | `f=5118..5418` (exterior plain) | **`3041..3221`** | **`27.50 / 29.60 / 29.68 / 31.50`** | **`33.65 ms`** | `28.10 ms` (`wait 0.0`) |
+
+- **Pass 9.5 Evaluation & Conclusion:**
+  - Micro-optimizing call dispatch (`callNative`/`callDirect`), `coll125` validation, and `spriteDrawSprite` lifted peak/avg throughput across transitions and held **`29.60 FPS` med (`33.65 ms` game, `wait 0.0`)** even when Wander exited the Shrine into **3,041–3,221 draws** outdoors, while steady interior Shrine gameplay remains in the **`29.0–30.1 FPS` (`~33.1–34.1 ms` game)** band (within run-to-run variance under the `ondemand` SSH governor).
+  - **Fresh gameplay `PS2X_PROFILE` (`gp_b2_game.prof`, `26,375` samples / 26 s, EE busy 99.7%):** confirms that single-function micro-shaving has hit diminishing returns (~1–2% per native) because CPU time is spread flatly across collision/geometry traversal and remaining recompiled logic: `ClipCollisionDirectCallBack` (`2.19%`), `ClipCollisionFinderCallBack` (`1.97%`), `GetCollisionDBCallBack` (`1.95%`), `DispDispObjGroupModel` (`1.75%`), `manager_sub_0111C810` (`1.72%`), `ExecCharaGeometry` (`1.69%`), `manager_sub_010F3A08` (`1.63%`), `gamecore_sub_013CFBE0` (`1.61%`), `manager_sub_010F3CF0` (`1.35%`), `ClipCollisionFinder` (`1.25%`), `GetMotionMatrix` (`1.14%`), `gamecore_sub_013E3840` (`1.08%`), and `GetLayoutClass` (`1.08%`).
+  - **Next optimization frontier:** Meaningful gains beyond ~30 FPS require either algorithmic scene/collision work reduction (broadphase/skip logic for distant collision & object draws) or full C++ system-level rewrites of the remaining recompiled hot subsystems rather than incremental per-call micro-optimizations.

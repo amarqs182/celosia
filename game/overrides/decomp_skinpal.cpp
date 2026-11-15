@@ -149,7 +149,11 @@ namespace decomp_skinpal
                 {
                     SET_GPR_S32(ctx, 4, static_cast<int32_t>(geo));
                     SET_GPR_S32(ctx, 5, static_cast<int32_t>(ram.u32(object + 0x160u)));
-                    sotc_decomp::callGuest(rdram, ctx, runtime, sotc_decomp::jalTarget(rdram, 0x010F3E14u), 0x010F3E1Cu, frame);
+                    const uint32_t dispTarget = sotc_decomp::jalTarget(rdram, 0x010F3E14u);
+                    if (dispTarget == 0x01097118u)
+                        sotc_decomp::callNative(rdram, ctx, runtime, dispTarget, &sotc_native::modelDispHook, 0x010F3E1Cu, frame);
+                    else
+                        sotc_decomp::callGuest(rdram, ctx, runtime, dispTarget, 0x010F3E1Cu, frame);
                 }
                 SET_GPR_S32(ctx, 2, static_cast<int32_t>(ram.u32(object + 0x144u)));
                 SET_GPR_U64(ctx, 16, ram.u64(frame));

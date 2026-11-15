@@ -95,6 +95,11 @@ namespace char104 // decomp_char104.cpp (round 104)
     bool tryKick(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t obj, uint32_t cls);
 }
 
+namespace decomp_hot47j
+{
+    void areaExist(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+}
+
 namespace decomp_scriptvm3
 {
     using sotc_decomp::callGuest;
@@ -276,7 +281,13 @@ namespace decomp_scriptvm3
             charlod78::geoTime(GPR_U32(ctx, 16), charlod78::now() - t0);
         }
         else
-            callGuest(rdram, ctx, runtime, jalTarget(rdram, 0x013CFC50u), 0x013CFC58u, kWorkStack); // ExecCharaGeometry
+        {
+            const uint32_t t = jalTarget(rdram, 0x013CFC50u);
+            if (t == 0x010BF8F0u)
+                callNative(rdram, ctx, runtime, t, &decomp_charageo::execCharaGeometry, 0x013CFC58u, kWorkStack);
+            else
+                callGuest(rdram, ctx, runtime, t, 0x013CFC58u, kWorkStack); // ExecCharaGeometry
+        }
         move(ctx, 4, 16);
         {
             const uint32_t t = jalTarget(rdram, 0x013CFC58u);
@@ -286,7 +297,7 @@ namespace decomp_scriptvm3
                 callGuest(rdram, ctx, runtime, t, 0x013CFC60u, kWorkStack); // GetLayoutClass
         }
         SET_GPR_S32(ctx, 4, (int32_t)READ32(GPR_U32(ctx, 2) + 0x134u)); // the layout's area
-        callGuest(rdram, ctx, runtime, kAreaExist, 0x013CFC68u, kWorkStack);
+        callNative(rdram, ctx, runtime, kAreaExist, &decomp_hot47j::areaExist, 0x013CFC68u, kWorkStack);
         WRITE8(GPR_U32(ctx, 18) + 0x539u, (uint8_t)GPR_U32(ctx, 2));
         pf141::segmentEnd(GPR_U32(ctx, 16)); // round 141: the segment closes, the next one after it asked for
         }
@@ -393,7 +404,7 @@ namespace decomp_scriptvm3
                 callGuest(rdram, ctx, runtime, t, 0x013CF590u, kWorkStack); // GetLayoutClass
         }
         SET_GPR_S32(ctx, 4, (int32_t)READ32(GPR_U32(ctx, 2) + 0x134u));
-        callGuest(rdram, ctx, runtime, kAreaExist, 0x013CF598u, kWorkStack);
+        callNative(rdram, ctx, runtime, kAreaExist, &decomp_hot47j::areaExist, 0x013CF598u, kWorkStack);
         {
             const bool exists = GPR_U64(ctx, 2) != 0u;
             li(ctx, 2, 4u);

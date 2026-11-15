@@ -104,6 +104,11 @@ extern "C" void ps2x_vita_pace143_ab(int on);             // raylib_vita.cpp (ro
 #endif
 #include <vector>
 
+namespace decomp_hot44g
+{
+    void gsReg(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+}
+
 namespace sotc_native
 {
     bool mdsTraceOn(); // round 61's SOTC_MDS_TRACE (mdstrace, below)
@@ -5892,6 +5897,12 @@ namespace sotc_native
     }
 
     // A frame of the game ends when the display list goes to the VIF1.
+    void syncFrame(uint8_t *rdram);
+    inline void ensureFrameSynced(uint8_t *rdram)
+    {
+        if (__builtin_expect(g_ram != rdram || ps2_stats::vif1Chains.load(std::memory_order_relaxed) != g_frame, 0))
+            syncFrame(rdram);
+    }
     void newDrawOrder();
     void syncFrame(uint8_t *rdram)
     {
@@ -6763,6 +6774,27 @@ namespace sotc_native
         g_layers.pop_back();
         g_requested = requested;
     }
+    // Pass 9.5: direct 2D quad feed for native spriteDrawSprite (skips iosDlPushLayer,
+    // texTransRequest, gsRegBegin/gsRegWrite/gsRegEnd, and iosDlPopLayer).
+    void spriteFeed(uint8_t *rdram, uint32_t texResource, uint32_t layer, const uint64_t *pairs, uint32_t count)
+    {
+        ensureFrameSynced(rdram);
+        static const bool async = !std::getenv("SOTC_GLEND_ASYNC") || std::atoi(std::getenv("SOTC_GLEND_ASYNC")) != 0;
+        if (!async)
+            hookJoin(hookjobs::k_glend);
+        static const bool off = std::getenv("SOTC_NATIVE_NOGL") != nullptr;
+        if (off || count == 0u)
+            return;
+        const uint32_t requested = g_requested;
+        g_requested = texResource ? word(texResource + 0x20u) : 0u;
+        g_layers.push_back(layer);
+        g_2dDefer = async;
+        for (uint32_t i = 0; i < count; ++i)
+            feed2D(static_cast<uint32_t>(pairs[2u * i + 1u]) & 0xFFu, pairs[2u * i]);
+        g_2dDefer = false;
+        g_layers.pop_back();
+        g_requested = requested;
+    }
     // The check's view of the same feed: the layer, the header, the pairs.
     void immRecord128(std::vector<uint64_t> &rec, const uint64_t *pairs, uint32_t count, uint32_t layer, bool haze)
     {
@@ -6775,6 +6807,16 @@ namespace sotc_native
         }
     }
     void immArm128(std::vector<uint64_t> *rec) { g_immRec128 = rec; }
+
+    inline void finishGsReg(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (__builtin_expect(g_gsReg == &::decomp_hot44g::gsReg && sotc_decomp::hotList44On(), 1))
+        {
+            sotc_decomp::gsRegWrite(rdram, ctx);
+            return;
+        }
+        g_gsReg(rdram, ctx, runtime);
+    }
 
     void gsRegHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
@@ -6799,10 +6841,10 @@ namespace sotc_native
             // last frame shown, laid over the new one (FIX or vertex alpha).
             if (!native_renderer::tuning().feedback)
             {
-                g_gsReg(rdram, ctx, runtime);
+                finishGsReg(rdram, ctx, runtime);
                 return;
             }
-            syncFrame(rdram);
+            ensureFrameSynced(rdram);
             hookJoin(hookjobs::k_gsreg_feedback);
             // SOTC_FEEDBACK_LOG=1 (debugging, round 12): the frames that use it.
             static const bool feedbackLog = ps2_diag::env("SOTC_FEEDBACK_LOG") != nullptr;
@@ -6818,7 +6860,7 @@ namespace sotc_native
             g_requested = kPreviousFrame;
             feed2D(GPR_U32(ctx, 4) & 0xFFu, GPR_U64(ctx, 5));
             g_requested = requested;
-            g_gsReg(rdram, ctx, runtime);
+            finishGsReg(rdram, ctx, runtime);
             return;
         }
         if (ra >= 0x0109C610u && ra < 0x0109CD28u)
@@ -6826,13 +6868,13 @@ namespace sotc_native
             // refractionEnd under water (0x109c610): a grid of strips over the
             // screen at layer 19, its ST waving over refractionBegin's 256 x 256
             // copy of the picture so far.
-            syncFrame(rdram);
+            ensureFrameSynced(rdram);
             hookJoin(hookjobs::k_gsreg_refraction);
             const uint32_t requested = g_requested;
             g_requested = kScreenCopy;
             feed2D(GPR_U32(ctx, 4) & 0xFFu, GPR_U64(ctx, 5));
             g_requested = requested;
-            g_gsReg(rdram, ctx, runtime);
+            finishGsReg(rdram, ctx, runtime);
             return;
         }
         // Round 31: the 2D functions' writes as glEnd's (round 28): an
@@ -6847,7 +6889,7 @@ namespace sotc_native
         {
             if (ra < r.start || ra >= r.end)
                 continue;
-            syncFrame(rdram);
+            ensureFrameSynced(rdram);
             if (!async2d)
                 hookJoin(hookjobs::k_gsreg_2d);
             g_2dDefer = async2d;
@@ -6855,7 +6897,7 @@ namespace sotc_native
             g_2dDefer = false;
             break;
         }
-        g_gsReg(rdram, ctx, runtime);
+        finishGsReg(rdram, ctx, runtime);
     }
 
     void texTransRequestHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -6882,6 +6924,7 @@ namespace sotc_native
                              word(0x01186290u), real(0x01186298u), static_cast<int>(word(0x011862A0u)), word(0x011862B0u), word(0x011862B4u), word(0x011862B8u), word(0x011862C4u), word(0x011862C0u),
                              word(0x01186280u), word(0x01186284u), word(0x01186288u), word(0x0118628Cu), word(0x01186260u), word(0x01186264u), word(0x01186268u), word(0x0118626Cu));
         }
+#if !SOTC_RELEASE
         // Testing: refractionEnd's underwater waves on any scene (the flag
         // getFogUnderWater reads, set just before refractionEnd tests it).
         static const bool underwater = std::getenv("SOTC_FORCE_UNDERWATER") != nullptr;
@@ -6895,10 +6938,12 @@ namespace sotc_native
         static const int feedback = std::getenv("SOTC_FORCE_FEEDBACK") ? std::atoi(std::getenv("SOTC_FORCE_FEEDBACK")) : 0;
         if (feedback && GPR_U32(ctx, 31) == 0x0109D018u)
             std::memcpy(rdram + 0x118B740u, &feedback, 4);
+#endif
         // feedbackBlur2 sets no ALPHA: its sprite blends by the layer's root
         // context, ALPHA 0x60 ((Cs - Cs) x FIX + Cd: no change), as the GS shows.
         if (GPR_U32(ctx, 31) >= 0x01089E50u && GPR_U32(ctx, 31) < 0x0108A0E0u)
             g_2d.alpha = 0x60u;
+#if !SOTC_RELEASE
         // Testing: bossDeathEffectBegin's fan (bit 0 of 0x1186290) at this radius.
         static const float fan = std::getenv("SOTC_FORCE_BOSSFAN") ? static_cast<float>(std::atof(std::getenv("SOTC_FORCE_BOSSFAN"))) : 0.0f;
         if (fan > 0.0f && GPR_U32(ctx, 31) == 0x01085910u)
@@ -6918,6 +6963,7 @@ namespace sotc_native
                     std::memcpy(rdram + 0x1214740u, uv, 8);
             }
         }
+#endif
         g_layers.push_back(GPR_U32(ctx, 4));
         g_pushLayer(rdram, ctx, runtime);
     }
@@ -10738,7 +10784,7 @@ namespace sotc_native
             if (ps2_load::t_slot == ps2_load::kGame)
                 ps2_load::gameZone.store(z, std::memory_order_relaxed);
         };
-        { SOTC_PROF_SCOPE(kHookSync); syncFrame(rdram); }
+        ensureFrameSynced(rdram);
         zone(0x2002u);
         const lines67::Scope l67(lines67::kHook, true);
         static const ModelDispEnv env;
@@ -10766,11 +10812,6 @@ namespace sotc_native
                              (unsigned long long)l.paletteHostBytes, (unsigned long long)l.queuePumped, (unsigned long long)l.queueDropped);
             }
         }
-        if (lean)
-            guestBlock(matrix, 64u, model);
-        else
-            for (int i = 0; i < 16; ++i)
-                model[i] = real(matrix + i * 4u);
         // The lists are built while the GS draws (the emulated picture shown).
         const bool ps2Lists = native_renderer::tuning().ps2Lists || !GS::skipRaster();
         static const bool check = ps2_diag::env("SOTC_MODELDISP_CHECK") != nullptr;
@@ -10808,6 +10849,27 @@ namespace sotc_native
         if (signedLod < 0)
             return;
 
+        uint32_t gl = static_cast<uint32_t>((lw >> 40) & 7u);
+        if ((word(h + 0x18u) & 1u) && gl >= word(h + 0x1Cu) && word(h + 0x1Cu) != 0u)
+            gl = word(h + 0x1Cu) - 1u;
+        uint32_t l = gl;
+        if (const int finer = static_cast<int>(native_renderer::tuning().modelDetail + 0.5f); finer > 0 && l > 0u)
+        {
+            l = finer >= 2 ? 0u : l - 1u;
+            if (word(h + 0x30u + l * 4u) == 0u && word(h + 0x30u + gl * 4u) != 0u)
+                l = gl;
+        }
+        const uint32_t table = word(h + 0x30u + l * 4u);
+        const bool partCulled = (word(h + 0x18u) & 1u) == 0u && word(h + 0x54u) != 1u;
+        if (partCulled && table == 0u)
+            return;
+
+        if (lean)
+            guestBlock(matrix, 64u, model);
+        else
+            for (int i = 0; i < 16; ++i)
+                model[i] = real(matrix + i * 4u);
+
         float camera[16], clip[16];
         if (lean)
             guestBlock(g_cameraContext + 0x5A0u, 64u, camera);
@@ -10838,21 +10900,6 @@ namespace sotc_native
                 clip[c * 4 + r] = sum;
             }
 #endif
-
-        uint32_t gl = static_cast<uint32_t>((lw >> 40) & 7u);
-        if ((word(h + 0x18u) & 1u) && gl >= word(h + 0x1Cu) && word(h + 0x1Cu) != 0u)
-            gl = word(h + 0x1Cu) - 1u;
-        uint32_t l = gl;
-        if (const int finer = static_cast<int>(native_renderer::tuning().modelDetail + 0.5f); finer > 0 && l > 0u)
-        {
-            l = finer >= 2 ? 0u : l - 1u;
-            if (word(h + 0x30u + l * 4u) == 0u && word(h + 0x30u + gl * 4u) != 0u)
-                l = gl;
-        }
-        const uint32_t table = word(h + 0x30u + l * 4u);
-        const bool partCulled = (word(h + 0x18u) & 1u) == 0u && word(h + 0x54u) != 1u;
-        if (partCulled && table == 0u)
-            return;
 
         // Early Cull 3: Fast Root Bounding Box Frustum Rejection
         if (partCulled && !check)
@@ -10939,7 +10986,7 @@ namespace sotc_native
                 in.lane = true;
                 in.header = h;
                 in.lodWord = lw;
-                guestBlock(g_cameraContext + 0x5A0u, 64u, in.camera);
+                std::memcpy(in.camera, camera, sizeof(camera));
                 in.fading = 0.0f < real(instance + 0x244u);
                 in.boss = word(0x1186290u);
                 in.cache = word(0x118BFC8u);
@@ -12394,6 +12441,7 @@ void installSotcNative(PS2Runtime &runtime)
         g_texTransRequest = sotc_decomp::behindHook(runtime, kTexTransRequest); // its native when registered (round 48)
         runtime.registerFunction(kTexTransRequest, texTransRequestHook);
         g_pushLayer = sotc_decomp::behindHook(runtime, kPushLayer);
+        g_layers.reserve(64);
         runtime.registerFunction(kPushLayer, pushLayerHook);
         g_popLayer = sotc_decomp::behindHook(runtime, kPopLayer);
         runtime.registerFunction(kPopLayer, popLayerHook);

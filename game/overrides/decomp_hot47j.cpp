@@ -316,7 +316,16 @@ namespace decomp_hot47j
         SET_GPR_U64(ctx, 19, res);
         SET_GPR_U64(ctx, 20, obj);
         const uint32_t t = static_cast<uint32_t>(tri), r = static_cast<uint32_t>(res);
-        auto call = [&](uint32_t target, uint32_t ret) { callGuest(rdram, ctx, runtime, target, ret, sp); };
+        auto call = [&](uint32_t target, uint32_t ret)
+        {
+            uint32_t res = 0u;
+            if (target == kGetLayoutClass && !ps2_worker::isShell(runtime) && sotc_decomp::layoutClassPlainOnly(rdram, GPR_U32(ctx, 4), res))
+            {
+                SET_GPR_S32(ctx, 2, static_cast<int32_t>(res));
+                return;
+            }
+            callGuest(rdram, ctx, runtime, target, ret, sp);
+        };
         // The epilogue (v0 0 on every path).
         auto leave = [&]()
         {
@@ -543,7 +552,16 @@ namespace decomp_hot47j
         SET_GPR_U64(ctx, 19, word);
         if (!zero)
         {
-            auto call = [&](uint32_t target, uint32_t ret) { callGuest(rdram, ctx, runtime, target, ret, sp); };
+            auto call = [&](uint32_t target, uint32_t ret)
+        {
+            uint32_t res = 0u;
+            if (target == kGetLayoutClass && !ps2_worker::isShell(runtime) && sotc_decomp::layoutClassPlainOnly(rdram, GPR_U32(ctx, 4), res))
+            {
+                SET_GPR_S32(ctx, 2, static_cast<int32_t>(res));
+                return;
+            }
+            callGuest(rdram, ctx, runtime, target, ret, sp);
+        };
             const uint32_t cloth = static_cast<uint32_t>(cloth64);
             pf141::noteCloth(rdram, cloth); // round 141 (prefetch only)
             const uint8_t toggle = static_cast<uint8_t>((READ8(cloth + 0x80u) + 1u) & 1u);
@@ -1025,7 +1043,16 @@ namespace decomp_hot47j
         SET_GPR_U64(ctx, 20, finder64);
         SET_GPR_U64(ctx, 30, filter);
         const uint32_t finder = static_cast<uint32_t>(finder64);
-        auto call = [&](uint32_t target, uint32_t ret) { callGuest(rdram, ctx, runtime, target, ret, sp); };
+        auto call = [&](uint32_t target, uint32_t ret)
+        {
+            uint32_t res = 0u;
+            if (target == kGetLayoutClass && !ps2_worker::isShell(runtime) && sotc_decomp::layoutClassPlainOnly(rdram, GPR_U32(ctx, 4), res))
+            {
+                SET_GPR_S32(ctx, 2, static_cast<int32_t>(res));
+                return;
+            }
+            callGuest(rdram, ctx, runtime, target, ret, sp);
+        };
 
         call(kFlushFinder, 0x01124CE0u); // a0 - t3 as the caller passed them
         SET_GPR_S32(ctx, 6, READ32(sp + 0x24u));

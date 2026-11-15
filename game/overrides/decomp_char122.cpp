@@ -824,8 +824,7 @@ namespace char122
             const uint64_t a1 = GPR_U64(ctx, 5);
             const float dt = ctx->f[12], f13 = ctx->f[13];
             const uint32_t sp = GPR_U32(ctx, 29) - 0x50u;
-            callGuestAt(rdram, ctx, runtime, kGetLayoutClass, 0x01137AACu, sp);
-            const uint32_t owner = GPR_U32(ctx, 2);
+            const uint32_t owner = sotc_decomp::layoutClassFast(rdram, ctx, runtime, a0, 0x01137AACu, sp);
             uint32_t v0 = 0u;
             if (rd32(rdram, owner + 0x180u) != 0u)
             {
