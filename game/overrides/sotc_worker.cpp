@@ -858,7 +858,7 @@ namespace sotc_worker
                 // The kept calls, once the game thread has joined.
                 if (!g_kept.empty())
                 {
-                    park(kKickParticleEnd);
+                    park(kKickParticleEnd, 0u, true);
                     for (const Kept &k : g_kept)
                     {
                         for (int i = 0; i < 4; ++i)
