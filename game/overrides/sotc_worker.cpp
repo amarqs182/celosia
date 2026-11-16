@@ -780,6 +780,15 @@ namespace sotc_worker
                 g_spyFn(target, ctx);
             if (g_snapOn && (target == kForFirst || target == kForNext || target == kForExit) && snapAnswer(rdram, ctx, target, GPR_U32(ctx, 31)))
                 return;
+            // Round 91: SequenceKickParticle's end callback can arrive as a tail
+            // jump as well as a call. Defer both forms: its isysDeleteObj / iosFree
+            // cleanup must run after the worker's parallel portion has joined.
+            if (target == kKickParticleEnd && !t_exclusive &&
+                deferCall(target, 0u, GPR_U32(ctx, 4), GPR_U32(ctx, 5), GPR_U32(ctx, 6), GPR_U32(ctx, 7), GPR_U32(ctx, 31)))
+            {
+                ctx->pc = GPR_U32(ctx, 31);
+                return;
+            }
             admit(target, ctx);
             if (kernel(target, ctx))
             {
