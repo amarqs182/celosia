@@ -13,6 +13,9 @@ option(PS2X_ENABLE_SCCACHE "Use sccache as compiler launcher when available" ON)
 option(PS2X_ENABLE_RUNTIME_LOGS "Enable PS2 runtime logs" ON)
 option(PS2X_ENABLE_AGRESSIVE_LOGS "Enable very verbose/agressive PS2 runtime logs" ON)
 option(PS2X_ENABLE_IOP_RPC_TRACE "Log unhandled IOP/SIF RPC trace suggestions" ON)
+option(PS2X_ENABLE_GUEST_READ_WATCH "Enable guest RAM load watch map checks" ON)
+option(PS2X_ENABLE_GUEST_WRITE_TRACE "Enable guest RAM write trace checks" ON)
+option(PS2X_LINUX_RELEASE "Linux/aarch64: release build (SOTC_RELEASE=1 diagnostics compiled out)" OFF)
 option(PS2X_STRICT_RETURN_DIAGNOSTICS "Route generated JR $ra returns through runtime branch diagnostics" OFF)
 option(PS2X_SHOW_WINDOWS_CONSOLE "Show a console window for ps2EntryRunner on Windows release builds" ON)
 option(PS2X_ENABLE_DEBUG_UI "Build the desktop runtime debug UI" ON)
@@ -501,26 +504,46 @@ if(APPLE)
     target_compile_definitions(ps2_runtime PUBLIC PS2X_HAVE_METAL=1)
 endif()
 
-if(PS2X_ENABLE_RUNTIME_LOGS)
+if(PS2X_ENABLE_RUNTIME_LOGS AND NOT PS2X_LINUX_RELEASE)
     target_compile_definitions(ps2_runtime PUBLIC
         PS2_RUNTIME_LOGS=1
     )
 endif()
 
-if(PS2X_ENABLE_AGRESSIVE_LOGS)
+if(PS2X_ENABLE_AGRESSIVE_LOGS AND NOT PS2X_LINUX_RELEASE)
     target_compile_definitions(ps2_runtime PUBLIC
         AGRESSIVE_LOGS=1
         PS2_FUNCTION_LOG_TRACKER=1
     )
 endif()
 
-if(PS2X_ENABLE_IOP_RPC_TRACE)
+if(PS2X_ENABLE_IOP_RPC_TRACE AND NOT PS2X_LINUX_RELEASE)
     target_compile_definitions(ps2_runtime PUBLIC
         PS2X_ENABLE_IOP_RPC_TRACE=1
     )
 else()
     target_compile_definitions(ps2_runtime PUBLIC
         PS2X_ENABLE_IOP_RPC_TRACE=0
+    )
+endif()
+
+if(PS2X_ENABLE_GUEST_READ_WATCH AND NOT PS2X_LINUX_RELEASE)
+    target_compile_definitions(ps2_runtime PUBLIC
+        PS2X_GUEST_READ_WATCH=1
+    )
+else()
+    target_compile_definitions(ps2_runtime PUBLIC
+        PS2X_GUEST_READ_WATCH=0
+    )
+endif()
+
+if(PS2X_ENABLE_GUEST_WRITE_TRACE AND NOT PS2X_LINUX_RELEASE)
+    target_compile_definitions(ps2_runtime PUBLIC
+        PS2X_GUEST_WRITE_TRACE=1
+    )
+else()
+    target_compile_definitions(ps2_runtime PUBLIC
+        PS2X_GUEST_WRITE_TRACE=0
     )
 endif()
 
@@ -948,7 +971,6 @@ if(PS2X_IS_LINUX AND PS2X_IS_AARCH64_TARGET)
     target_compile_options(ps2_runtime PRIVATE -O3)
     target_compile_options(ps2EntryRunner PRIVATE ${PS2X_LINUX_GAME_OPT})
 
-    option(PS2X_LINUX_RELEASE "Linux/aarch64: release build (SOTC_RELEASE=1 diagnostics compiled out)" OFF)
     set(PS2X_LINUX_OVERRIDE_OPTS -O3)
     if(PS2X_LINUX_RELEASE)
         message(STATUS "Linux/aarch64: release build (SOTC_RELEASE=1)")

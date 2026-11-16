@@ -30,7 +30,7 @@ it talks to (DMA, IOP, SPU2) is reimplemented as host code.
 | New Game, intro, riding Agro, gameplay | ✅ |
 | Performance, Mac (M4 Pro) | 60 fps, drawn at 1536×1344 |
 | PS Vita | ✅ builds and runs (18–25 fps in Vita3K's intro); fidelity and speed in progress |
-| R36S (RK3326, aarch64) | ✅ builds and runs (`29.1–34.3 FPS` on Save-Shrine / Forbidden Lands benchmarks, `59.8–60.1 FPS` in menus/light scenes; GLES 3.2 via ARM libmali over SDL2 KMSDRM; [docs/R36S_PORT.md](docs/R36S_PORT.md), [SOTC_OPTIMIZATION_LOG.md](SOTC_OPTIMIZATION_LOG.md)) |
+| R36S (RK3326, aarch64) | ✅ builds and runs (`32.34 avg / 33.00 med FPS` on matched Phase A Shrine walk, `59.8–60.1 FPS` in menus/light scenes; GLES 3.2 via ARM libmali over SDL2 KMSDRM; [docs/R36S_PORT.md](docs/R36S_PORT.md), [docs/worklist.md](docs/worklist.md), [SOTC_OPTIMIZATION_LOG.md](SOTC_OPTIMIZATION_LOG.md)) |
 | Decompilation | started: software doubles rewritten and proven ([docs/decomp.md](docs/decomp.md)) |
 
 ## Requirements
