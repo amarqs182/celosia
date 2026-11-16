@@ -78,11 +78,16 @@ Participação acumulada extremamente plana: Top 10 = **`17,10%`**, Top 20 = **`
 
 ---
 
-## 4. Paralelismo nos 4× Cortex-A35 (`sotc_worker.cpp`)
+## 4. Paralelismo nos 4× Cortex-A35 (`sotc_worker.cpp`): auditoria corrigida
 
-- Em `bench_latest.log` (frame `4218`), `worker91` teve **`62%` dos 300 jobs estacionados (`parked in 62%`)** em `011697e8` (`manager_sub_011697E8`), com `381` chamadas exclusivas de heap (`001b0328` `iosFree` de `0113ac64` `manager_sub_0113AAE0`), `1,524` chamadas retidas para o fim e `193` esperas de join (`0,187 ms/job`).
-- Em `[mdslane]`, joins forçaram a `game` thread a executar `1,258` jobs em `146` joins (`14,52 ms`) em um trecho e `5,396` jobs em `724` joins (`74,96 ms`) em outro.
-- **Direção correta:** em vez de tentar tornar o espaço/heap PS2 thread-safe para qualquer endereço guest, separar trabalho em **snapshots imutáveis** + buffers/memória independentes por worker (partículas/vento, geometria/animação, consultas independentes) entregues em lote.
+A leitura do contador `parked in %` da implementação anterior estava incorreta para jobs que terminavam o trabalho paralelo sem estacionar e depois reproduziam `g_kept` em modo exclusivo:
+
+- Em `loop()`, o replay de callbacks adiadas por `g_kept` chamava `park(kKickParticleEnd)` sem o argumento `replay=true`. Como o job já havia terminado com `g_exclusive=false`, esse park pós-job marcava `g_jobParked=true` e registrava `011697e8/00000000` como causa, embora não fosse um bloqueio durante a execução paralela.
+- O código recompilado/nativo e a inspeção ao vivo confirmaram que a callback `0x011697E8` do caso observado chega por `hookCall()` (RA `0x0113AB80`) e já era adiada para `g_kept`. Não havia chamada real relevante dessa callback através de `hookJump()`; portanto, o patch experimental PR #36 foi refutado e fechado sem merge.
+- A correção de classificação é `park(kKickParticleEnd, 0u, true)`: replay passa a marcar `g_replayParked`, sem alterar a execução nem prometer ganho de FPS. Ela está separada em PR #37.
+- Medição real A3_PGO_r2 no R36S (frame 5418, janela de 300 quadros): `worker91` teve `127` joins, `0,112 ms/job` de espera média (≈`0,11 ms/quadro`). `mdslane` acumulou `51,48 ms / 600 quadros` (≈`0,086 ms/quadro`). Juntos, aproximadamente **`0,20 ms/quadro`** de espera de join.
+
+**Conclusão:** o worker/heap não é o limitador primário dos ~`30,3 ms` da game thread nesta rota. Não ampliar agora o trabalho de snapshots/arenas por suposição. A próxima oportunidade está em reduzir o trabalho ativo de CPU em B-3/B-4/B-5 (fronteiras Nativo↔MIPS, colisão, display walk e geometria), escolhendo alterações pelo tempo self/inclusive medido.
 
 ---
 
