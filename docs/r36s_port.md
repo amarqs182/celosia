@@ -62,6 +62,7 @@ For the active R36S-only backlog and the full waste audit (PS2-inherited vs. gen
 | Pass 9.5 + `pgo_pass95` (`8f1377e4b1b40d1e34a546921cd0971a`, `f=4458..5418`, `453..3221 draws`) | `27.30 / 29.20 / 29.90 / 34.70` (`3041..3221` ext: `29.60` med / `31.50` max) | `34.10 ms` | `34.10 ms` (`33.65 ms` ext) | `0.00 ms` | `19.60 ms` (`wait 0.0`) | `16.10 ms` |
 | **Phase 6 + `pgo_merged` + `SOTC_MESHOPT=1`** (`063ba18e41672b0dd04ce85bcec62695`, `draws 828..1238`) | **`27.00 / 30.10 / 29.87 / 31.00`** | **`33.10 ms`** | **`33.10 ms`** (`33.37 avg`) | `0.00 ms` | `29.40 ms` (`wait 0.0`) | `14.90 ms` |
 | **Phase 6B + `decomp_char122` / GL cutout fix** (`f97edf3dcb9fb0de9a499165c2adcd10`, active Shrine/courtyard `15` samples, `draws 1148..2346`) | **`29.10 / 31.60 / 31.65 / 34.30`** (`f=5118..5358`: `32.00` med / `32.40` avg) | `31.65 ms` | `31.60 ms` | `0.00 ms` | `29.70 ms` (`wait 0.0`) | `14.30 ms` |
+| **Phase A (`READ_WATCH=0`, `WRITE_TRACE=0`, `RUNTIME_LOGS=OFF`, `-mtune=cortex-a35 +crypto+crc` + `pgo_phase_a`)** (`f8ee05adb7dfdc287b3f13df0c835f98`, matched `f=4500..5900` `n=1401`, `draws 853..1000`) | **`32.34` avg / `33.00` med** *(vs `A0` baseline `30.38 / 31.06`)* | **`30.30 ms` p50** (`34.20` p90 / `40.80` p99) | **`30.30 ms`** (`30.91 avg`) | `0.00 ms` | `20.30 ms` (`25.65 avg`, `wait 0.0`) | `31.20 ms` (`18.19 avg`) |
 
 Light/menu scenes run locked at **`59.8–60.1 FPS`** (`16.6–16.7 ms`, `wait 0.0`).
 
