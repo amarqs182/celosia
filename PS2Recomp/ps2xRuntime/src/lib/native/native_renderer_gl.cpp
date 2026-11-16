@@ -2400,6 +2400,15 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             uint64_t cut = 0, cutDepth = 0, soft = 0; // round 75: GL calls with discard (with depth writes), through the SOFT programs
             uint64_t vertsCut = 0, vertsSoft = 0, vertsMain = 0, vertsPlain = 0, mainKind[6] = {}, cutWhy[6] = {}, guarded = 0, guardOff = 0; // round 75: vertices by program kind; the full program's draws by textured
         } drawStats;
+        struct
+        {
+            uint64_t idxLeaderTotal = 0, idxIneligibleNoSrc = 0, idxIneligibleOther = 0, idxEligible = 0;
+            uint64_t brkNotIdxMesh = 0, brkNoSrc = 0, brkIdxCap = 0, brkVertCap = 0, brkTex = 0, brkState = 0, brkClip = 0, brkEnd = 0;
+            uint64_t candSingle = 0, candRuns = 0, candMembers = 0;
+            uint64_t runsFirstSeen = 0, runsWaitingRepeat = 0, runsReady = 0, runsReadyMerged = 0, copyCountMismatch = 0;
+            uint64_t copyAttempts = 0, copySucceeded = 0, copyFailedBudget = 0, copyFailedNoSrc = 0;
+            uint64_t copyBytes = 0, copyUs = 0;
+        } idxMergeStats;
         // Round 45: the alpha test's passes ([shadow] line): second passes whose
         // mesh's least alpha is not known (the frame's own meshes), draws
         // drawn in one pass because every pixel is under AREF.
@@ -5792,6 +5801,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         constexpr uint32_t kDefaultRunFrames = kRunFrames;
 #endif
         static const uint32_t runFrames = std::getenv("SOTC_GL_RUN_FRAMES") ? std::max(1, std::atoi(std::getenv("SOTC_GL_RUN_FRAMES"))) : kDefaultRunFrames;
+        static const bool mergeDiag = ps2_diag::env("SOTC_GL_MERGE_STATS") && std::atoi(ps2_diag::env("SOTC_GL_MERGE_STATS")) != 0;
+        const bool collectIdxDiag = mergeDiag && !shareOff;
         for (size_t k = 0; k < n;)
         {
             const Draw &lead = drawAt(k);
@@ -5800,6 +5811,16 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             uint32_t total = m ? m->count : 0u;
             const bool isPlain = plainMesh(m);
             const bool isIndexed = !isPlain && (mode & 2) && indexedStaticMesh(m);
+            if (collectIdxDiag && m && m->indexed)
+            {
+                ++idxMergeStats.idxLeaderTotal;
+                if (isIndexed)
+                    ++idxMergeStats.idxEligible;
+                else if (!m->skinned && !m->dynamic && (m->srcVerts.empty() || m->srcIndices.empty()))
+                    ++idxMergeStats.idxIneligibleNoSrc;
+                else
+                    ++idxMergeStats.idxIneligibleOther;
+            }
             uint32_t totalVerts = isIndexed ? m->vertexCount : 0u;
             if (isPlain)
                 while (end < n)
@@ -5820,6 +5841,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     ++end;
                 }
             else if (isIndexed)
+            {
                 while (end < n)
                 {
                     const Mesh *o = plan[end].mesh;
@@ -5830,6 +5852,37 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     totalVerts += o->vertexCount;
                     ++end;
                 }
+                if (collectIdxDiag)
+                {
+                    if (end >= n)
+                        ++idxMergeStats.brkEnd;
+                    else
+                    {
+                        const Mesh *o = plan[end].mesh;
+                        if (!o || !o->indexed || o->skinned || o->dynamic)
+                            ++idxMergeStats.brkNotIdxMesh;
+                        else if (o->srcVerts.empty() || o->srcIndices.empty())
+                            ++idxMergeStats.brkNoSrc;
+                        else if (total + o->count > 0xC000u)
+                            ++idxMergeStats.brkIdxCap;
+                        else if (totalVerts + o->vertexCount > 0xFFFFu)
+                            ++idxMergeStats.brkVertCap;
+                        else if (plan[end].tex != plan[k].tex)
+                            ++idxMergeStats.brkTex;
+                        else if (!sameState(lead, drawAt(end)))
+                            ++idxMergeStats.brkState;
+                        else
+                            ++idxMergeStats.brkClip;
+                    }
+                    if (end - k == 1)
+                        ++idxMergeStats.candSingle;
+                    else
+                    {
+                        ++idxMergeStats.candRuns;
+                        idxMergeStats.candMembers += (end - k);
+                    }
+                }
+            }
             if (end - k > 1)
             {
                 Planned &p = plan[k];
@@ -5857,12 +5910,31 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     if (copy->used != arenaFrame)
                         copy->frames = copy->used + 1u == arenaFrame ? copy->frames + 1u : 1u;
                     copy->used = arenaFrame;
-                    if (!copy->vbo && copy->frames >= runFrames && !copyIndexedRun(k, end, total, totalVerts, *copy))
-                        copy->frames = 0;
+                    if (collectIdxDiag)
+                    {
+                        if (!copy->vbo && copy->frames == 1u)
+                            ++idxMergeStats.runsFirstSeen;
+                        if (!copy->vbo && copy->frames < runFrames)
+                            ++idxMergeStats.runsWaitingRepeat;
+                    }
+                    if (!copy->vbo && copy->frames >= runFrames)
+                    {
+                        if (collectIdxDiag)
+                            ++idxMergeStats.copyAttempts;
+                        if (!copyIndexedRun(k, end, total, totalVerts, *copy))
+                            copy->frames = 0;
+                    }
                     if (!copy->vbo || !copy->ibo || copy->count != total)
                     {
+                        if (collectIdxDiag && copy->vbo && copy->count != total)
+                            ++idxMergeStats.copyCountMismatch;
                         k = end;
                         continue;
+                    }
+                    if (collectIdxDiag)
+                    {
+                        ++idxMergeStats.runsReady;
+                        idxMergeStats.runsReadyMerged += (end - k - 1u);
                     }
                     p.runVbo = copy->vbo;
                     p.runIbo = copy->ibo;
@@ -6303,6 +6375,19 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             counts[i] = 0;
         }
         std::fprintf(stderr, "%s\n", line.c_str());
+        std::fprintf(stderr,
+                     "[gl:idxmerge] per frame: idxTotal %.1f (elig %.1f noSrc %.1f other %.1f) | brk: notIdx %.1f noSrc %.1f idxCap %.1f vertCap %.1f tex %.1f state %.1f clip %.1f end %.1f | cand: single %.1f runs %.1f (members %.1f) | life: first %.1f wait %.1f ready %.1f (merged %.1f) mismatch %.1f | copy: try %.2f ok %.2f failBudget %.2f failNoSrc %.2f (%.1f KB, %.2f ms/f) | mem: src %.2f/%.0f MB run %.2f/%.0f MB runsMap %u\n",
+                     idxMergeStats.idxLeaderTotal / 300.0, idxMergeStats.idxEligible / 300.0, idxMergeStats.idxIneligibleNoSrc / 300.0, idxMergeStats.idxIneligibleOther / 300.0,
+                     idxMergeStats.brkNotIdxMesh / 300.0, idxMergeStats.brkNoSrc / 300.0, idxMergeStats.brkIdxCap / 300.0, idxMergeStats.brkVertCap / 300.0,
+                     idxMergeStats.brkTex / 300.0, idxMergeStats.brkState / 300.0, idxMergeStats.brkClip / 300.0, idxMergeStats.brkEnd / 300.0,
+                     idxMergeStats.candSingle / 300.0, idxMergeStats.candRuns / 300.0, idxMergeStats.candMembers / 300.0,
+                     idxMergeStats.runsFirstSeen / 300.0, idxMergeStats.runsWaitingRepeat / 300.0, idxMergeStats.runsReady / 300.0, idxMergeStats.runsReadyMerged / 300.0,
+                     idxMergeStats.copyCountMismatch / 300.0,
+                     idxMergeStats.copyAttempts / 300.0, idxMergeStats.copySucceeded / 300.0, idxMergeStats.copyFailedBudget / 300.0, idxMergeStats.copyFailedNoSrc / 300.0,
+                     idxMergeStats.copyBytes / 300.0 / 1024.0, idxMergeStats.copyUs / 300.0 / 1000.0,
+                     indexedSrcBytes / 1048576.0, kMaxIndexedSrcBytes / 1048576.0, indexedRunBytes / 1048576.0, kMaxIndexedRunBytes / 1048576.0,
+                     static_cast<unsigned>(runs.size()));
+        idxMergeStats = {};
     }
 
     // A run's kept meshes copied side by side into a pool range of its own.
@@ -6434,6 +6519,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 
     bool Renderer::copyIndexedRun(size_t from, size_t to, uint32_t totalIndices, uint32_t totalVerts, RunCopy &copy)
     {
+        static const bool mergeDiag = ps2_diag::env("SOTC_GL_MERGE_STATS") && std::atoi(ps2_diag::env("SOTC_GL_MERGE_STATS")) != 0;
+        const uint64_t diagStart = mergeDiag ? native_renderer::nowUs() : 0u;
         const uint64_t bytes = static_cast<uint64_t>(totalVerts) * sizeof(native_renderer::Vertex) +
                                static_cast<uint64_t>(totalIndices) * sizeof(uint32_t);
         if (indexedRunBytes + bytes > kMaxIndexedRunBytes)
@@ -6459,7 +6546,14 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 r->bytes = r->count = r->frames = 0;
             }
             if (indexedRunBytes + bytes > kMaxIndexedRunBytes)
+            {
+                if (mergeDiag)
+                {
+                    ++idxMergeStats.copyFailedBudget;
+                    idxMergeStats.copyUs += native_renderer::nowUs() - diagStart;
+                }
                 return false;
+            }
         }
         static std::vector<native_renderer::Vertex> packedVerts;
         static std::vector<uint32_t> packedIndices;
@@ -6471,7 +6565,14 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         {
             const Mesh *m = plan[j].mesh;
             if (!m || m->srcVerts.empty() || m->srcIndices.empty())
+            {
+                if (mergeDiag)
+                {
+                    ++idxMergeStats.copyFailedNoSrc;
+                    idxMergeStats.copyUs += native_renderer::nowUs() - diagStart;
+                }
                 return false;
+            }
             const uint32_t baseVert = static_cast<uint32_t>(packedVerts.size());
             packedVerts.insert(packedVerts.end(), m->srcVerts.begin(), m->srcVerts.end());
             for (uint32_t idx : m->srcIndices)
@@ -6500,6 +6601,12 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         copy.count = totalIndices;
         copy.bytes = bytes;
         indexedRunBytes += bytes;
+        if (mergeDiag)
+        {
+            ++idxMergeStats.copySucceeded;
+            idxMergeStats.copyBytes += bytes;
+            idxMergeStats.copyUs += native_renderer::nowUs() - diagStart;
+        }
         return true;
     }
 
