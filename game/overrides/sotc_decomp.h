@@ -702,9 +702,16 @@ namespace sotc_decomp
             // Round 136: pose136 off unless SOTC_POSE136=1: exact (checks: 0 bones differ in ~1.7 M), but its kept bones
             // (17-43% of them) do not pay for the kept arrays' stores and compares (Vita3K host sampler: the pose 1.19 -> 1.22%
             // of the game thread); the console's A/B (env-console turns it on) decides. key136 and euler136 on (SOTC_<name>=0 off).
+            // R36S (4x Cortex-A35, 256 KB shared L2): pf141's helper thread wakes on every character segment
+            // (0x013cfc68) and fills L2 with 64 KB speculative lines; B5_NOPF141 on hardware measured +0.80/+1.04 FPS
+            // (32.74/33.44 -> 33.54/34.48, game 29.90->29.00 ms, render mean 25.75->24.30 ms) with pf141=0.
             v = (which == kFind84 || which == kPtcl91 || which == kEarly95 || which == kObj96 || which == kCharLod78 ||
                  which == kPtcl79 || which == kOan106 || which == kFlush119 || which == kWalk119 || which == kPart119 || which == kView119 ||
-                 which == kGaze122 || which == kTexr128 || which == kCtl126 || which == kSeg123 || which == kPose136)
+                 which == kGaze122 || which == kTexr128 || which == kCtl126 || which == kSeg123 || which == kPose136
+#if defined(__linux__) && defined(__aarch64__)
+                 || which == kPf141 || which == kPfc141
+#endif
+                 )
                     ? (e && e[0] >= '1' && e[0] <= '3')
                     : !(e && e[0] == '0');
             g_switch[which] = v;
