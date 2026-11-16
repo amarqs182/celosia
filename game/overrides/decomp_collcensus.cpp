@@ -239,8 +239,10 @@ namespace decomp_collcensus
     }
     void install(PS2Runtime &runtime)
     {
-        g_on = ps2_diag::env("SOTC_COLL_CENSUS") != nullptr;
-        decomp_collision::g_statsOn = ps2_diag::env("SOTC_COLLISION_STATS") != nullptr;
+        const char *censusEnv = ps2_diag::env("SOTC_COLL_CENSUS");
+        const char *statsEnv = ps2_diag::env("SOTC_COLLISION_STATS");
+        g_on = censusEnv && censusEnv[0] != '\0' && std::atoi(censusEnv) != 0;
+        decomp_collision::g_statsOn = statsEnv && statsEnv[0] != '\0' && std::atoi(statsEnv) != 0;
         if (g_on)
         {
             g_queries.reserve(256);

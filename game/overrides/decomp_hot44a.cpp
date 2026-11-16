@@ -61,6 +61,11 @@
 
 #include <cstring>
 
+namespace decomp_collision
+{
+    void noteKeepFallback();
+}
+
 namespace decomp_hot44a
 {
     using sotc_decomp::callGuest;
@@ -227,7 +232,10 @@ namespace decomp_hot44a
     void clipKeepTest(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         if (!sotc_decomp::hotList44On())
+        {
+            decomp_collision::noteKeepFallback();
             return fallback(kClipTest, rdram, ctx, runtime);
+        }
         const uint32_t sp0 = GPR_U32(ctx, 29), sp = sp0 - 0xD0u;
         const F f{rdram, ctx, runtime, sp};
         __m128 *vf = ctx->vu0_vf;

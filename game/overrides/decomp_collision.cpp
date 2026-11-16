@@ -85,20 +85,22 @@ namespace decomp_collision
     // SOTC_COLLISION_STATS=1: how often each path runs (stderr, every 600 leaf calls x 100).
     struct Stats
     {
-        std::atomic<uint64_t> clip{0}, clipSlow{0}, boundary{0}, boundarySlow{0}, leaf{0}, surfaces{0}, cylinder{0}, finder{0}, finderSlow{0}, clipPlane{0}, clipCross{0}, keep{0}, keepSlow{0}, direct{0}, directObjects{0}, directTree{0}, directSkinned{0}, vertices{0}, verticesGuest{0}, surfFilter{0}, idFilter{0}, idFilterNative{0}, water{0}, waterSlow{0}, wall{0}, wallGuest{0}, scr{0}, surface{0}, surfaceSlow{0}, surfaceFiltered{0}, plane{0}, planeMade{0};
+        std::atomic<uint64_t> clip{0}, clipSlow{0}, boundary{0}, boundarySlow{0}, leaf{0}, surfaces{0}, cylinder{0}, finder{0}, finderSlow{0}, clipPlane{0}, clipCross{0}, keep{0}, keepSlow{0}, keepFallback{0}, direct{0}, directObjects{0}, directTree{0}, directSkinned{0}, vertices{0}, verticesGuest{0}, surfFilter{0}, idFilter{0}, idFilterNative{0}, water{0}, waterSlow{0}, wall{0}, wallGuest{0}, scr{0}, surface{0}, surfaceSlow{0}, surfaceFiltered{0}, plane{0}, planeMade{0};
         std::atomic<uint32_t> lastSurfFilter{0}, lastIdFilter{0};
         // round 71: the finder leaf's surfaces by outcome
         std::atomic<uint64_t> fLeaves{0}, fSurf{0}, fScanRej{0}, fBndRej{0}, fBndFilter{0}, fPlaneRej{0}, fIdNative{0}, fIdGuest{0}, fHas{0}, fHasLen{0}, fHasFound{0}, fEntry{0};
         std::atomic<uint32_t> lastBndFilter{0};
     };
     Stats g_stats;
-    bool g_statsOn = ps2_diag::env("SOTC_COLLISION_STATS") != nullptr; // (round 63: set again at install, after the Vita's env.txt)
+    bool g_statsOn = [] { const char *e = ps2_diag::env("SOTC_COLLISION_STATS"); return e && e[0] != '\0' && std::atoi(e) != 0; }(); // (round 63: set again at install, after the Vita's env.txt)
 #define COLL_STAT(name) \
     do                  \
     {                   \
         if (g_statsOn)  \
             g_stats.name.fetch_add(1, std::memory_order_relaxed); \
     } while (0)
+
+    void noteKeepFallback() { COLL_STAT(keepFallback); }
 
     inline float fastDiv(uint32_t &fcr31, float num, float den)
     {
@@ -146,7 +148,8 @@ namespace decomp_collision
                      (unsigned long long)g_stats.fPlaneRej.load(), (unsigned long long)g_stats.fIdNative.load(), (unsigned long long)g_stats.fIdGuest.load(),
                      (unsigned long long)g_stats.fHas.load(), (unsigned long long)g_stats.fHasLen.load(), (unsigned long long)g_stats.fHasFound.load(),
                      (unsigned long long)g_stats.fEntry.load());
-        std::fprintf(stderr, "[collision] keep %llu (recompiled %llu)\n", (unsigned long long)g_stats.keep.load(), (unsigned long long)g_stats.keepSlow.load());
+        std::fprintf(stderr, "[collision] keep %llu (native test %llu, recompiled %llu)\n", (unsigned long long)g_stats.keep.load(), (unsigned long long)g_stats.keepSlow.load(),
+                     (unsigned long long)g_stats.keepFallback.load());
         std::fprintf(stderr, "[collision] finder leaves %llu (recompiled %llu)\n", (unsigned long long)g_stats.finder.load(), (unsigned long long)g_stats.finderSlow.load());
         std::fprintf(stderr, "[collision] r40: water probe %llu (recompiled %llu) wall filter %llu (guest %llu) script callback %llu\n", (unsigned long long)g_stats.water.load(),
                      (unsigned long long)g_stats.waterSlow.load(), (unsigned long long)g_stats.wall.load(), (unsigned long long)g_stats.wallGuest.load(),

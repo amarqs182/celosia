@@ -246,3 +246,24 @@ Executed after Pass 9 + PGO showed `game` (`33.80 ms` med) still gating 3D Shrin
   - On the first `A3_PGO` run (`A3_PGO` run 1), the frame-based `PS2X_INPUT_SCRIPT` drifted at frame `2940` and hit pause at `4458+` (`draws 12`); `A3_PGO_r2` matched the exact Shrine/courtyard route (`draws 991 -> 988 -> 989 -> 999`, `1401` matched frames in `4500..5900`, reaching `max_frame=6002` in `130 s` vs `5900` on `A0`).
   - Net Phase A improvement (`A3_PGO` vs `A0`, matched `4500..5900`): **`+1.96 FPS` mean (`+6.45%`)**, **`+1.94 FPS` median**, **`-2.00 ms` `game` thread (`-6.08%`)**, **`-14.61 MB` stripped binary (`-18.7%`)**, **`-5.1 MiB` RSS**.
   - Inspected `SOTC_GL_SHOTS=300` PNG conversions (`shot_2400`, `shot_3000`, `shot_3600`, `shot_3900` at `512×448`) verifying memory card UI, additive Shrine rays, cutscenes, and Wander/terrain outdoors with zero artifacts. Deployed `A3_PGO` (`f8ee05adb7dfdc287b3f13df0c835f98`) to `/roms/ports/.SotC_Celosia/ps2sotc_aarch64_pie_sdl`.
+
+---
+
+## Phase B (`B1`, `B3`, `B4`) — Diagnostic Integrity, Collision Evaluation & L2 Cache Findings (`2026-11-16`)
+
+- **Baseline Release+PGO post-PR #37 (`PR37`, `9ea397c3bc7bdf2a2a861bb6f3f12cb4`, matched `4500..5900` = `1401` frames):**
+  - FPS **`32.74` mean / `33.44` med** (`p50 29.90 / p90 34.00 / p99 39.40 ms`), `game` `29.90 / 30.53 ms`, `render` `19.60 / 25.75 ms`, `wait 0.00 / 0.01 ms` (`f>=4500`, `n=1524`: `32.62` mean / `33.33` med FPS, `cpu0 98.1%`, `RSS 340.9 MiB`).
+- **Diagnostic fixes kept (working tree, zero Release binary impact):**
+  - [`game/overrides/decomp_collcensus.cpp`](game/overrides/decomp_collcensus.cpp#L240-L248): parsed `SOTC_COLL_CENSUS` and `SOTC_COLLISION_STATS` numerically (`std::atoi(env) != 0`) instead of `!= nullptr`, preventing `"0"` in `SotC.sh` from enabling all 55 `collcensus` wrappers in `DIAG` builds (which broke `sotc_decomp::isNative()` pointer equality on 6 collision natives including `0x0111C078` and disabled `obj125`/`fin125` during `DIAG` profiling).
+  - [`game/overrides/decomp_collision.cpp`](game/overrides/decomp_collision.cpp#L86-L154) and [`game/overrides/decomp_hot44a.cpp`](game/overrides/decomp_hot44a.cpp#L232-L238): split `[collision] keep` telemetry into `native test` (`decomp_hot44a::clipKeepTest`) vs `recompiled` (`noteKeepFallback()` only when `!hotList44On()`).
+  - Verified on real R36S (`D5_DIAG`, `D9_COLL_LOG`): `SOTC_CALLGUEST_STATS=600` (`f=4200..4800`, `8006.5 calls/frame`, `5772.1 to natives`) restored `"native"` tagging on `0111c078` (`157.1`), `0112a250` (`96.9`), `01118b88` (`94.6`), etc. (`00107000` `SignalSema` omits `"native"` only because `installSemaFast` registers outside `registry()`), and confirmed `coll115` (`fallback 0.00, original 0.00`), `fin125` (`guest entries 0.00`), and `seg123` (`20–25% kept`) already handle gameplay collision natively.
+- **Controlled B4 Collision A/B Experiments on Real R36S (`matched 4500..5900` + `SOTC_DIFFTEST`):**
+
+| Build / Run | Verification / Equivalence | `4500..5900` FPS mean / med | `game` med / mean | `render` med / mean | Decision |
+| --- | --- | --- | --- | --- | --- |
+| **`PR37` Baseline** | Deployed telemetry fix | **`32.74 / 33.44`** | `29.90 / 30.53 ms` | `19.60 / 25.75 ms` | **Baseline** |
+| **`B4_NOSEG123`** (`SOTC_SEG123=0`) | Runtime switch test | `32.57 / 33.33` | `30.00 / 30.69 ms` | `19.60 / 25.25 ms` | Keep `SOTC_SEG123=1` |
+| **`B4_COLLDB`** (`decomp_hot47j.cpp`: skip `g_view`, `insertDirect`, `groupCall` + PGO) | `D6`/`D7`/`D8` difftest (`0` diffs in gameplay/RAM) | `32.35 / 33.33` | `30.00 / 30.90 ms` | `19.80 / 25.19 ms` | **Discarded** (`-0.39 FPS` mean) |
+| **`B4_COLL125`** (`coll125.h`: 4-slot `ListSlot` cache + PGO) | `D10_FIN125_CHECK`: `check 22078 differ 0` (`point max 0.00 mm`) | `32.30 / 33.00` | `30.30 / 30.96 ms` | `20.20 / 26.07 ms` | **Discarded** (`-0.44 FPS` mean) |
+
+- **B4 Architectural Takeaway:** Adding extra per-slot state/lookup tables (`+120 KB` `ListSlot` in `B4_COLL125`) or larger inlined dispatch (`B4_COLLDB`) regresses both `game` and `render` on the RK3326's `4× Cortex-A35` (`256 KB` shared L2 cache), even with `0` physics diffs and matched `.gcda` PGO. With `D0_PROF` showing no single collision function above `2.80%`, B4 is closed cleanly in favor of **B5** (`DispDispObjGroupModel` `1.94%`, `010F3A08` `1.93%`, `ExecCharaGeometry` `1.69%`, `gamecore_sub_013CFBE0` `1.97%`, `SOTC_CHAR104=1` re-test on `PR37`) and **Phase C** (Mali-G31 `render 19.60 med / 25.75 mean ms`).
