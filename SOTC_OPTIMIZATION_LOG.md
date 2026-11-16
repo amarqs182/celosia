@@ -267,3 +267,28 @@ Executed after Pass 9 + PGO showed `game` (`33.80 ms` med) still gating 3D Shrin
 | **`B4_COLL125`** (`coll125.h`: 4-slot `ListSlot` cache + PGO) | `D10_FIN125_CHECK`: `check 22078 differ 0` (`point max 0.00 mm`) | `32.30 / 33.00` | `30.30 / 30.96 ms` | `20.20 / 26.07 ms` | **Discarded** (`-0.44 FPS` mean) |
 
 - **B4 Architectural Takeaway:** Adding extra per-slot state/lookup tables (`+120 KB` `ListSlot` in `B4_COLL125`) or larger inlined dispatch (`B4_COLLDB`) regresses both `game` and `render` on the RK3326's `4× Cortex-A35` (`256 KB` shared L2 cache), even with `0` physics diffs and matched `.gcda` PGO. With `D0_PROF` showing no single collision function above `2.80%`, B4 is closed cleanly in favor of **B5** (`DispDispObjGroupModel` `1.94%`, `010F3A08` `1.93%`, `ExecCharaGeometry` `1.69%`, `gamecore_sub_013CFBE0` `1.97%`, `SOTC_CHAR104=1` re-test on `PR37`) and **Phase C** (Mali-G31 `render 19.60 med / 25.75 mean ms`).
+
+---
+
+## Phase B5 — `SOTC_CHAR104` A/B, Display Walk, & `pf141=0` L2 Cache Win (`2026-11-16`)
+
+- **B5-A (`SOTC_CHAR104=1` A/B on `PR37`):**
+  - Tested `SOTC_CHAR104=1` (`B5_CHAR104`) on the exact `PR37` binary (`matched 4500..5900`, `n=1394`): **`30.05` mean / `30.86` med FPS** (`game 32.40 / 33.26 ms`, `render 20.90 / 27.12 ms`, `p99 50.21 ms`, `cpu0 89.8% cpu1..3 35.0/41.1/41.4%`) vs **`PR37`** (`32.74 / 33.44 FPS`) — **`-2.69 FPS` mean / `-2.58 FPS` med**.
+  - `[char104]`/`[char111]`/`[char114]` telemetry at `frame 5418`: offloading `13.86 chars/frame` (`5.657 ms` worker time) cost `4.315 ms/frame` in game-thread joins (`chan 2960`, `group 142`) + `1.82 ms/frame` in handover/merge (`1.210 + 0.611 ms`), plus `+1.37 ms` mean render regression from shared L2 contention. **`SOTC_CHAR104=0` kept OFF.**
+- **B5-B (Display Walk & `pf141` Shared-L2 Contention on Cortex-A35):**
+  - In `D0_PROF` (`a3_pgo_game.prof`), `013cfc68` inside `gamecore_sub_013CFBE0` (`pf141::segmentEnd` mutex + condvar wake + speculative prefetch on every character segment) accounted for `675` samples (`1.54%`), while `DispDispObjGroupModel` held `844` samples (`1.94%`).
+  - **Controlled R36S A/B tests (`matched 4500..5900`, `n=1401`):**
+
+| Build / Flags | Equivalence / PGO | `4500..5900` FPS mean / med | `game` med / mean | `render` med / mean (`60f win med`) | Decision |
+| --- | --- | --- | --- | --- | --- |
+| **`PR37` Baseline** (`PF141=1`) | `pgo_phase_a` | `32.74 / 33.44` | `29.90 / 30.53 ms` | `19.60 / 25.75 ms` (`25.75`) | Baseline |
+| **`B5_NOCLIP140`** (`SOTC_CLIP140=0`) | `PR37` binary | `32.67 / 33.33` | `30.00 / 30.61 ms` | `19.80 / 25.28 ms` (`26.00`) | Keep `SOTC_CLIP140=1` |
+| **`B5_NOPF141`** (`SOTC_PF141=0, PFC141=0`) | `PR37` binary | `33.54 / 34.48` | `29.00 / 29.81 ms` | `19.20 / 24.30 ms` (`23.45`) | **Win (`+0.80 / +1.04 FPS`)** |
+| **`B5_NOPF141_r2`** (`SOTC_PF141=0, PFC141=0`) | `PR37` binary | `33.71 / 34.48` | `29.00 / 29.65 ms` | `19.10 / 25.65 ms` (`25.80`) | **Reproducible** |
+| **`B5_NOPF_NOW67`** (`PF141=0, WALK67=0`) | `PR37` binary | `33.54 / 34.36` | `29.10 / 29.81 ms` | `19.00 / 24.45 ms` (`25.00`) | Keep `SOTC_WALK67=1` |
+| **`B5_WALK_PGO`** (`decomp_walk.cpp` `callNative` + `pf141=0`) | `D12` difftest `0` diffs on `ClipLayoutObjModel`/`AddSortObj`/`DispLayoutObjModel`; `pgo_phase_b5` | `32.56 / 33.22` | `30.10 / 30.71 ms` | `20.20 / 25.25 ms` (`24.65`) | **Discarded** (`-0.98 FPS` I-cache bloat) |
+| **`B5_FINAL`** (`sotc_decomp.h`: `kPf141`/`kPfc141` default `0` on `linux && aarch64`) | `pgo_phase_a`, `63,366,224 B` stripped (`3a35c26e...`) | **`33.89 / 34.72`** | **`28.80 / 29.49 ms`** | `7.80 / 24.38 ms` (`24.15`) | **Kept & Deployed (`+1.15 / +1.28 FPS`)** |
+
+- **B5 Architectural Takeaway & Deployment:**
+  - Inlining 9 `g.callNative` guards inside `DispDispObjGroupModel` / `DispLayoutObjModel` bloated hot loop code size past Cortex-A35's 32 KB L1I and lost `-0.98 FPS` even with fresh `.gcda` PGO (`pgo_phase_b5`), so `decomp_walk.cpp` was reverted cleanly.
+  - Defaulting `kPf141` / `kPfc141` OFF on Linux `aarch64` ([`game/overrides/sotc_decomp.h`](game/overrides/sotc_decomp.h#L705-L718)) + updating `/roms/ports/.SotC_Celosia/SotC.sh` (`SOTC_PF141=0`, `SOTC_PFC141=0`) eliminated both mutex/condvar overhead at `0x013cfc68` and speculative L2 thrashing on the RK3326's 256 KB shared L2, delivering **`33.89` mean / `34.72` med FPS** (`f>=4500`, `n=1577`: `33.70 / 34.48 FPS`, `max_frame 6076`, `RSS 336.7 MiB`).
