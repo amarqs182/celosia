@@ -53,13 +53,20 @@ Vita3K running; then a real Vita).
    (no core spun by SotC's idle loop), then measure the game thread alone.
    This sets the budget: if the logic alone is over ~33 ms a frame, its
    hot spots (VU0 maths -> NEON, etc.) move ahead of phase 5.
+   Done when: SotC's idle loop spins no core and the game thread alone is
+   measured on the Vita.
+   Status: open.
 2. **VU1 -> GPU.** Each microcode program becomes a VIF->GPU batch with its
    maths in the vertex shader: world (done), lit loop 0x0710, the second-UV
    pass, characters (059698f3), e471dbf3, b504a980, the rest. Exit: VU1
    instructions ~0 on the route; no VU1 thread.
+   Done when: VU1 instructions are ~0 on the route and no VU1 thread exists.
+   Status: in progress.
 3. **GS -> native.** Textures decoded once into GXM/GL textures from the
    game's uploads (no emulated GS memory, swizzle or CLUT per frame); draw
    state set natively; the GIF decoder goes away. Exit: no GS/GIF thread.
+   Done when: no GS/GIF thread.
+   Status: open.
 4. **Native renderer.** Hook the game's draw calls for models (found with
    Ghidra) and draw them from their own data, meshes kept in GPU buffers;
    no DMA chains walked per frame. Exit: no VIF/DMA work per frame.
@@ -68,8 +75,12 @@ Vita3K running; then a real Vita).
    `GifEventScanner` reads GIF data in place for SIGNAL/FINISH/LABEL, the
    only GS registers the game waits on. Left: the walk itself and the
    VIFcode pass over the compacted stream (~2 % of the game thread samples, from ~13 %).
+   Done when: no VIF/DMA work per frame.
+   Status: in progress.
 5. **Game-logic hot spots.** VU0 macro maths and the top profiled EE
    functions written natively (NEON on the Vita).
+   Done when: to be defined - see the phase description above.
+   Status: open.
 6. **Audio.** SPU2/IOP replaced by a native mixer fed by the game's sound
    requests. Done on the Mac (2026-10-16): native SG2 driver and mixer
    (docs/native_audio_plan.md); with SOTC_NATIVE=1 the emulated IOP runs no
@@ -85,5 +96,7 @@ Vita3K running; then a real Vita).
    were captured with (`SOTC_LOG_MALLOC=1` shows it).
 7. **System.** Kernel threads/semaphores/timers on native threads and
    clocks; CDVD reads as direct file reads.
+   Done when: to be defined - see the phase description above.
+   Status: open.
 
 Each phase ends with a full route on both platforms and a real Vita run.

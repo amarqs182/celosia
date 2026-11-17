@@ -11,7 +11,7 @@
 # Agro comes (~4000). The run ends by itself at the last game frame
 # (PS2X_EXIT_AT_FRAME, default 4800), under two minutes. Pictures every 60
 # game frames: frame_N.png (emulated), native_N.png (SOTC_NATIVE=2), index.txt.
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 OUT=${1:?usage: tools/native_run.sh <out dir> [last game frame]}
 LAST=${2:-4800}
 [ -f memcards/Mcd001.ps2 ] || { echo "needs the SotC save in memcards/Mcd001.ps2" >&2; exit 1; }

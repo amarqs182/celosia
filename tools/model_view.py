@@ -4,7 +4,7 @@ their vertices, to check the model format in docs/native_renderer_map.md.
 
 Usage: tools/model_view.py logs/model_dump [--dump N] [--out file.png]
 """
-import struct, sys, math
+import struct, sys
 
 ram = None
 

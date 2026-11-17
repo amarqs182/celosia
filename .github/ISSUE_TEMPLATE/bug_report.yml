@@ -1,0 +1,136 @@
+name: Bug report
+description: Report a crash, wrong rendering, audio glitch, stub hit or toolchain defect in celosia.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report.
+
+        **Do not attach copyrighted game data.** Never upload the game ISO/BIN, extracted
+        `SCUS_974.72` / XFF dumps, `.irx` modules, audio banks, textures, videos or any other
+        asset extracted from the retail disc. Describe what you did instead; maintainers will
+        reproduce with their own copy. Reports containing game data are closed and deleted.
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      description: Where did you observe the problem? Pick the closest match.
+      options:
+        - macOS Apple Silicon (Metal)
+        - PS Vita (vitaGL / OpenGL ES)
+        - Linux aarch64
+        - Windows
+        - PS2Recomp toolchain only (no game run)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of the project is affected?
+      options:
+        - Renderer (GS)
+        - Native renderer
+        - VU1
+        - Audio (SPU2)
+        - IOP
+        - Syscalls and stubs
+        - Decomp and XFF
+        - Tools
+        - CI
+        - Docs
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: summary
+    attributes:
+      label: Summary
+      description: One sentence describing the problem.
+      placeholder: "e.g. VU1 microprogram hangs when Wander mounts Agro near the first colossus"
+    validations:
+      required: true
+
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behaviour
+      description: What actually happens? Include the exact error text, black frames, wrong geometry, desync, etc.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      description: What should happen instead? A reference screenshot or a hardware/PS2 capture description helps.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: |
+        List the exact steps, in order. Include the full command line and every environment
+        variable you set — `SOTC_*` switches (renderer/decomp/runtime toggles) and `PS2X_*`
+        switches (toolchain and runtime) — plus the `./celosia` subcommand used
+        (`setup` / `run` / `build` / `recompile` / `vita` / `clean`).
+      placeholder: |
+        1. ./celosia setup
+        2. SOTC_AB=1 SOTC_AB_PERIOD=60 ./celosia run
+        3. Load a save at the first colossus and walk to the bridge
+        4. The VU1 program stalls after ~30 frames
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and captures
+      description: |
+        Paste or attach: files written to `logs/` (e.g. `logs/runner.log`, decomp/GS/VU traces),
+        the runner's stderr output, and screenshots or short clips for visual bugs.
+        For frame-level differences run `python tools/framediff.py` and attach its report;
+        for timing/regression numbers run `tools/bench.sh` and paste the summary.
+        Strip local paths and any disc-derived data before attaching.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        Please provide:
+        - OS and version (macOS 14.x, Ubuntu 24.04, Windows 11, Vita3K version, ...)
+        - CPU/GPU (Apple M-series, aarch64 board, Vita model)
+        - Commit hash (`git rev-parse --short HEAD`) and branch
+        - Whether the disc dump is the USA release **SCUS-974.72** (answer yes/no only — do not attach it)
+        - Build type (Release/Debug) and how it was built (`./celosia build`, `./celosia vita`, ...)
+      placeholder: |
+        OS: macOS 15.2 (Apple M2 Pro, Metal)
+        Commit: abc1234 (main)
+        Dump: USA SCUS-974.72 -> yes
+        Build: Release, ./celosia build
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-submission checks
+      options:
+        - label: I ran a difftest / frame comparison (`tools/framediff.py`) and included the result.
+          required: false
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
+        - label: I have not attached any copyrighted game data (ISO, SCUS_974.72, XFF, IRX, audio, textures).
+          required: true

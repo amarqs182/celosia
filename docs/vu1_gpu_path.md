@@ -69,3 +69,27 @@ Answers to the open questions:
   Consecutive batches with the same draw state are now merged (triangle
   lists, a batch index per vertex into uM[32]/uBatch[32]): back to 30 fps,
   frames the same as the current path.
+
+## Status and open questions
+
+Status, as the repository documents it:
+
+- The native port plan states the exit condition for Phase 2 (`VU1 -> GPU`) as
+  "VU1 instructions are ~0 on the route and no VU1 thread exists"
+  (`docs/native_port_plan.md:56-61`).
+- With the native renderer drawing (`SOTC_NATIVE=1`, the default on macOS and
+  the Vita), model and terrain geometry goes straight from `modelDisp` hooks
+  to host GPU buffers (`docs/native_port_plan.md:67-76`,
+  `docs/worklist.md:31`), and the VIF1 chain is walked in place without
+  spawning VU1 worker jobs (`Vif1Walker`, `ps2_vif1_compact.h`).
+
+Related notes in this directory: `docs/vu1_routines.md` (the routines the
+microcode runs) and `docs/vu1_fast_recompiler.md` (the fast recompiler design).
+
+Open questions for the remaining non-native / fallback paths:
+
+- Which remaining microcode routines (`0x0710`, `059698f3`, `e471dbf3`,
+  `b504a980`) still execute when the emulated GS view (`SOTC_NATIVE=0` / `=2`)
+  or `PS2X_VIF1_FULL=1` is active (`docs/native_port_plan.md:56-61`)?
+- For any microcode routine that issues a second `XGKICK`, does the fast
+  recompiler need double-buffered output handling (`docs/vu1_fast_recompiler.md:32-34`)?

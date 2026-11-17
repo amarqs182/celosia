@@ -1,0 +1,78 @@
+name: Feature request
+description: Propose a new capability, improvement or piece of work for celosia or the PS2Recomp toolchain.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping move the port forward.
+
+        **Never attach copyrighted game data.** No ISOs, ELF files, extracted
+        assets, textures, audio, movies, memory-card dumps or save files, and no
+        code or data derived from them. Describe the behaviour instead, or point
+        at public documentation and tool output that does not contain game data.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is missing, slow, wrong or painful today? Describe the behaviour you see, not the fix.
+      placeholder: "With SOTC_NATIVE=1 the lit loop still falls back because ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed-solution
+    attributes:
+      label: Proposed solution
+      description: What should be built or changed, and where? Keep it concrete.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of the project does this belong to?
+      options:
+        - Renderer
+        - Native renderer
+        - VU1 to GPU
+        - Audio SPU2
+        - IOP
+        - Syscalls and stubs
+        - Decomp of game functions
+        - Tools
+        - CI
+        - Docs
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where the work belongs
+      description: Game-specific code goes in celosia; generic emulation and recompilation belong upstream.
+      options:
+        - celosia repo game-specific
+        - PS2Recomp upstream toolchain
+        - Both
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches, existing switches or workarounds, and why they are not enough.
+    validations:
+      required: false
+
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation and impact
+      description: Which worklist item or which phase of docs/native_port_plan.md does this advance, and what improves for the Mac and Vita targets?
+      placeholder: "Phase 2 (VU1 -> GPU): removes the lit-loop fallback on the measure route."
+    validations:
+      required: false

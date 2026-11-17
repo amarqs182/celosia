@@ -24,7 +24,7 @@
 #      SKIP       any of "gs native vita"
 #      SHOTS      tick offsets pictured around each mark (default -6,-3,0,3,6)
 #      SECS       the longest any one replay may take (default 3600)
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 ROOT=$PWD
 REC=$(cd "$(dirname "${1:?usage: tools/replay_compare.sh <recording> [name]}")" && pwd)/$(basename "$1")
 [ -f "$REC" ] || { echo "no recording $REC" >&2; exit 1; }

@@ -8,7 +8,7 @@
 #   SOTC_FRAME_INTERVAL=4: every frame lasts 4 VBlanks (15 fps), so the game
 #   itself runs the same in every run (the walk ends in the same place);
 #   compare the busy ms per frame then, not the fps.
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 LABEL=${1:?usage: tools/measure.sh <label> [seconds]}
 SECS=${2:-210}
 OUT=shots/$LABEL

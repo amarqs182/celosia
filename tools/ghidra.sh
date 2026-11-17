@@ -2,7 +2,7 @@
 # Ghidra (headless) over the game: tools/ghidra.sh import   (once: builds build/ghidra from recomp/game/SOTC.elf, ~2 min)
 #                                    tools/ghidra.sh <Script.java> args...   (tools/ghidra/*.java; output lines only)
 # Needs Ghidra with the Emotion Engine extension at $GHIDRA (default ~/tools/ghidra_12.1.3_PUBLIC).
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 GHIDRA=${GHIDRA:-$HOME/tools/ghidra_12.1.3_PUBLIC}
 PROJ=$PWD/build/ghidra
 if [ "$1" = import ]; then

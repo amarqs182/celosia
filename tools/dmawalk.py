@@ -1,8 +1,43 @@
-"""Walk a VIF1 DMA chain in a RAM dump and decode VIF codes and GIF packets."""
-import sys, struct
+"""Walk a VIF1 DMA chain in a RAM dump and decode VIF codes and GIF packets.
 
-ram = open(sys.argv[1], "rb").read()
-start = int(sys.argv[2], 16)
+Input: a RAM dump -- a flat image of EE RAM, either a raw memory dump or an
+ELF image whose bytes are laid out as raw memory (ELF containers are not
+parsed here).
+Output: the DMA walk report on stdout: the walked tag and byte counts, the
+decoded GIF packets and the VIF command histogram.
+
+Usage:
+    python tools/dmawalk.py <ram-dump> <start-address-hex>
+"""
+import argparse
+import os
+import struct
+import sys
+
+
+def _hex_address(text):
+    """Parse `text` as a hexadecimal address, reporting a clean argparse error."""
+    try:
+        return int(text, 16)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid hexadecimal address: {text!r}") from None
+
+
+parser = argparse.ArgumentParser(
+    description="Walk a VIF1 DMA chain in a RAM dump and decode VIF codes and GIF packets.",
+)
+parser.add_argument("dump", help="RAM dump (or ELF image laid out as raw memory) to read")
+parser.add_argument("start", type=_hex_address, help="start address of the DMA chain, in hex")
+# Extra arguments have always been ignored by this tool; keep accepting them.
+args, _ = parser.parse_known_args()
+
+if not os.path.isfile(args.dump):
+    print(f"Error: file not found: {args.dump}", file=sys.stderr)
+    sys.exit(1)
+
+with open(args.dump, "rb") as handle:  # raw bytes: no text encoding applies
+    ram = handle.read()
+start = args.start
 u64 = lambda a: struct.unpack_from("<Q", ram, a & 0x1FFFFFF)[0]
 
 def walk(tadr):

@@ -378,7 +378,6 @@ class Lifter:
                 continue
             w = self.words[a]
             op, fn = w >> 26, w & 63
-            line = []
             if a in self.labels:
                 body.append(f'L_{a:x}:')
             ds = self.words.get(a + 4, 0)

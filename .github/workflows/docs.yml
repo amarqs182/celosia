@@ -1,0 +1,108 @@
+name: Docs
+
+on:
+  push:
+    paths:
+      - "docs/**"
+      - "tools/**"
+      - "README.md"
+  pull_request:
+    paths:
+      - "docs/**"
+      - "tools/**"
+      - "README.md"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate docs data and links
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Validate JSON data files
+        run: |
+          python3 - <<'PY'
+          import json
+          import sys
+
+          FILES = [
+              "docs/decomp_status.json",
+              "docs/decomp_tree.json",
+              "docs/decomp_history.json",
+              "docs/port_status.json",
+              "docs/rounds.json",
+          ]
+
+          failed = 0
+          for path in FILES:
+              try:
+                  with open(path, encoding="utf-8") as handle:
+                      json.load(handle)
+              except Exception as exc:
+                  print(f"FAIL {path}: {type(exc).__name__}: {exc}", file=sys.stderr)
+                  failed = 1
+              else:
+                  print(f"ok   {path}")
+
+          if failed:
+              print("JSON validation failed", file=sys.stderr)
+          sys.exit(failed)
+          PY
+
+      - name: Validate relative markdown links
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import sys
+
+          # Sources scanned for links: (label, path on disk).
+          SOURCES = [
+              ("README.md", "README.md"),
+              ("docs/index.html", "docs/index.html"),
+          ]
+
+          # [text](target) and [text](<target> "title")
+          MARKDOWN_LINK = re.compile(r"\[[^\]]*\]\(\s*<?([^)\s>]+)>?(?:\s+[\"'][^)]*)?\)")
+          # href="target" / href='target'
+          HTML_LINK = re.compile(r"href=[\"']([^\"']+)[\"']")
+
+          SKIP_PREFIXES = ("#", "http://", "https://", "mailto:", "tel:", "//", "data:", "javascript:")
+          # Non-markdown assets are never link-checked.
+          SKIP_EXTENSIONS = (".json", ".webp", ".svg")
+
+          errors = []
+          checked = 0
+
+          for label, path in SOURCES:
+              with open(path, encoding="utf-8") as handle:
+                  text = handle.read()
+              pattern = MARKDOWN_LINK if path.endswith(".md") else HTML_LINK
+              for raw in pattern.findall(text):
+                  target = raw.strip()
+                  if not target or target.startswith(SKIP_PREFIXES):
+                      continue
+                  # Drop query string and fragment before resolving.
+                  target = target.split("#", 1)[0].split("?", 1)[0]
+                  if not target or target.lower().endswith(SKIP_EXTENSIONS):
+                      continue
+                  if not target.lower().endswith(".md"):
+                      continue
+                  base = os.path.dirname(path)
+                  resolved = os.path.normpath(os.path.join(base, target)).replace(os.sep, "/")
+                  if not resolved.startswith("docs/"):
+                      continue
+                  checked += 1
+                  if not os.path.isfile(resolved):
+                      errors.append(f"{label}: broken link -> {raw} (resolved to {resolved})")
+
+          for message in errors:
+              print(message, file=sys.stderr)
+
+          print(f"checked {checked} relative docs markdown link(s), {len(errors)} broken")
+          sys.exit(1 if errors else 0)
+          PY

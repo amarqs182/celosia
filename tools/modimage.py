@@ -1,18 +1,60 @@
 """Capture a loaded XFF module from a guest RAM dump.
 
 After the game's loader runs, the in-RAM header has absolute section addresses
-(memPt) and the symbol table holds final symbol addresses.
+(memPt) and the symbol table holds final symbol addresses. The loader patches
+only a few pointers, so the copy of the header found in RAM still matches the
+file's own header almost byte for byte.
+
+Typical use::
+
+    ram = open("ee_ram.bin", "rb").read()
+    mod = LoadedModule("mod/player.xff", ram, find_header("mod/player.xff", ram))
+    for addr, (size, name) in mod.functions().items():
+        ...
+
+This module is a library helper; ``build_elf.py`` is its only in-tree consumer
+and owns the command-line entry point.
 """
 import struct
 from dataclasses import dataclass
+from pathlib import Path
 from xff import Xff
 
 RAM_MASK = 0x1FFFFFF
 STT_FUNC = 2
 
 
+def _checked_path(path):
+    """Return ``path`` as a :class:`pathlib.Path`, or raise ``FileNotFoundError``.
+
+    ``path`` may be a ``str`` or a :class:`pathlib.Path`; the error message
+    names the offending file.
+    """
+    p = Path(path)
+    if not p.is_file():
+        raise FileNotFoundError(f"{p}: XFF module file not found")
+    return p
+
+
+def _checked_ram(ram):
+    """Return ``ram`` unchanged, or raise ``TypeError`` if it is not bytes-like."""
+    if not isinstance(ram, (bytes, bytearray)):
+        raise TypeError(f"ram must be bytes or bytearray, not {type(ram).__name__}")
+    return ram
+
+
 @dataclass
 class ModSection:
+    """One loadable section of a loaded module.
+
+    Attributes:
+        name: section name as stored in the XFF file (e.g. ``".text"``).
+        addr: absolute guest address of the section.
+        size: size in bytes.
+        data: section bytes, or ``None`` for ``NOBITS`` sections.
+        exec: ``True`` for the executable (``.text``) section.
+    """
+
     name: str
     addr: int
     size: int
@@ -22,7 +64,15 @@ class ModSection:
 
 def find_header(xff_path, ram):
     """Locate a module's loaded xff2 header: the 16-byte aligned copy that best
-    matches the file's own header (the loader only patches a few pointers)."""
+    matches the file's own header (the loader only patches a few pointers).
+
+    ``xff_path`` may be a ``str`` or a :class:`pathlib.Path`; ``ram`` is the raw
+    guest memory dump as ``bytes``. Returns the header's offset within ``ram``.
+    Raises ``FileNotFoundError`` when the XFF file is missing and ``ValueError``
+    when no plausible header exists in the dump.
+    """
+    xff_path = _checked_path(xff_path)
+    ram = _checked_ram(ram)
     head = open(xff_path, "rb").read()[:0x80]
     best, best_score = None, 0
     pos = ram.find(b"xff2")
@@ -38,9 +88,32 @@ def find_header(xff_path, ram):
 
 
 class LoadedModule:
+    """A module's XFF header as it exists in guest RAM after loading.
+
+    Attributes:
+        xff: the parsed :class:`xff.Xff` file.
+        name: file name of the module, without directories.
+        base: guest address of the in-RAM ``xff2`` header.
+        sections: :class:`ModSection` for every loaded section that carries
+            bytes or reserves space.
+        sect_addr: section index -> absolute guest address.
+        symbols: ``(symbol, address)`` pairs with final guest addresses.
+    """
+
     def __init__(self, xff_path, ram, header_addr):
-        self.xff = x = Xff(xff_path)
-        self.name = xff_path.split("/")[-1]
+        """Parse the loaded header found at ``header_addr`` in ``ram``.
+
+        ``xff_path`` may be a ``str`` or a :class:`pathlib.Path`. Raises
+        ``FileNotFoundError`` when the XFF file is missing and ``ValueError``
+        when ``ram`` holds no ``xff2`` header at ``header_addr``.
+        """
+        name = xff_path.split("/")[-1] if isinstance(xff_path, str) else Path(xff_path).name
+        xff_path = _checked_path(xff_path)
+        ram = _checked_ram(ram)
+        if header_addr < 0:
+            raise ValueError(f"negative header address: {header_addr:#x}")
+        self.xff = x = Xff(str(xff_path))
+        self.name = name
         self.base = header_addr
         u32 = lambda a: struct.unpack_from("<I", ram, a & RAM_MASK)[0]
         if ram[header_addr:header_addr + 4] != b"xff2":
@@ -61,6 +134,10 @@ class LoadedModule:
             self.symbols.append((s, addr))
 
     def text(self):
+        """Return the executable (``.text``) section.
+
+        Raises ``StopIteration`` when the module has no executable section.
+        """
         return next(s for s in self.sections if s.exec)
 
     def functions(self):
@@ -74,5 +151,6 @@ class LoadedModule:
         return {a: (sz, n) for a, (sz, n, b) in out.items()}
 
     def data_symbols(self):
+        """Map guest address -> name for defined data (non-ABS) symbols."""
         return {addr: s.name for s, addr in self.symbols
                 if s.name and s.type == 1 and s.shndx not in (0, 0xFFF1)}

@@ -23,7 +23,7 @@
 #      calibration"). Memory-bound code still runs faster there than on the
 #      console, compute-bound code slower.
 # Logs: $CELOSIA_VITA3K/fs/ux0/data/celosia/{log,err}.txt
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 V3="${CELOSIA_VITA3K:-$(cd .. && pwd)/vita3k-celosia}"
 FS="$V3/fs"
 VITA3K="${VITA3K:-$HOME/Documents/workspace/games/Vita3K/build/macos-ninja/bin/Release/Vita3K.app/Contents/MacOS/Vita3K}"
