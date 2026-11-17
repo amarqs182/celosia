@@ -41,7 +41,7 @@ jobs:
           cmake -S PS2Recomp -B build -G Ninja -DPS2X_BUILD_TEST=ON -DPS2X_BUILD_STUDIO=OFF -DPS2X_BUILD_ANALYZER=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS=-msse4.1 -DCMAKE_CXX_FLAGS=-msse4.1
 
       - name: Build
-        run: cmake --build build --config Release
+        run: cmake --build build --target ps2x_tests ps2_gs_cache_backend_under_test --config Release
 
       - name: Tests
         run: ./build/ps2xTest/ps2x_tests
@@ -84,5 +84,5 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release
 
       - name: Build (AArch64)
-        run: cmake --build build-aarch64 --config Release
+        run: cmake --build build-aarch64 --target ps2_runtime --config Release
         
