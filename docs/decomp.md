@@ -18741,3 +18741,1187 @@ no computation (no -ffast-math, -fno-profile-values). spalign: 0 sp-based NEON a
 r137/env-console.txt (round 135's A/B list), r137/celosia-r137.elf for prof129.py. build/agent-scratch/celosia-r137-
 release.vpk: the same as a release build (`PS2X_VITA_RELEASE=ON`). Compare the game thread against r135 / r136 at the same
 places (abframes.py --summary). Retrain after the next large batch of natives.
+
+## Round 139: the scripts' sub-thread switch, the sound driver's status request and the pad sends, the isys locks' kernel calls, the garbage walk, iosGetRandom (sub139, sg2q139, rpc139, sem139, gc139, rnd139) (2026-11-10)
+
+Scripts, runs: `build/agent-scratch/r139/` (build.sh pN, run.sh / v3k.sh / v3kb.sh / stop.sh on the own trees
+../vita3k-celosia-r139 / -r139b, 222 MHz, muted; zones.py: prof129's samples of guest functions by pc / ra / zone; asm.sh;
+speed.py; env-console.txt; STATE.md). Source: the r135 console profile riding (scripts/AI 5.2 ms, the guest code around it).
+
+**What the console's entries are** (`r139/zones.py r135/console/err.txt r135/celosia-r135.elf <pattern>`; 1% of the busy
+game thread = 0.38 ms).
+- `Sg2RemoteTickProc` 0.76% = pc 0x1d2340 in zone 0x2030: the HLE `SifCallRpc` of the sound driver's status request (the
+  syscall stub sets pc to ra before the handler), ~1-3 a frame (the VBlank thread's sound tick). `sceDbcSendData2` 0.21% the
+  same zone: the DualShock actuator sends (sids 0x8000131e / 0x8000131f, which the native IOP completes without a service).
+- `iosSendMsg` 0.58% = 0x1b10dc (the main thread parked at its frame end, iosSleepThread): 0.40 of it zone 0x2040, the
+  dispatcher after the park.
+- `kernel_sub_001C81B0` 0.45% = pc 0x1c81e8: decomp_gctick's native garbage walk (prof129 names it by the pc its time
+  check last set): ~450 blocks a frame.
+- `decomp_subthread::wake` / `sleep` 0.62 / 0.43%: the script sub-threads' 0x2c0-byte register frames (~50 wakes a frame).
+- `iosGetRandom` 0.36%: the particle emitters' random floats (VU0 R register code).
+- `decomp_isys::*` / `isys48::*`: the group / object locks' kernel calls (GetThreadId, PollSema) through the syscall stubs.
+
+**Measured first** (SOTC_STAT139=1: `[stat139]` every 600 frames: EE dispatches, thread runs, parks by ra and reason, the
+RPCs' host time, sub-thread wakes; Vita3K 222, p1 = main + the counters, attract demo riding): 18-19 dispatches, 9-10
+thread runs, 6 parks a frame (main at 0x1b10dc, the callback thread at 0x1b2d08, the VBlank thread at 0x1c8108); the
+status request ~2 a frame at ~200 us each in Vita3K (the driver ~90 us of it, of which ~65 us waiting for the mixer's
+lock: `[audio-ticks]`; the rest the generic SifCallRpc: ABI selection, client / server maps under their mutexes, debug
+events), the pad sends ~35 us each; 31 800 sub-thread wakes / 600 frames. Vita3K host sampler (profA1, p1): Sg2 lock spin
+(trylock + CAS + handleRpc) 0.38%, gctick 0.81%, the sub-thread switch 1.58%, the isys kernel calls (bindMainContextForSyscall,
+GetThreadId, pollSemaphore, publishSnapshot, eeScheduler()) ~0.5% of the game thread.
+
+**What changed (A/B names = the switch names; `r139all` all six off together).**
+- `sub139` (`SOTC_SUB139`, default on; decomp_subthread.cpp; port): the switch is a call on both sides (the waker's jal
+  isysWakeupSubThread, the sub-thread's jal isysSleepSubThread), so by the R5900 ABI the code after it reads only the
+  callee-saved registers. The frames now keep s0-s7, fp, f20-f31, hi / lo / sa / hi1 / lo1 (v0 = lo1 as before), and in the
+  waker's frame a0-a3 (the sleep reads a1-a3 back); the sub-thread's load also takes a0, which isysStartSubThread (0x1c98a0)
+  puts in a new sub-thread's first frame (the script's argument). 9 of a sub-thread frame's 22 lines (11 of the waker's)
+  instead of all. The recompiled paths (start, end at 0x1c9e28, fallbacks) still copy whole frames; a whole load of a lean
+  frame gives the caller-saved registers stale words, unread. Found on the way: without a0 the scripts' first wake went wrong
+  and the boot stopped at the logo (p2; bisected by switch). `SOTC_SUB139_POISON=1`: after each lean load the caller-saved
+  registers (at, v1, a0-a3 where not kept, t0-t9, f0-f19) are set to 0xBAD1BAD1 / NaN.
+- `sg2q139` (`SOTC_SG2Q139`, default on; iop_sg2.cpp, sound_mixer.h/.cpp; port): the status request never waits for the
+  audio thread's mix piece. When the mixer's lock is taken, the request's commands go to a queue and the request answers
+  with the last reply made, as the PS2's no-wait RPC does (the EE reads what the IOP sent for an earlier request); the audio
+  thread runs the queue and makes the next reply between its pieces (SoundMixer::runPieceHook, lock held), the next request
+  that gets the lock runs what is left first. At most 3 in a row are left before one waits. `SOTC_SG2Q139_ALWAYS=1`
+  (measuring): every request left for the audio thread. Counts on the `[stat139]` line.
+- `rpc139` (`SOTC_RPC139`, default on; RPC.cpp; exact): SifCallRpc for the status request and the pad sends (no-wait, no end
+  function, the register convention, a sid whose first generic call was answered by the HLE side with no guest server
+  function or buffer) without the generic call's bookkeeping: a binding cache made again after any bind / register / init, no
+  ABI selection (no service overrides it), no maps or debug events. The guest sees the same: the client's command / end
+  function / parameter / mode / server, the server record's fields, the reply, the completion semaphore signalled as the
+  generic path signals it, v0 = 0.
+- `sem139` (`SOTC_SEM139`, default on; decomp_sema.cpp, decomp_isys / isys48, ee_scheduler.h; exact): GetThreadId (0x106ed0)
+  and PollSema (0x107030) as table natives, and for the isys natives, with a thread running: the running thread, or the
+  count taken / KE_SEMA_ZERO, without the syscall's binding call and snapshot publish. The scheduler's semaphore lookups
+  (these, SignalSema's fast path, semaphore()) go through a 16-entry direct-mapped cache (one entry thrashed between the isys
+  lock, the RPC completions and the kernel's message semaphore); deleteSemaphore / reset clear it.
+- `gc139` (`SOTC_GC139`, default on; decomp_gctick.cpp; exact): while round 58's kept time check holds (no guest call since,
+  the EE clock unchanged), a run of blocks with nothing to move (in use, last, followed by a free block or by one with no
+  handler) is stepped in host locals: the budget's arithmetic on the block count, no per-block clock read, count call or
+  register writes; s1 / s2 / s3 get what the per-block code leaves. The block that stops the pass or moves goes to the old
+  code. `SOTC_GC139_CHECK=1`: each run stepped again the per-block way and compared (`[gc139]`).
+- `rnd139` (`SOTC_RND139`, default on; decomp_r139.cpp; exact): iosGetRandom (0x1be7e8) as host code: 14 steps of the 23-bit
+  R register in a host register, R / vf5 / a3 / f0 written once. `SOTC_RND139_CHECK=1`: every call also runs the recompiled
+  code on a copy of the context and compares (`[rnd139]`).
+
+**Checks (Vita3K 222).**
+| run | build | what | result |
+|---|---|---|---|
+| runsb/chkA3 | p3 | attract demo 1200 s (45 600 frames, both ride loops), SOTC_SUB139_POISON=1 SOTC_RND139_CHECK=1 | rnd139 1.6 M calls 0 differ; 4.8 M poisoned lean loads, no fault; Agro 12-15 u/s in 361 of 596 `[pos]` samples, drops only at the demo's cuts |
+| runs/walkW4 | p4 | the console card's save walked out of the shrine onto the plain, 720 s, poison + rnd check | rnd139 1.0 M 0 differ; 2.2 M poisoned loads; Wander's walk as before (y -3.5 .. 11.3) |
+| runsb/chkA6 | p6 | attract demo 1200 s (46 140 frames), poison + rnd139 + gc139 checks | rnd139 1.6 M 0 differ; gc139 40 000 runs 0 differ; 4.8 M poisoned loads; Agro 12-15 u/s in 358 of 825 samples, drops only at the cuts; sg2q139 4-8% of the status requests left for the audio thread |
+| runs/abA6, profOn7 / profOff7, walkW7 | p6 / p7 | the A/B, the samplers, the card's walk (no checks) | normal pictures, no hang |
+
+**Measured (Vita3K 222).**
+- Vita3K host sampler, the same build (p7) with the six switches off (profOff7) and on (profOn7), attract demo 480 s, the
+  game thread: the touched functions 4.19% -> 2.10%: the garbage walk 0.96 -> 0.27, the sub-thread switch (wake, sleep,
+  load, save) 1.52 -> 0.98, the status request's lock spin (handleRpc, trylock, CAS) 0.41 -> 0.01, the isys kernel calls
+  (bindMainContextForSyscall, GetThreadId, pollSemaphore, publishSnapshot, eeScheduler(), pollSema139) 0.67 -> 0.27.
+- `[stat139]`, riding (frames 10 000+): the RPCs' host time a frame 283.6 + 57.5 us (status, pad) -> 97.3 + 15.3 us.
+- The frame A/B (runs/abA6, rotation of 600 frames, `r139all` there still a no-op control): per state -4.3 .. +2.4 ms, the
+  scenes' draws 576-1200 a window: the scene, not the switch (the control window +0.1); Vita3K cannot show sub-ms effects.
+- Console estimate from the r135 profile: the entries these touch are ~2.8% of the busy thread (~1.1 ms riding); about
+  half of that goes, ~0.5-0.8 ms, short of the 1.5-2 ms asked. Not touched: the EE dispatcher's own 0.47 ms (zone 0x2040;
+  Vita3K's sampler puts only ~0.2% in the scheduler, so on the console it is memory waits or a lock, not instructions), the
+  Sg2 sequencer ticks (~0.45%, guest MIDI code), the isys group natives' own walks.
+
+**Console.** build/agent-scratch/celosia-r139.vpk (dev, prof129), r139/celosia-r139.elf (spalign: 687 NEON :128/:256, 0
+sp-based), r139/env-console.txt = r137's with `SOTC_AB_FLAG=sub139,rnd139,sem139,rpc139,sg2q139,gc139` (rotate, 600). Read:
+`tools/prof129.py err.txt --elf r139/celosia-r139.elf` (zone 0x2030, decomp_subthread::wake / sleep, kernel_sub_001C81B0,
+iosGetRandom, decomp_isys::*), `r139/zones.py`, `tools/abframes.py err.txt --summary --bin 100 --from <first field frame>`.
+Ride the field at a gallop; listen for the sound (sg2q139 changes when the driver's work runs).
+
+## Round 140: the display walk's group pass and sort lists, the strips' quads: clip140 (the layout objects' clips on a helper thread), sort140, quad140 (2026-11-10)
+
+Scripts, runs: `build/agent-scratch/r140/` (build.sh pN, run.sh / v3k.sh / v3kb.sh / stop.sh on the own trees
+../vita3k-celosia-r140 / -r140b, 222 MHz, muted; zpc.py: prof129's running samples by zone and guest pc;
+env-console.txt; STATE.md). Source: the r135 console profile riding (display 6.81 ms of the game thread).
+
+**What the console's display entries are** (`r140/zpc.py r135/console/err.txt r135/celosia-r135.elf`, % of the busy thread).
+- `decomp_tex64::wrap<12>` 2.37% = modelDisp's table entry: 2.28 of it in zone 0x2020, the frame change (syncFrame) the
+  frame's first modelDisp meets, running (its waits are marked apart). The frame log's own timing of that block on the
+  console (`sync ... end`) is 0.1-0.2 ms over its render wait, not 0.87 ms: prof129's sampler (cores 1-2) runs most when
+  those cores go idle, which is the frame change (round 129's caveat); not chased.
+- `decomp_walk::solidDisp` 0.93% = the model hook's phases called from it as a native (zones 0x2002-0x2005).
+- `decomp_tex64::wrap<10>` 2.11% = DispDispObjGroupModel's own code; its samples sit after ClipLayoutObjModel's return
+  (ra 0x10f550c, 0.55) and AddSortObj's (0x10f55a4, 0.37): the walk's next object's loads.
+- `decomp_walk::clipLayoutObjModel` 2.06%, all from the group pass (ra 0x10f550c): the layout objects' update.
+- `manager_sub_010F3FB0` 1.65% = the heat-haze strips (round 134): quads 0.97, segment math 0.41, 2D feed 0.25.
+- `decomp_layoutclass::getLayoutClass` 0.59%: called from the scripts / AI all over, not the walk.
+- Vita3K's host sampler (attract demo, the game thread) adds what prof129 cannot split: quad117 and its helpers 2.3%,
+  the sort lists' bucket loops (sortOrder 0.73, clearSortList 0.41: ~1000 buckets, a few dozen used, cleared twice,
+  copied twice and scanned twice a walk), clip83::clip 0.9%.
+
+**What changed (A/B names = the switch names).**
+- `clip140` (`SOTC_CLIP140`, default on; decomp_walk.cpp; exact): at the group pass's start the group's chain is read
+  as isysGroupForNext walks it (without its counters' writes) and the layout objects whose update is ClipLayoutObjModel
+  (no billboard / camera link, no clip callback) are listed for a helper thread (`threads::kOffload`, cores 1-2, the
+  game thread's FP mode), which computes their clips from the list's end back: clip83's arithmetic on the same words,
+  writing nothing; each result is the words the clip writes (rec +0x20 .. +0x34, geo +0x230 .. +0x23c and +0x250 ..
+  +0x257) and its v0 / f0. The walk, at such an object, writes them there and sets what the call leaves (ra, sp, pc,
+  v0, f0) instead of the call; an object the helper has not finished (not reached, or being clipped now) the walk
+  claims and clips as before: the walk never waits for the helper. Objects off clip83's fast path (skinned, self-LOD:
+  the characters) go to the walk. A generation number in each slot's state keeps a late helper from touching the next
+  walk's slots; the walk does not wait for the helper at its end. Nothing between the pass's start and an object's
+  turn writes what its clip reads (the earlier objects' clips, the billboards' simple updates, the particle geodisps'
+  updates, the visibility callbacks, AddSortObj): `SOTC_CLIP140_CHECK=1` runs every taken object's clip the old way
+  too and compares its writes and registers (`[clip140] differ`); `SOTC_CLIP140_LOG=1`: `[clip140]` counts every 600
+  walks.
+- `sort140` (`SOTC_SORT140`, default on; exact): the walk's sort lists' bucket arrays as host words (in plain RAM, away
+  from the list's own words): the clears as 16-byte stores, the order copies and the next-bucket scans 8 buckets a
+  test, the list's count and array read once. The same words written, the same values left (the index word as
+  GetFirstSortObj / GetNextSortObj leave it). `SOTC_SORT140_CHECK=1`: every scan also bucket by bucket ([sort140]).
+- `quad140` (`SOTC_QUAD140`, default on; exact): quad117 (the strips' and the immediate quads' four vertices) is now
+  quad117Body, called as before when off; on, through a copy with everything inlined (`flatten`): the PGO build left
+  its per-vertex helpers as calls, several through long-branch veneers (the VU0 product lambda three times a vertex,
+  the blend `sel`, the GIF pair emitter, glColor4f / glTexCoord2f). Same operations in the same order (the A9 has no
+  fused multiply-add). `SOTC_QUAD140_CHECK=<n>`: every n-th quad run both ways from the same state (gl block, the
+  packet's next 0x100 bytes, the host pairs, the context, the lane's CLIP record) ([quad140]).
+
+**Checks (Vita3K 222, the check switches on: every taken clip compared, every bucket scan, every quad).**
+| run | build | what | result |
+|---|---|---|---|
+| runs/chkA1 | p1 | attract demo 1200 s (both ride loops), clip140 (helper forward) + sort140 checks | clip140 2 685 144 clips 0 differ; sort140 3.4 M scans 0 differ; Agro 12-15 u/s in 309 of 854 `[pos]` samples, drops only at the demo's cuts |
+| runsb/chkW1 | p1 | the console card's save walked onto the plain 720 s | clip140 1 599 533 0 differ; sort140 1.9 M 0 differ |
+| runsb/chkA2 | p2 | attract demo 1200 s, + quad140 check | quad140 608 000 quads 0 differ; clip140 1.38 M 0 differ |
+| runsb/chkA3 | p3 (final) | attract demo 1200 s, all three checks (helper from the list's end, no waits) | clip140 1 127 175 0 differ; sort140 2.3 M 0 differ; quad140 642 000 0 differ; Agro 12-15 u/s in 179 samples |
+| runs/chkW3 | p3 (final) | the card's walk 720 s (the shrine, out onto the plain), all three checks | clip140 800 000 0 differ (105 listed a walk); sort140 1.8 M 0 differ; quad140 204 000 0 differ; pictures normal (shrine bloom, Wander and his shadow on the plain) |
+
+**Measured (Vita3K 222, attract demo 480 s, the same build (p3) with the three switches on (profOn3) and off
+(profOff3), host sampler, % of the game thread).** quad117 and its helpers 2.23 -> 2.10; ClipLayoutObjModel /
+clip83::clip 1.34 -> 0.41 (the walk's own share of the clips, ~35%) + clip140's walk side (take / apply / post) 0.26
+(the helper thread: 0.77% of the game thread's weight, on another core); the sort lists 1.37 -> 0.55; lodByDistance
+0.10 -> 0.03; the walk's own code 0.94 -> 0.96. The touched functions 5.04% -> 3.35% of the game thread (-1.7%). Field
+frames (draws > 500, `[frame]` medians): game 14.3 -> 13.8 ms, frame 31.2 -> 31.0 (Vita3K's frame is the render
+thread's here). `[clip140]` riding: 70-107 objects listed a walk, the helper's results taken for ~60% (43-68 a walk),
+the walk clipping ~35% itself, 2-24 off clip83's fast path (characters), the two meeting on ~0.35 a walk. (p2, the
+helper from the list's start with the walk waiting for an object being clipped, spun 0.82% of the game thread in
+`take`: the walk caught up with it; p3 runs the helper from the list's end and never waits.)
+
+**Console estimate** (r135's profile): ClipLayoutObjModel 2.06% (0.79 ms) -> ~0.35 of it left on the game thread, and
+the walk's own loads of those objects' class / geometry lines warm in the shared L2 after the helper's reads; the sort
+lists ~0.1-0.15 ms; the strips' quads ~5% of their 0.37 ms. About 0.5-0.7 ms riding, short of the 2 ms asked. Not
+done: the frame change's 0.87 ms in prof129 (a sampling artefact, see above); the render hand-over wait (the display
+pacing); the model hook's phases (~0.4 ms).
+
+**Console.** build/agent-scratch/celosia-r140.vpk (dev, prof129), r140/celosia-r140.elf (spalign: 725 NEON :128/:256,
+0 sp-based), r140/env-console.txt = r139's with `SOTC_AB_FLAG=sort140,quad140,clip140` (rotate, 600). Read:
+`tools/prof129.py err.txt --elf r140/celosia-r140.elf` (ClipLayoutObjModel, wrap<10>, manager_sub_010F3FB0's zones),
+`tools/abframes.py err.txt --summary --bin 100 --from <first field frame>` per switch. The helper runs on cores 1-2
+as `offload` in the `[frame]` cpu column.
+
+## Round 141: why char104 lost on the console, the characters' independence measured riding, pf141 / pfc141 (the characters' memory asked for one segment ahead on a helper thread) (2026-11-10)
+
+Scripts, runs: `build/agent-scratch/r141/` (build.sh pN, run.sh / v3k.sh / v3kb.sh / stop.sh on the own trees
+../vita3k-celosia-r141 / -r141b, 222 MHz, muted: audio-volume 0 and run.sh's NOSND=1; env-console.txt; STATE.md).
+Source: the r135 console profile riding (characters 7.11 ms of the game thread's 38.3 running) and the r117 console log
+(round 114's char104 on, its own A/B).
+
+**Cores 1-2 on the console (r135/console/err.txt, the `[frame]` cpu column, 125 field summaries: frames >= 1500, > 500
+draws, 46.2 ms a frame).** render 19.9 ms a frame, worker (round 91's) 9.3, loader 5.4, audio 4.7, lane 3.2, dma 2.3, offload
+(clip140) 2.1, log 1.5, main 1.0, build 0.4: 49.7 ms of the two cores' 92.4: ~43 ms idle a frame, but the render thread
+holds core 2 for ~20 ms and every helper shares core 1 with the worker, the loader and audio.
+
+**Why char104 lost on the console (r117/console/err2.txt, `[char104]` / `[char114]` / `[worker91]`, 600-frame windows).**
+- What went to the worker riding was 0.4-4.2 cheap far characters a frame (Wander and Agro never: the player, and Agro at
+  distance 0 < SOTC_CHAR104_NEAR); worker 0.16-1.89 ms a frame.
+- The game thread waited for them about as long as they ran: 0.10-1.82 ms a frame (worker 0.16-1.89): no overlap. Almost every
+  job was joined at a shared channel ~0.6-0.9 ms after its hand-over (`chan` 467-851 joins per 600 jobs, the random numbers /
+  the heap), and the console's worker was slow to start: hand-over to running 0.06-0.35 ms mean (Vita3K 0.02-0.03), slow
+  to finish (cores 1-2 also carry the render thread, audio up to 18 ms a frame in that session, the loader).
+- So char104 paid the hand-over, the copies and the joins for no parallel time; net114 kept pausing it (mean -0.17 to -0.77
+  ms a window), and the A/B read -0.4 matched / -1.1 raw.
+
+**Is there an independent unit riding? (census: runs/attA2, `SOTC_CHAR104_LOG=600`, attract demo's ride, Vita3K 222.)**
+Geometry 7.2 ms a frame riding (census probes in): Wander 3.66 ms and Agro 2.52 ms, each read by another object's script
+0.04 ms (Wander) and 0.38 ms (Agro) after its geometry ends (in all 600 frames: Wander's scripts read Agro, the managers and
+the camera read Wander); the rest are 4-9 far characters at 0.10-0.37 ms each, unread for 12-14 ms. Inside a character the
+phases feed each other (the pose's inputs are the IK's and the gaze's results of the same call; the cloths read the pose's
+bones and draw the VU0 R stream that later code draws from; the cloth whole-functions and strands call guest callbacks):
+no part of Wander's or Agro's work has inputs final early enough to be computed ahead, and anything run beside the game
+thread is read within 0.04-0.4 ms. A clip140-style compute-ahead of ≥ 2 ms of character work does not exist riding; a
+char104-style split of Wander / Agro would join at once.
+
+**Where the console's character time goes.** The same build's subsystem shares, console (r135) against Vita3K (runs/attA4,
+attract, this round's p4, prof129 in both): characters 18.5% / 13.6% of the busy samples, collision 12.5 / 13.4, display
+17.8 / 22.2. Scaled by the rest of the thread, the characters cost the console ~2.2 ms a frame more than the Vita3K mix
+predicts (7.1 against ~4.9): the A9's memory waits (DRAM ~250 ns a miss, round 66), which Vita3K does not model. The
+character natives walk tens of KB per character once a frame (the class 4.6 KB, the pose's four matrix buffers and the
+skeleton, round 136's kept bones 160 bytes a bone, the IK records, the cloth rows, the motion keys) and the pose alone runs
+~2.3 µs a bone on the console (0.59 ms for ~255 bones): far more than its ~60 NEON operations. That part can leave the game
+thread without any dependency problem: the waits, not the arithmetic.
+
+**What changed (A/B names = the switch names).**
+- `pf141` (`SOTC_PF141`, default on; decomp_pf141.cpp, sotc_pf141.h; prefetch only): the characters' natives note the
+  ranges they read (host pointer + length into a per-frame set: execCharaGeometry: the object and class (0x1210 bytes), the
+  pose buffers its class points to (+0x154 / +0x158 / +0x15c / +0x160 / +0x2d8 / +0x2e8 / +0x310 / +0x314), the skeleton's
+  bones, the IK records and weights, the link list and slots, the motion record; GetMotionMatrix (round 82 / 136): bones,
+  locals, matrices, quaternions and round 136's kept bones (host); decodeKey (keys122 / key136): the channel header and the
+  key words; the cloths (GetClothDynamics' fused pass, getClothDynamics, DispCloth's mesh: the cloth record, grid, row
+  records and the four row buffers, the mesh's vertices); dispSkinned: the bones and the palette). The frame is cut into
+  segments at each character's ExecCharaGeometry end (decomp_scriptvm3 charaGeometry; segment 0 from the frame's first
+  script pass, the last to the next frame: the display's character work). When a segment starts, a helper thread
+  (`offload`, cores 1-2, condition variable) is asked for the *last frame's* next segment (found by the object that ended
+  the current one, so a character added or gone shifts nothing) and PLDs its lines into the shared 2 MB L2 while the game
+  thread runs the current one (`SOTC_PF141_AHEAD`, default 1 segment ahead: covers the console's 0.1-0.35 ms wake). Three
+  sets rotate (record / read / idle); a request of an older frame is skipped. The helper writes nothing but its own queue
+  and counters; nothing the game reads, decides or writes changes, so the results are the same bits by construction.
+- `pfc141` (`SOTC_PFC141`, default on; prefetch only): the collision natives note too, at round 134 / 135 / 138's own
+  prefetch points: obj125's objects (0x1e0 bytes), their parts' records and matrices, fin138's kept surfaces (plane,
+  boundary, three vertices). The characters' root dynamics, feet IK and the scripts' probes test the same objects and
+  surfaces frame after frame.
+- `SOTC_PF141_LOG=1`: `[pf141]` every 600 frames (segments, ranges noted, lines asked for and the helper's ms a frame,
+  requests, skipped / lost).
+
+**Identity.** Prefetch only: the game thread's added work is the notes (stores into host arrays the game never reads) and
+the helper's requests; the helper issues PLDs (no stores to guest RAM or to any state the natives read). PLD does not fault
+on the A9 (a stale host pointer of a freed kept-bones array is harmless); Vita3K treats it as a no-op. No check mode can
+show a difference that the code cannot make; the runs below show the same game (positions, pictures).
+
+**Measured (Vita3K 222; Vita3K has no memory latency, so the gain itself is the console's).**
+`[pf141]` riding (runs/attA5, attract's ride, p5): 3 segments a frame (Agro's, Wander's, the display's), ~590 ranges /
+~6 100 lines (~195 KB) a frame with pf141 alone, ~870 ranges / ~9 000 lines (~290 KB) with pfc141; the shrine with the
+console card's save (runsb/rideB3): 18.7 segments (Mono, the doves, the birds), ~2 200 ranges / ~22 000 lines; the walk out
+onto the plain (runsb/walkB4): 9 segments, ~12 000 lines. Helper 0.11-0.17 ms of CPU a frame riding, 0.4 ms at the shrine
+(the `offload` thread, cores 1-2); requests skipped 0, lost 0, set never full. In-run A/B (`tools/abframes.py --summary
+--from 3000`, off minus on, game = the game thread): attract p4 (runs/attA4, 1260 s) pf141 frame +0.44 +- 1.28, game -0.61
++- 1.47; attract p5 (runs/attA5, 1260 s) pf141 +1.30 +- 1.30 / +1.61 +- 1.61, pfc141 -0.95 +- 1.13 / -1.73 +- 1.28; the
+card's walk p4 (runsb/walkB4) pf141 +0.41 +- 1.15 / +0.32 +- 1.57, p5 (runsb/walkB5) pf141 -0.06 +- 0.54 / -0.43 +- 0.99,
+pfc141 +0.25 +- 0.55 / -0.09 +- 1.03. All within noise both ways: the notes cost the game thread nothing Vita3K can see, and
+the PLDs are no-ops there. No fault in any run (attract 840 / 1260 / 1260 s, the card's shrine 720 s and walk 2 x 720 s).
+Pictures (window shots, looked at): the shrine with Mono on the altar and Wander walking (cape), Agro beside him; Wander
+walking and running on the plain with the sword, his shadow and cape; Agro galloping alone in the attract demo (mane and
+tail moving, shadow) by the ruins and on the plain. The ride input (in_ride.txt) did not mount Agro in these runs (Wander
+stayed at the shrine): riding pictures are the attract demo's.
+
+**Console estimate.** The characters' console excess over the Vita3K mix is ~2.2 ms a frame riding (above); pf141 + pfc141 ask
+for ~9 000 lines a frame riding one segment (~1-3 ms) before the game thread reads them. If half of them would have been
+DRAM misses on the game thread (~250 ns) and become shared-L2 hits (~60 ns), ~0.85 ms; if all, ~1.7 ms; the excess bounds
+it. So 0.5-1.7 ms riding is the expectation, below the 2 ms asked for unless the collision share (pfc141) adds more; the
+console's A/B decides both switches (round 135's pf135 cut finderLeaf<true> 3.80 -> 1.26% on the console with in-thread PLDs
+of the same kind of data). Risks on the console: the L2 the helper fills is shared with the render thread (~20 ms of CPU a
+frame on core 2) and the lines may be evicted before use in a long segment (`SOTC_PF141_AHEAD=0` asks for the segment
+starting now instead); the helper's CPU is ~0.3-0.5 ms a frame of cores 1-2 (~42 ms idle there a frame in r135's field
+frames: 49.7 ms of 92.4 used).
+
+**Console.** build/agent-scratch/celosia-r141.vpk (dev, prof129), r141/celosia-r141.elf (spalign: 725 NEON :128/:256, 0 sp-based),
+r141/env-console.txt = r140's with `SOTC_AB_FLAG=pf141,pfc141` (rotate, 600) and `SOTC_PF141_LOG=1`. Read: `tools/abframes.py err.txt --summary
+--bin 100 --from <first field frame>` (pf141 off / pfc141 off minus all on: positive = the prefetch saves that much),
+`tools/prof129.py err.txt --elf r141/celosia-r141.elf --group characters` against r135's (motionMatrix, clothStep,
+execCharaGeometry, floatFrame; collision's directCallBack / finderLeaf). The helper runs as `offload` in the `[frame]`
+cpu column (with clip140's).
+
+## Round 142: the Mac build again (2026-11-10)
+
+The Mac build (the native test bed) had not compiled since about round 122. Four causes, each fixed without touching
+what the Vita compiles:
+
+- `native_renderer_gl.cpp`: `useRegion()` and the glow98 composite (mode 26) read `regionPrograms` / `quadPrograms`,
+  which only exist under `PS2X_NATIVE_VITA`. Both now sit under the same guard; on the Mac `useRegion` does nothing and
+  the composite takes its two-pass path (neither is reached there).
+- `decomp_collision.cpp`: `keepFastOk()` called `fast::check49()`, which only exists under `PS2X_VU_NEON_A32`. Without
+  NEON it returns false (the keep paths fall back to the recompiled code, as every other fast native there does).
+- `coll125.h` `clip()`: the scalar (non-NEON) plane test declared `vf0c`, and so did the u / v terms below it in the
+  same scope. The scalar one is now `vf0p`.
+- Unity build: `decomp_ai106.cpp` and `decomp_group.cpp` each defined `decomp_group::NextRegs` and the Mac's unity
+  batches put them in one translation unit (the Vita builds the overrides one file each). The struct and `nextAt()`'s
+  declaration are now in `game/overrides/decomp_group.h`, included by both.
+
+**Vita unchanged.** The Vita build (PGO profile, same configuration as round 141) built from main and from main + these
+changes: the four touched objects (`decomp_group`, `decomp_ai106`, `decomp_collision`, `native_renderer_gl`) are
+byte-identical, and so are the linked `ps2EntryRunner` ELF and the `.velf` (sha1 7c9d2457cd45...).
+
+**Mac run.** `ps2EntryRunner` (Release, Metal) muted (`PS2X_NO_SPU2_AUDIO=1`), no input, 600 s, a snapshot every 15 s:
+the opening and the title loop twice with no fault. Looked at: the cliffs and the eagle, Wander riding Agro through the
+forest and out of the cliff path, Agro galloping across the misty plain with Wander, the bridge, the title screen
+(menu and copyright), close-ups of Wander on Agro. Nothing missing in the pictures (characters, terrain, fog, bloom,
+title text).
+
+## Round 143: the game thread's wait on the render thread: what the console's 3 ms is; pace143 (the held slot pulled when the swap waits behind it), [wait143] (2026-11-10)
+
+Scripts, runs: `build/agent-scratch/r143/` (build.sh pN, run.sh / v3k.sh / v3kb.sh: own trees ../vita3k-celosia-r143 and -r143b;
+cmp143.py: the round's lines summed; env-console.txt; STATE.md).
+
+**What the console's 3.02 ms is.** prof129 over the r135 console log (frames 4-8369) gives `wait render` 3.02 ms a frame, but by
+window: window 0 (frames 4-1779: boot, title, the card's load) 10.20 ms a frame; windows 1-5 (play) 0.60 / 0.18 / 0.30 / 1.03 /
+1.44. The 60-frame `[frame]` summaries agree: their `wait` (the backend's whole endFrame) averages 3.01 over the same frames and
+1.21 in play (115 summaries from frame 1500). So in play the hand-over wait is ~1.2 ms a frame, not 3; a 1.5-2 ms cut of it is
+not there to take. In play it follows the present, not the render thread's drawing:
+
+| play summaries (r135 console) | n | frame | game | render | present | wait |
+|---|---|---|---|---|---|---|
+| present < 3 ms | 75 | 45.5 | 41.7 | 26.7 | 0.9 | 0.75 |
+| present >= 10 ms (the swap blocked) | 24 | 47.6 | 42.5 | 20.7 | 21.7 | **2.67** |
+| render >= 28 ms | 50 | 47.1 | 42.5 | 31.9 | 2.8 | 1.08 |
+
+The r127 console log (every frame logged, before pace132): 84% of play frames wait 0; 93% of the wait is in the 8% of frames
+that wait 5-60 ms, and those follow a present of 14-40 ms. Why the present is long: the render thread presents a picture after
+giving its data back (glPresent86); vglSwapBuffers waits in sceGxmDisplayQueueAddEntry while vitaGL's short display queue
+(3 buffers, 2 pending) is full, and it is full when pace110's slots run late: a late picture moves the chain later for good
+(`late 55-99 (+55-99 refreshes)` per 600 pictures), pulls take a refresh back only after 6 calm pictures or (pace132) once the
+game thread already waits. The console's `[pace110]`: latency 6-11 refreshes against a floor of 4, pictures held 0.3-1.5
+refreshes each for their slot. Then the next frame starts drawing only when the swap returns, and when present + drawing passes
+the game thread's frame, the game waits.
+
+**pace143 (`SOTC_PACE143`, default on; A/B `pace143`, raylib_vita.cpp).** In the display callback's hold: when the render
+thread waits in the swap behind the held picture (in vglSwapBuffers for over 1 ms with a picture swapped that the display has
+not taken), the held slot comes one refresh earlier (once a picture, one pull with pace132's; not below the previous slot +
+the minimum hold). The chain goes on from the pulled slot: latency drops a refresh and the swap returns a refresh sooner. No
+picture is shown later than without it; nothing is drawn differently (the GL stream is untouched: only when a picture goes on
+screen changes), so the picture rule holds by construction. `[pace110]` lines end with `| r143: swap blocked N, pulled M`;
+`[pace143]` (with the on windows' line): swaps by the pictures queued at their start and the ones over 2 ms.
+- The first detection (two pictures swapped after the held one) never fired: measured in Vita3K, a swap that begins with one
+  picture queued is long nearly always (`1:324` of 324 over 2 ms), so a swap waits behind the held picture alone.
+- Testing knobs: `SOTC_PACE143_TEST=<n>` (every 300th picture's slot n refreshes later: the console's late chains in Vita3K),
+  `SOTC_WAIT143_RENDER_US=<us>` (the render thread's drawing made at least that long).
+
+**[wait143]** (with SOTC_FRAME_LOG, every 600 hand-overs, native_renderer_gl.cpp): the backend endFrame a frame, of it waiting
+for the render thread to pick up the frame handed over before (it was still presenting) and for its drawing, the hand-over's
+own work; waits of 1 ms or more, how many found the frame before still queued behind its present; the render thread's draw and
+present a frame and its presents over 2 ms. The next console log says which of the two waits is left.
+
+**Measured (Vita3K 222; the host ran another agent's Mac runs, load 20-30: timing noisy).**
+- Steady 20 with `SOTC_PACE143_TEST=6`, pairs on the two trees at once (runs/on5, runsb/off5, 420 s attract): on: latency 4.29
+  refreshes (off 4.54), swap blocked holds 587, pulled 111; present 4.55 ms a frame (off 5.99), the game thread's hand-over wait
+  0.12 ms (off 0.35); shown one refresh shorter than the release interval 219 of ~6 000 pictures (off 167).
+- Auto, attract 900 s, in-run A/B (runs/abA, `SOTC_AB_FLAG=pace143`, rotate 600; Vita3K's own display queue blocked the swap in
+  half the frames there): pace143 blocked 1 581 holds, pulled 475; draw-matched (abframes --summary, 30 summaries) pace143 off
+  minus on: wait **+1.16 +- 0.72 ms**, frame -1.84 +- 2.41 (n.s.).
+- Console expectation: the present-bound windows (21% of play in r135) wait 2.7 ms against 0.75; pace143 should bring them to
+  the low state: ~0.4 ms a frame over play, up to ~2 ms in those windows, and latency toward the floor.
+
+**Not done (why).** The render thread's per-frame CPU: no console breakdown since round 116 (plan 5-10, passes 12-17, calls 6-8
+ms riding); in the r135 play windows the render thread (21-38 ms) is below the game thread (37-50) and the waits do not follow
+it (render >= 28 ms: wait 1.08). A third recording buffer would let the game run past a slow drawing, but it is an extra
+buffered frame (excluded). Handing over at the VIF1 kick instead of the next frame's first hook moves latency, not the wait (the
+period is the same).
+
+**Checks.** spalign (p4): 725 NEON :128 / :256 accesses, 0 sp-based. Pictures (window shots): Wander at the shrine (haze,
+shadows), the opening's bridge, Agro galloping on the plain with Wander and his shadow; no fault in the runs. Mac build: builds.
+
+**Console.** build/agent-scratch/celosia-r143.vpk + r143/celosia-r143.elf (dev, prof129); r143/env-console.txt = r141's with
+`SOTC_AB_FLAG=pace143`. Read: `build/agent-scratch/r143/cmp143.py err.txt` (latency, pulls, [wait143]) and `tools/abframes.py
+err.txt --summary` (pace143 off minus on: wait, frame).
+
+## Decomp D1: a lifter that scales (tools/lift_d1.py); Math and the boot ELF's leaf functions lifted (SOTC_LIFTD1) (2026-11-10)
+
+Scripts, runs and builds: `build/agent-scratch/d1/`. build.sh (mac / vita / pN), cc.sh (one file with the Vita build's
+flags), armcmp.py (Thumb-2 instruction counts, lifted vs recompiled, per function), setshare.py (a Vita3K profile
+window's share of a function set, lifted vs recompiled), macrun.sh (Mac runs; `DT=<names file>` runs the difftest over
+a list), run.sh / v3k.sh (own Vita3K tree ../vita3k-celosia-d1, 222 MHz, 3 cores, muted), survey.py (the recompiled
+functions by area, their mnemonics), d1set.txt (the lifted list). Final build p4: celosia-d1.vpk, d1/celosia-d1.elf,
+d1/env-console.txt (`SOTC_AB_FLAG=liftd1`).
+
+### Why round 126's lifter lost, and what this one does instead
+
+Round 126 (tools/lift126.py) wrote its own semantics for each MIPS instruction with every register as an `int64_t`
+local, plain host floats and a full register sync at every call: 6-10x slower than the recompiled code on the Vita,
+and not exact (plain floats). The recompiled code it raced is better than it looks: the generator already keeps
+registers in locals (`rc_N` / `rf_N`, ps2xRecomp's register_cache.cpp), knows where a value is a sign-extended word
+(`RC_U64X`), uses finite FPU fast paths where it can prove them (`FPU_ADD_SF`), and charges the EE clock only on loop
+back edges. What it pays for is the context: every GPR write is also stored to `ctx->r[n]` (two stores on the A9),
+every label reloads the registers it uses, fcr31 (the FPU condition bit) is read-modify-written in memory at every
+compare, and VU0's registers, ACC and Q live only in the context, so each VU0 macro instruction loads and stores
+128-bit registers (and any guest store through `rdram` may alias them, so the compiler cannot keep them).
+
+tools/lift_d1.py takes the semantics **from the generated function itself** and changes only where the state lives:
+
+- **Statements**: each instruction's C from build/runner/<name>_0x<addr>.cpp (the table's entry for the address),
+  with the reloads (`rc_N = Ps2GprU64(ctx, N)`) and write-throughs (`Ps2SetGpr64`, `ctx->f[n] = rf_n`) taken out and
+  every `rc_N` / `rf_N` / `ctx->vu0_vf[n]` / `vu0_acc` / `vu0_q` / `vu0_status` / `fcr31` / `f_acc` / `lo` / `hi`
+  rewritten to a host local (`a0`, `s1`, `f12`, `vf5`, `vacc`, `fcr31` ...). The FPU's clamps and finite fast paths,
+  the VU0 macros' normalisation, the relocated immediates (`_dynInsn`) stay exactly the generator's. An audit refuses
+  a function when any generated line the tool leaves out carries an effect (an assignment, a store, a runtime call),
+  so a statement the parser misreads cannot vanish silently (the difftest found two before the audit existed: `movz` /
+  `movn` lines start with `if (`, and a delay slot's write-through-and-goto line).
+- **Readable code for the common 32-bit instructions** on 32-bit registers: `v0 = a1 + 0x10u;`,
+  `f0 = lift_d1::flt(READ32(sp + 8u));`, `WRITE32(a0 + 0x18u, lift_d1::bits(f12));`, `s1 = a0;`,
+  `v0 = (int32_t)v1 < 11 ? 1u : 0u;`. Same results as the generated forms (the difftest checks them).
+- **Register types**: a GPR is `uint32_t` (the ABI keeps a 32-bit value sign-extended in its 64-bit register, so the
+  low word is the value) unless a 64 / 128-bit transfer writes it (`ld` other than a restore, `lq`, `qmfc2`) or a move
+  / bitwise op copies such a value into it (directed: a narrow value moved into a wide register stays exact). A
+  function with real 64-bit integer work (the `d*` shifts and adds, `lwu`, `mflo` / `mfhi`, MMI) keeps every GPR as
+  `uint64_t`, as the generated code does (66 of the 621 functions; 40 more have a few wide registers). A 64-bit read of
+  a register the function has not written since its entry, a call or a restore reads the context's full register
+  (`Ps2GprU64(ctx, n)` / `ctx->r[n]`), so the prologue's `sd` / `sq` of s0-s7 / ra save the caller's full values; an
+  epilogue's `ld` / `lq` of the same stack slot (sp's offset tracked through the CFG) writes the full value back to the
+  context ("restore").
+- **Syncs**: a forward data-flow over the CFG gives the registers (GPR, FPR, VU0, ACC, Q, status, fcr31 ...) whose
+  local may differ from the context; they are written back only before a call, a tail jump, a return, a runtime call
+  (syscall / break / COP0: `ctx->pc` set as the generator sets it) and in a loop checkpoint's slow path. After a call
+  every local is read back (the dead reads fold away).
+- **Control flow** from the MIPS: delay slots, likely branches, jump tables (the generated switch's cases), calls (the
+  generated `PS2_CALL_GUEST_KNOWN` / `PS2_CALL_GUEST` lines, so a natively replaced callee, a difftest checker or a
+  profiler wrapper still runs; a callee the same batch lifted is called directly), tail jumps
+  (`PS2_TAIL_GUEST_KNOWN` / `PS2_JUMP_GUEST`), relocated `jal` targets. The loops' EE clock checkpoints sit at the same
+  back edges with the same charge (32 cycles; checked against the generated code); their slow path syncs, stores the
+  loop head in `ctx->pc` and calls `eeCheckpointSlow()`. So the guest clock is charged exactly as by the recompiled
+  code, and a call that sleeps (a sub-thread) or a checkpoint that yields leaves the context as the recompiled code
+  would: the scheduler resumes at that label **in the recompiled function** (the lifted function only takes the entry
+  slot). Forward branches over code nobody else enters become nested `if (...) { }`; the rest is `goto L_<addr>`.
+- **Registration**: `SOTC_DECOMP_LIFT_FUNCTION(address, name, lift_d1::name, name_0xaddr)`. sotc_decomp::install puts a
+  lifted function in the table only while the slot still holds that generated function (on the Vita 8 of the 621
+  slots hold a hook or a Vita runtime override and keep it: putting the lifted code over them gave a game that ran at
+  60 fps and never drew a picture; the Mac has none) and only while `SOTC_LIFTD1` is on (default on; `SOTC_LIFTD1=0`
+  off). There is no check inside the functions: an A/B window (`SOTC_AB_FLAG=liftd1`) swaps the table entries
+  (`sotc_decomp::setSwitch` -> `g_switchChanged`; logged `[liftd1] frame N: on/off (k swapped)`).
+
+Usage: `tools/lift_d1.py -o game/overrides/decomp_liftd1_{n}.cpp --chunk 160 [--leaf] [--refused why.txt] addr|@file`
+(addresses hex; `--leaf`: only functions that call nothing and never hand the context to the runtime).
+
+**What it refuses** (the function stays recompiled), over the 8 163 functions still recompiled at round 142: 8 035 lift
+(98.4%), 128 refused: a `break` in a delay slot (98), the generator's eager checkpoint form (10), code that runs off
+the function's end (8) or branches into another function (7), `bc0f` / `bc2t` (3), two operand forms (2). COP0, VU0
+integer / control registers other than status and Q, `syscall`, `break`, `ei` / `di` are lifted as runtime calls
+(everything synced before, read back after). Self-modifying code is only the relocations, read from guest RAM as the
+generated code reads them.
+
+### What is converted (621 functions)
+
+- **Math**, the whole area: the 102 functions still recompiled at round 142 (the GAMEUTIL interpolators and springs,
+  the matrix / plane / region helpers, the transform matrix set, the AI random vectors ...), including the 40 that call
+  other functions.
+- **Boot ELF, SDK and libc: the leaf functions**, 519 of the 1 770 still recompiled (no calls, no runtime calls): the
+  `ios*` matrix / vector / quaternion / table helpers, the display-list and layer getters, the pad and timer getters,
+  Sg2's slot lookups, the kernel's small accessors. The rest of the area lifts too (1 701 of 1 770) but has syscalls,
+  thread and interrupt code: left for a round with longer console-card runs.
+
+game/overrides/decomp_liftd1_00..03.cpp (27 000 lines), regenerated by the tool from build/agent-scratch/d1/d1set.txt.
+
+### Exactness
+
+Mac, `SOTC_DIFFTEST=<the list> SOTC_DIFFTEST_ALLREGS=1 SOTC_DIFFTEST_VU0=1` (every register in full, FPU, hi / lo, VU0,
+and every RAM byte compared), the list in two halves (the checker has 512 slots):
+
+| run (Mac, 1200-1500 s) | functions checked | checks (of calls) | register mismatches | RAM-byte mismatches |
+|---|---:|---:|---:|---:|
+| attract demo, half A | 131 | 55 071 (43.0 M) | 0 | 2 167 |
+| attract demo, half B | 84 | 15 936 (6.4 M) | 0 | 316 |
+| console card, walk (in_walk2), A | 138 | 79 860 (64.6 M) | 0 | 2 583 |
+| console card, walk, B | 142 | 29 943 (10.2 M) | 0 | 55 |
+| console card, ride (in_ride), A | 138 | 28 660 (53.1 M) | 0 | 915 |
+| console card, ride, B | 137 | 25 338 (8.3 M) | 0 | 30 |
+
+281 of the 621 functions reached and checked (234 994 checks); **0 register mismatches**. Of the 6 066 RAM-byte
+mismatches, 5 667 are in functions with no store instruction at all, 385 at addresses that also mismatch in other,
+unrelated functions, and the last 14 at addresses away from anything the function writes (iosUnitMatrix's matrix at
+a0, the springs' fields at a0 + 0x18 ...; checked by hand). The control (`SOTC_DIFFTEST_CONTROL=1`: the recompiled code
+in both legs, half A, attract demo): the same 131 functions, 55 271 checks, 0 register mismatches and 867 RAM-byte mismatches in 11
+functions (849 of them in functions that store nothing): the same noise with no lifted code in either leg (its count
+follows the host's load: the lifted runs shared the machine with Vita3K and a build).
+
+Before that, two real differences were found and fixed (both statements the parser had dropped: `movz` / `movn` whose
+generated line starts with `if (`, in getTWH and kernel_sub_001CDDE8); the audit now refuses any dropped line with an
+effect. Every remaining mismatch is one RAM byte at an address the function does not write (most in functions with no
+store instruction at all: iosGetACosf, iosDlGetLayerNum, padSysGet, GAMEUTIL_get_interp_value_interp_value_cntrl ...),
+the same few addresses (0x29126c, 0x1568070 ...) across unrelated functions: other threads writing between the two
+legs, round 126's "known noise".
+
+### Speed
+
+Static (Thumb-2, the Vita build's flags, both sides compiled the same way; armcmp.py), instructions reachable without
+taking a guest memory access's slow path, a checkpoint's slow path or a call's not-returning path ("hot"): **86 300
+lifted vs 90 882 recompiled (95.0%)**, shorter in 369 functions, longer in 125; all instructions 136 448 vs 125 072
+(the write-backs and read-backs around calls and in the checkpoints' slow paths are longer, and cold). Math 96.9%, the
+boot leaves 93.4%. The largest hot gains are loops and VU0 code: iosGetScaleInverseVector 213 vs 335,
+doit_double_spring_interp_cntrl 1 775 vs 2 190, update_transform_matrix_set 2 145 vs 2 628, GAMEUTIL_get_interp_pitch
+369 vs 600. Longer: VU0-heavy functions that call out (IsInsideOfRegion 3 219 vs 2 043: each call writes back and reads
+back a dozen vf registers the generated code never holds in locals).
+
+Vita3K 222 MHz, the attract demo, the same p3 build with `SOTC_LIFTD1=1` / `=0`, sampler from 300 s to the run's end,
+game thread: the set's self time **1.202% -> 1.025%** of the game thread (-15% for the set, -0.18 points):
+iosGetScaleInverseVector 0.129 -> 0.103%, GAMEUTIL_doit_interp_ratio_cntrl 0.078 -> 0.067, iosApplyRotMatrix 0.040 ->
+0.029, iosGetACosf 0.039 -> 0.033, update_transform_matrix_set 0.051 -> 0.047; IsInsideOfRegion 0.036 -> 0.059 (the one
+clear loss, above). The whole set is ~1% of the game thread, so the frame-level gain is below any A/B's noise (~0.1 ms
+of a 45-55 ms console frame): the point of the round is that lifting no longer costs speed.
+
+Vita3K (p4, 222 MHz): the attract demo (bridge, forest, the plain), the console card's walk (out of the shrine, Wander
+on foot and on Agro across the plain) and ride (the shrine, the altar) with `SOTC_AB_FLAG=liftd1 SOTC_AB_PERIOD=600`
+(the swaps logged every 600 frames: 613 entries each time): pictures as before, no fault. The first Vita builds (p1,
+p2) put the lifted code over 8 slots that the Vita's runtime had hooked: the game ran at 60 fps and drew nothing from
+the start; install now leaves such slots alone (found by putting the boot half back with SOTC_DECOMP_SKIP).
+spalign.py on celosia-d1.elf: 0 sp-relative NEON accesses.
+
+### Decomp numbers
+
+tools/decomp_status.py (Mac replaced dump, attract demo to frame 1500; calls from round 71's attract + route
+SOTC_CALL_COUNT dumps, the ones still on disk: with them round 142's natives were 71.5% of calls, not the 68.4% the
+r122 refresh's dumps gave): **1 492 of 9 024 functions native (16.53%; was 861, 9.5%), 16.94% of the MIPS code by size
+(was 14.77%), 79.7% of calls (71.5% like for like), 14.79% of the game's own code.** Math 128 / 128 functions (100%);
+Boot ELF, SDK and libc 879 / 2 130 (26.9%). decomp_tree / decomp_history (label D1) from the attract demo's ON profile:
+70.0% of the game thread in native code, 19.3% recompiled, 10.7% runtime (r122's 68.9 / 20.5 / 10.6 were the shrine
+route: not the same window).
+
+### How far this goes, and in how many rounds
+
+- **Coverage** is not the limit: 98.4% of what is left lifts today, and the refusals are a handful of patterns (a
+  break in a delay slot, the eager checkpoint, branches between functions), each a few lines in the tool.
+- **Exactness** is a property of the method (the generator's own statements), but each batch still has to be run: the
+  difftest only sees what a run reaches (here 281 of the 621 in the attract demo and the console card's walk and ride).
+  Functions no test run reaches are lifted but unproven; replaying the user's recordings (tools/replay_compare) is the
+  way to widen that.
+- **Risks** that grow with the batches: hooks and runtime overrides (handled: a slot that is not the generated function
+  keeps its owner), coroutine resume entries (handled: resumes stay in the recompiled function), the A/B's swaps
+  (handled in the table), compile time and code size (+9% instructions over what it replaces, all of it in the cold
+  sync paths).
+- **Speed**: a few percent faster overall (95% of the hot path statically, -15% for this set in the sampler), more in
+  loops and VU0 code, less where VU0 code calls out; no large win by itself, but no loss, so lifting a subsystem first
+  and rewriting its hot part by hand afterwards (as rounds 43-141 did) costs nothing.
+- **Estimate**: the rest of the boot ELF / SDK (~1 250 functions with syscalls and threads) and the game's ~6 400 still
+  recompiled functions in batches of 1 000-1 500 an area (Characters, Display, Collision, Script and events, Camera,
+  Sound, Other), each with the Mac difftest over the attract demo, the console card's walk and ride and a route, and a
+  Vita3K sampler A/B: **6-8 rounds to ~98% of the functions native** (16.5% now). That figure is mechanical C++
+  (register-named locals, the generator's macros for the FPU / VU0 operations, gotos where the CFG does not structure):
+  a real decomp of a subsystem (types, struct fields, names from the Ghidra project) remains hand work on top, but on
+  code that is already native, exact and in the build.
+
+## Decomp D2: the hot list lifted and checked; only its leaf functions ship (SOTC_LIFTD2); the lifter's fixes (2026-11-11)
+
+Scripts, runs and builds: `build/agent-scratch/d2/` (STATE.md lists them): rank.py (the still-recompiled functions
+ranked by the game thread's samples), gen.sh (D2's files from a list less exclude.txt), dt3.sh / dtqueue.sh /
+dtfinal.py (Mac difftest runs and totals), drawbisect.py / dtfind.py / vbisect.py (bisections: the Mac not drawing,
+difftest hangs, the Vita walk's load), abrun.sh + abwin.py + onoff.py + onsplit.py (Vita3K in-run A/B with the sampler:
+per-function shares in the windows that lie wholly in one state), slowpick.py, blocks.py (the functions a check cannot
+run twice). Own Vita3K trees ../vita3k-celosia-d2 / -d2b (222 MHz, 3 cores, muted). From the middle of the round all
+heavy runs `nice -n 20`, at most two at a time (the six-runner difftest froze the user's Mac).
+
+### The hot list
+
+A Vita3K sampler profile of the D1 build (attract demo 250-990 s, the console card's walk 350-1290 s and ride 300-800 s;
+game thread): the still-recompiled functions are 16.7% of the game thread (natives and the runtime 79.8%, D1's lifted
+0.9%), spread thin: 1 878 functions with samples, the top 200 hold 64% of that 16.7%, the top 1 300 99.9%. Areas: other
+game code 7.3%, characters and motion 2.6, display and models 2.4, boot ELF / SDK 2.1, collision 0.75, camera 0.53,
+script 0.35, particles 0.33, system 0.29, sound 0.09 (rank.txt).
+
+The top 1 300 were lifted (1 294; 6 refused), put behind SOTC_LIFTD2 and taken through the Mac difftest, the Vita3K
+A/B and Vita3K runs of the console card. What each check took out (the last row before the root cause was known):
+
+| out | functions | why |
+|---|---:|---|
+| can block or switch threads | 370 | reach WaitSema / SignalSema / thread / alarm / SIF / CD calls through direct calls (blocks.py): a difftest check runs both legs, a semaphore taken in one leg hangs the other; they cannot be proven |
+| interrupt / hardware context | 63 | the sound driver's tick procs (Sg2*), interrupt-side SDK calls (i*, isce*), GS / VU1 / DMA / pad / CD helpers: checking them twice changes hardware state the check does not restore (checked, isceGsPutIMR, Sg2CtrlTickProc, resetMicroCodeManager ... stop the Mac game drawing; dtfind.py) |
+| register mismatches | 6 | windowSetMouseStatus, gamecore_sub_01346000 (timer reads: a control run, the recompiled code in both legs, mismatches the same), get_apply_camera_region, charrootdyn_getLandingSurface, charrootdyn_clipNoStopCollisionFinder, manager_sub_01168650 (a callee's result differs between legs, or a lifter fault not found) |
+| slower lifted | 97 | the first attract A/B: z > 3, >= 30 samples, lifted share >= 1.15x the recompiled (their excess 0.77% of the game thread; player_HellDangerDetect 2x: mode64, 30 VU0 registers, 13 calls) |
+| wild returns on the Vita | 37 | mouseGetStatus and the 36 that reach an indirect call (`jalr`: callbacks that can sleep; kernel_sub_001C37F0, iStart, sound / script tick and send-key functions): the walk A/B logged jumps to pc 0x51 / 0xe1c in "all on" windows through the kernel's message / sub-thread code |
+| **call out at all** | **534** | **with the 779 left, the walk still went wrong: stuck on the loading screen, or later game-thread frames of 0.6-1.4 s (C++ exception unwinding, "No exact recompiled function" in a loop). Root cause found only at the very end (below); the 534 are left for D3 to re-check with the fix** |
+
+**245 functions ship: the leaf functions of the 779 that passed every check** (decomp_liftd2_00..02.cpp, SOTC_LIFTD2,
+default on): other game code 108, display and models 48, camera 25, characters and motion 24, script 13, collision
+11, system 8, particles 4, sound 3, boot ELF / SDK 1. In the profile they are 1.7% of the game thread. The other 534
+pass the difftest and are probably fine with the last fix, but there was no time left to prove it on the Vita.
+
+### Lifter changes (tools/lift_d1.py)
+
+Found by D2's checks. D1's files stay as committed (see "D1").
+
+- **A likely branch's delay slot on the fall-through edge** (a real bug, also in D1's analysis): the dirty and
+  "undefined" data-flows applied a likely branch's delay slot to both edges. A `bnel` whose slot is the epilogue's
+  `ld $s0` made s0 "clean" on the not-taken path too, so an s0 written before the branch was never written back: the
+  loader's job loop (manager_sub_0115E3E0) then wrote through a stale s0 after WaitSema, and neither the Mac nor the
+  Vita ever drew a picture (found by bisecting the Mac with SOTC_DECOMP_SKIP). The fall-through edge now carries the
+  state before the slot.
+- **Write-back flags** (a real bug, also latent in D1): the dirty set is a may-set, so a narrow register written on one
+  path into a write-back was written back on the others too, as the sign-extended low word: a caller's or a callee's
+  64-bit value was cut (iosGetClockSecond lost mktime's upper word; upper halves differed in the difftest). A second
+  pass with an intersection finds the registers dirty on some paths only; they get a `df_<reg>` flag (set where the
+  local is written, cleared where the context is written or read back) that their write-backs test; GCC folds it on
+  straight paths. (A first version put the clears after a restore's `// restore` comment: the difftest found it.)
+- **64-bit entry values** (a real bug, also in D1): a register still holding the caller's (or a callee's) value is
+  a wide local where it meets a 64-bit operation; see "The root cause" below.
+- **`break` in a likely branch's delay slot** (the divide-by-zero check, `beql $x, $zero; break 7`): lifted as the
+  generated code runs it. Refusals over the 7 532 functions still recompiled: 128 -> 31.
+- **Resume through the entry slot**: an entry with `ctx->pc` on one of its labels (which the generated function's
+  switch handles) runs the generated function. Without it the walk never finished loading (a sub-thread resumed
+  through its entry restarted from the top).
+- `--d2` (SOTC_DECOMP_LIFT_FUNCTION_D2), `--extern @d1set.txt` (calls into D1's lifted functions are direct), `_lift`
+  C++ names for guest functions named like libm ones (powf, asinf ...); the lifted batches are translation units of
+  their own (CMakeLists.txt: D1's `fabsf` hid libm's in a Mac unity batch). Test knob SOTC_LIFTD2_RANGE=<lo>:<hi>
+  (install only D2's functions in that guest address range; the Vita's env lines are 4 KB, too short for a skip list).
+- Not done: the VU0 call-out cost. Write-backs before a call and read-backs after are what the recompiled code pays
+  anyway; keeping vector registers across a call needs the callee's VU0 use and a guarantee it never switches threads
+  (a throw would lose them): a whole-program summary. The slowest lifted functions were of this kind.
+
+### Exactness
+
+Mac, `SOTC_DIFFTEST=<the 245>` with every register, VU0 and RAM, the final build (p12, all three analysis fixes):
+
+| run (Mac, 1200 s, nice'd) | functions checked | checks (of calls) | register mismatches | RAM-byte mismatches |
+|---|---:|---:|---:|---:|
+| attract demo | 179 | 78 013 (44.9 M) | 0 | 144 |
+| console card, walk (in_walk2) | 232 | 135 303 (89.6 M) | 0 | 82 |
+| console card, ride (in_ride) | 232 | 142 203 (96.5 M) | 0 | 96 |
+
+**232 of the 245 reached and checked, 355 519 checks, 0 register mismatches** (13 not reached). RAM-byte mismatches
+322: 177 in functions with no store instruction, 143 at addresses that also mismatch in other functions (other threads
+writing between the two legs), 2 single bytes not explained. Earlier in the round (before the 64-bit fix) the same
+functions had 233 reached, 326 426 checks, 0 register mismatches: the difftest never saw the 64-bit masks that broke
+the walk, which is why the Vita3K walk with D2 on from boot is now part of the check. For the 779 that passed every
+check before the last cuts: 728 reached, 670 793 checks, 0 register mismatches (their extra RAM noise is the timer
+words 0x1465750 / 0x1465678; a control run, `SOTC_DIFFTEST_CONTROL=1`, mismatches the same bytes).
+
+### Speed
+
+Vita3K 222 MHz, in-run A/B (`SOTC_AB_FLAG=liftd2 SOTC_AB_ROTATE=1`, windows of 900 frames, the table swapped), the
+sampler snapshotted every 10 s and only the windows wholly in one state counted (abwin.py, onoff.py), attract demo:
+
+| run | windows on / off | the 245, lifted | recompiled | change | the 779 | change |
+|---|---:|---:|---:|---:|---:|---:|
+| p4 | 46 / 41 | 1.12% | 1.55% | -28% | 7.25 / 8.10% | -10.5% |
+| p8 | 37 / 37 | 1.37% | 1.55% | -12% | 8.34 / 8.14% | +2.5% |
+
+The leaves are faster in both runs (-0.2 to -0.4 points of the game thread), as D1's were; the call-heavy rest is
+neutral on average with large run-to-run spread (the windows do not see the same scenes). Whole frame, draw-matched
+(abframes.py --summary --bin 100, stalls apart), p8 attract, off minus on: +0.48 +- 1.15 ms frame, +0.58 +- 1.28 game
+(217 matched summaries; host loaded, paired figures only). The leaf figures come from builds before the 64-bit fix
+(p4, p8); the fix makes some entry registers 64-bit locals, so expect the same or a little less.
+
+### The root cause: a caller's 64-bit values in narrow locals
+
+The walk faults were deterministic, not random: with D2 on from boot the console card's walk never left the loading
+screen (draws 3 at 60 fps, 4 tries of 4; D2 off: 2 of 2 loaded). The A/B runs only seemed to work because the save's
+load fell into a "liftd2 off" window. Bisecting the 245 leaves on Vita3K two at a time (vbisect2.py, SOTC_LIFTD2_RANGE,
+170 s a try) ended on a pair that sticks only together: ColCont2_IsColStatus and ColCont2_IsEventColStatus, which test
+64-bit status masks (`ld` the mask, `and` with a1, `bnel` against a2). a1 / a2 come in as 64-bit values; the lifter
+kept them as `uint32_t` locals (the ABI assumption D1 made: a 32-bit value is sign-extended, so the low word is the
+value) and compared the sign-extended low words. The difftest's checked calls did not happen to pass masks with upper
+bits.
+
+**Fix (D2's files)**: a register still holding its entry value (or a callee's, after a call) that meets a 64-bit
+operation (a branch compare, slt*, the bitwise ops, moves, movz / movn) is a wide local. With it the walk loads (2 of
+2) and plays (below). The same assumption is in D1's committed files (D3: regenerate D1 with this and the other two
+analysis fixes, then re-check; the exception storm seen with an earlier D1 regeneration is likely this class too), and
+it is the prime suspect for the wild returns seen with the call-heavy functions (a truncated pointer or mask in the
+kernel's message / sub-thread path).
+
+### Pictures and the console card
+
+Vita3K 222 MHz, p12 (the final build), muted, window shots every 60-90 s (looked at):
+
+- **walk** (console card, in_walk2, D2 on from boot, no A/B): loads (the field drawn by frame ~1 500), 29 118 frames,
+  no "No exact recompiled function", no game frame over 300 ms. [pos]: Wander's y -0.05 .. -3.1 and Agro's -0.3 ..
+  -1.8 on the plain (the baseline walk's range), dt 27-37 ms; shots: Wander running on the plain with his shadow, Agro
+  standing by him, both on the ground.
+- **ride** (in_ride): the shrine and the altar, the light shaft, Wander on the floor ([pos] y 11.31 steady at the altar,
+  Agro 2-11 around it); no fault.
+- **attract demo**: bridge, forest, the plain, Agro galloping with the dust trail; no fault.
+- **walk under the A/B** (`SOTC_AB_FLAG=liftd2`, windows of 600 frames, the load inside an "on" window): 21 078
+  frames, 35 swaps, no fault, no frame over 300 ms; draw-matched off minus on -0.43 +- 2.28 ms frame, -0.92 +- 2.57
+  game (27 matched summaries: within the noise). The console env (env-console.txt) rotates liftd2 and liftd1 as asked.
+
+The Mac and Vita builds compile; spalign.py on celosia-d2.elf: 730 NEON :128 accesses, 0 sp-based.
+
+### D1
+
+D1's 621 functions were regenerated with the fixes (179 changed: flags, the likely-edge fix, the resume check) and
+difftested (37 of the 102 body changes reached, 0 register mismatches). But with that D1 and D2 switched off (from the
+start or by the A/B) the game thread fell into C++ exception unwinding (720 ms a frame) or stalled within minutes, in
+attract and walk; with D1 as committed it never did. D1 stays as committed (the brief's "leave D1 files untouched"); the
+tool no longer reproduces D1's text byte for byte (its two analysis fixes change 102 of D1's functions).
+
+### Decomp numbers
+
+tools/decomp_status.py (Mac replaced dump of the final build, attract demo to frame 1500; calls from round 71's attract
+and route dumps): **1 737 of 9 024 functions native (19.25%; D1 16.53%), 18.39% of the MIPS code by size (16.94%),
+83.8% of calls (79.7%), 16.4% of the game's own code.** By area: Math 100%, particles 41%, boot ELF / SDK 27%, display
+25%, collision 20%, characters 17%, other game code 15%, system 14%, sound 5%, camera 3%, script 3%.
+decomp_tree / decomp_history (label D2) from the final build's attract demo (p12, sampler 300-690 s): 71.1% of the
+game thread in native code, 18.1% recompiled, 10.9% runtime (D1: 70.0 / 19.3 / 10.7; a different window).
+
+### What D3 should take
+
+- **The call-heavy 534 again, with the 64-bit fix**: generate them with today's lifter, difftest (0 register
+  mismatches already), then the console card's walk and ride on Vita3K with D2 on from boot and under the A/B
+  (draws > 3 within two minutes, no "No exact recompiled function"). They are ~6.6% of the game thread (other game
+  code, characters, display).
+- **D1 regenerated** with the three analysis fixes (likely edges, write-back flags, 64-bit entry values), checked the
+  same way.
+- An eager sp write-back (one store per prologue / epilogue) as a guard against a switch or interrupt that saves
+  registers below the context's sp before a function's first call.
+- **Speed for call-heavy code**: a per-callee summary (VU0 / FPU registers, thread switches) so vector registers stay
+  in registers across calls; until then lift only what the A/B shows neutral or faster.
+- **Coverage**: a difftest mode for blocking functions (the scheduler's state saved per leg, or one leg against a
+  recorded trace); the 370 + 63 left out by it.
+
+## Decomp D3: D1 regenerated with the D2 fixes; D2's call-heavy functions lifted and checked (SOTC_LIFTD3) (2026-11-12)
+
+Scripts, runs and builds: `build/agent-scratch/d3/` (STATE.md lists them): d1diff3.py (D1 as committed against today's
+lifter), gen3.sh / final3.py (D3's files from d3cand.txt less the exclusion lists), dtmake3.py / dtfinal3.py / dtnoise.py
+(Mac difftest lists and totals), vrun.py (one Vita3K run with a watchdog: aborted if no frame summary with draws > 3
+comes within 120 s of boot; a summary line with frames, draws, game-thread frames over 300 ms, "No exact", [pos]),
+vq.sh / final2.sh / final3.sh (Vita3K runs one at a time), abwin3.py + onoff.py (per-function A/B shares from the
+sampler), gslow.py / slowsplit.py (slow frames by cause). Own Vita3K trees ../vita3k-celosia-d3 / -d3b (222 MHz,
+3 cores, muted). At most two heavy processes at a time, all `nice -n 20`, builds -j4.
+
+### D1 regenerated
+
+D1's 621 functions regenerated with today's lifter (`--resume-delegate --chunk 160 @d1set.txt`: the likely-edge fix, the
+write-back flags, 64-bit entry values, the resume check): 621 lift, 0 refused, **235 changed**: 44 only by the resume
+line, 80 gain write-back flags, 110 have entry / post-call registers that are now 64-bit locals (the class of bug that
+broke ColCont2_IsColStatus in D2), 1 other (GAMEUTIL_get_interp_value3D). The 64-bit rule is conservative (a register
+that may still hold a caller's value where it meets a 64-bit operation becomes a 64-bit local), so some changes only
+widen a local.
+
+- Mac difftest (all registers, VU0, RAM; with D3's list, attract / walk / ride): 116 of the 235 reached, 0 register
+  mismatches (the other 119 are boot, sound and SDK paths none of the three scenes call).
+- Vita3K 222 MHz: the walk with **D1 on and D2 / D3 off from boot** (12 558 frames), the attract demo the same way
+  (19 818 frames), the attract demo with all three off, and the walk under the console env's rotation (liftd3, liftd2,
+  liftd1 off in turn every 600 frames: 66 swaps in p1, 42 in p2, 49 in p3). There was no C++ exception unwinding and no
+  "No exact recompiled function". The only game-thread frames over 300 ms were the same boot frames as with everything
+  off. **The exception storm D2 saw with its earlier D1 regeneration is gone.** That regeneration lacked the 64-bit
+  entry-value rule; today's has it.
+
+D1's files are now the regenerated ones (decomp_liftd1_00..03.cpp, SOTC_LIFTD1, unchanged switch).
+
+### D3: the call-heavy 534
+
+The 534 are D2's 779 that passed every check, less its 245 leaves (d3cand.txt). Lifted with `--d3 --extern @d1set.txt
+--extern @cand_leaf.txt` (calls into D1 and D2 lifted functions are direct): 534 lift, 0 refused. They ship behind
+**SOTC_LIFTD3** (default on, A/B `liftd3`, test knob `SOTC_LIFTD3_RANGE=<lo>:<hi>`), in game/overrides/decomp_liftd3_00..04.cpp.
+
+| out | functions | why |
+|---|---:|---|
+| not reached by any Mac difftest run | 37 | lifted but unproven (the SCRCondition* script tests, quaternion / Euler helpers of the climbing and grip code, player_life_anim ...): listed for D4 with a route that reaches them |
+| slower in the first attract A/B (p1) | 75 | z > 3 with >= 30 samples (excess 0.36% of the game thread; 53 others were faster, z < -3, 0.23%) |
+| slower in both A/Bs | 8 | z > 3 in the second A/B (p2) and z > 2 in the first: analyzeMotionPropertyFromKey2, ps2___ieee754_powf, UpdateCharacterClassGeometry, manager_sub_010AD418, SpriteMenuIsFadeCheckAllLayer, GetDamageClass, charrootdyn_addSlideElement, gamecore_sub_01417ED8 (the other 22 that p2 flagged were neutral or faster in p1) |
+
+**414 ship** (p3): other game code 179, characters and motion 71, boot ELF / SDK 58, display and models 40, camera
+31, collision 19, particles 6, sound 5, system 3, script 2. On the Vita 411 go into the table (3 slots hold a hook or a
+runtime override and keep it).
+
+### Exactness
+
+Mac, `SOTC_DIFFTEST` with every register, VU0 and RAM, 1 200 s a run (nice'd):
+
+| build / list | runs | functions checked | checks | register mismatches |
+|---|---|---:|---:|---:|
+| p1: the 534 + D1's 235 changed (two lists) | attract, walk, ride x 2 | 613 of 769 (497 of 534 D3) | 421 926 | 0 |
+| p2: the 422 | attract, walk, ride | 421 of 422 | 284 268 | 0 |
+| p3 (shipped): the 414 | attract, walk, ride | 412 of 414 | 276 569 | 1 (below) |
+
+The two the p3 runs did not reach (CheckCubeVolume, clipByMinMaxCube) were checked in the p1 runs, where their code
+was the same apart from the names of direct-call targets. Every shipped function was checked in at least one run.
+
+- **The one register mismatch** (p3 ride, isysResolveOneModuleObj, a0, 1 of 104 820 checks; 0 in the other 700-odd
+  checks of it): the function never writes a0 after its last call. That call is iosGetCpuRapCountPar1Int (D1's lifted
+  code in both legs), which leaves `T0_COUNT (0x10000800) >> 1 | bit 0` in a0. The value is a hardware timer read that
+  advanced between the two legs, not a difference in the lifted code.
+- **RAM-byte mismatches** (p3: 975): 762 are the timer word 0x1465678 that gamecore_sub_01345FB0 stores, 206 are at
+  addresses that also mismatch in other functions (other threads writing between the legs), 7 are single bytes. A
+  control run (`SOTC_DIFFTEST_CONTROL=1`, recompiled code in both legs, walk, the same list) mismatches the same timer
+  word 256 times and about 90 single bytes in 25 functions: the same noise with no lifted code in either leg.
+
+### Pictures and the console card
+
+Vita3K 222 MHz, muted, window shots every 60 s (looked at). p1 (the 534), p2 (422) and p3 (414) each ran the console
+card's walk (in_walk2), the ride (in_ride) and the attract demo with D1 + D2 + D3 on from boot. Each also ran the walk
+under the liftd3 A/B (p1, p2) and under the console env's three-switch rotation. Every run reached draws > 3 within
+two minutes of boot (the watchdog never fired). No wild return, no fault, no "No exact recompiled function". Wander
+ran on the plain with his shadow and Agro stood or galloped beside him, both on the ground ([pos] y -6.6 .. 12.5 on
+the walk, the baseline range). The ride reached the shrine's floor and the altar (y 11.31). The attract demo showed
+the bridge, the forest, the plain and the gallop with its dust trail. **No sp write-back guard was needed**: no run
+showed the wild returns D2 saw. Those came with the 37 `jalr` functions, which stay excluded. The EE's interrupt
+handlers run as invocations on a stack of their own (EeScheduler::invocationStackTop), not below the interrupted
+context's sp.
+
+Slow frames: the walk of p1 logged 240 frames over 300 ms against 105 for the D1-only walk. Split by cause
+(slowsplit.py): 233 of the 240 are render-thread waits with the game thread under 300 ms. They are Vita3K's host
+stalls (about 1 s every 60 frames while the Mac's screen is locked). Their rate follows the host, not the build:
+20 / min in walk_all, 15 in walk_d1, 0 in ride_all, 7.9 in the all-off attract run, 32 in p2's walk. Seven frames
+had the game thread over 300 ms. Six were boot and the first field load (the same frames in every configuration,
+all-off included). The seventh was one 1 s frame in a burst of host stalls (the next render wait 912 ms five frames
+later). p3's profiled attract run had two "frames" of 69 s and 406 s: the whole host paused. The run's separate 10 s
+load sampler also wrote nothing from 11:56 to 12:03. The game resumed and ran on normally.
+
+### Speed
+
+Vita3K 222 MHz, in-run A/B of the attract demo (`SOTC_AB_FLAG=liftd3 SOTC_AB_ROTATE=1`, windows of 900 frames, the
+sampler every 10 s, only windows wholly in one state counted):
+
+| build | windows on / off | the set, lifted | recompiled | change | frame, off minus on (draw-matched) |
+|---|---:|---:|---:|---:|---|
+| p1 (534) | 85 / 78 | 6.61% | 6.46% | +2.4% | +0.42 +- 1.22 ms (127 matched summaries) |
+| p2 (422) | 67 / 77 | 4.57% | 4.70% | **-2.7%** | **+0.55 +- 0.54 ms**, game +0.51 +- 0.62 (373 matched) |
+
+Call-heavy lifted code is as fast as the recompiled code on average, not faster. The per-call write-back and read-back
+of every register a callee may use costs what the locals save. With the slower ones dropped, the set is a little
+faster and the frame within about two standard errors of no change. p3 drops 8 more from p2's set; it was not A/B'd
+again. The walk A/Bs (p1 +0.25 +- 1.22 ms, p2 +5.3 +- 6.5 ms) had too few matched summaries under the host's stalls to
+say anything. spalign.py on p3.elf: 752 NEON :128 accesses, 0 sp-based. Mac and Vita builds compile.
+
+### Lifter changes (tools/lift_d1.py)
+
+`--d3` (SOTC_DECOMP_LIFT_FUNCTION_D3, the D3 header, otherwise as --d2). The runtime adds kLiftD3 / SOTC_LIFTD3 /
+`liftd3` and SOTC_LIFTD3_RANGE (sotc_decomp.h / .cpp, sotc_native.cpp's switch names). No new analysis bug was found:
+the checks of the 534 and of D1's 235 changes found nothing the D2 fixes had not already fixed.
+
+### Decomp numbers
+
+tools/decomp_status.py (Mac replaced dump of p3, attract demo to frame 1 500; calls from round 71's attract and route
+dumps): **2 151 of 9 024 functions native (23.84%; D2 19.25%), 23.25% of the MIPS code by size (18.39%), 88.2% of
+calls (83.8%), 21.7% of the game's own code.** By area: Math 100%, particles 49%, display 33%, boot ELF / SDK 30%,
+collision 24%, characters 23%, other game code 20%, system 19%, camera 15%, sound 12%, script 3%. decomp_tree /
+decomp_history (label D3) from p3's attract demo (sampler 300-690 s): **75.1% of the game thread in native code**,
+13.5% recompiled, 11.4% runtime (D2: 71.1 / 18.1 / 10.9).
+
+### What D4 should take
+
+- **The 37 unreached**: a route that reaches them (the script conditions and the grip / climb helpers need a colossus
+  fight: a recording of the first colossus through tools/replay_compare), then the same checks.
+- **The 83 slower**: what makes them slower is the call-out cost (every register the callee may touch written back
+  and read back, vf registers included). A per-callee summary (which GPR / FPR / VU0 registers a callee reads or
+  writes, whether it can switch threads) would let the lifter keep live values in host registers across calls to
+  callees that leave them alone.
+- **The 370 that block or switch threads and the 63 in interrupt context**: a difftest mode for them (the scheduler's
+  state saved per leg, or one leg against a recorded trace).
+- **The 36 `jalr` functions** linked to D2's wild returns: now that the 64-bit entry rule is in, re-test them on
+  Vita3K behind SOTC_LIFTD3_RANGE-style bisecting.
+- The rest of the still-recompiled code (6 873 functions) in area batches with the same pipeline.
+
+## Decomp D4: callee summaries (exact, not faster on the A9: used only where measured faster); D4's batch (SOTC_LIFTD4) (2026-11-12)
+
+Scripts, lists, runs and builds: `build/agent-scratch/d4/` (STATE.md lists them): sumstat.py / whyunk.py / natsrc.py
+(the summaries' coverage and why a callee has none), fndiff.py (the functions two generations of a file differ in),
+armcmp4.py (Thumb-2 counts, two lifter versions), cand4.py / blk4.py (D4's candidates, the blocking rule for any list),
+abrun4.sh / abwin4.py / onoff4.py (A/B with the sampler for any switch; onoff4 counts the Vita's lean copies as the
+recompiled code too), dtfinal4.py (difftest totals for any name list), final4.sh, in_mash.txt / in_mash2.txt (the
+exploration scripts). Own Vita3K trees ../vita3k-celosia-d3 / -d3b (222 MHz, 3 cores, muted); at most two heavy
+processes, all `nice -n 20`, builds -j4.
+
+### Callee summaries (tools/lift_d1.py --summary)
+
+Call-heavy lifted code was break-even (D3: every call wrote back and read back every register a callee might touch).
+D4 gives the lifter a whole-program summary of every function in the table (`build_summaries`, `function_facts`,
+`function_gpr_writes`):
+
+- **Reads**: every slot (GPR, FPR, VU0 vf, ACC, Q, status, fcr31, the FPU accumulator, lo / hi) the function or
+  anything it calls or tail-jumps to reads; sp and ra always.
+- **Writes**: the FPU / VU0 / other slots any of them writes, and the GPRs left changed in the context at a return or
+  tail jump: a forward may-analysis of "changed since entry" where a write adds the register, a restore of a
+  prologue save (an `sd` / `sq` before the first control instruction, the matching `ld` / `lq` of the same stack slot)
+  removes it, and a call adds the callee's writes (a likely branch's delay slot only on its taken edge).
+- **Unknown** (no summary: the call writes back and reads back everything, as before) when the function or anything
+  it reaches has a runtime call (syscall, break, COP0, VU0 integer registers ...), a `jalr` or an indirect `jr`, a
+  lifter refusal, or a table slot that may hold a native, a hook or a stub. That last set comes from the sources
+  (`native_addresses`): the addresses the natives register (the SOTC_DECOMP_* macros' first argument in a natives
+  file), every hex literal in the files that write the table any other way (sotc_native, sotc_overrides, sotc_replay,
+  sotc_worker less its kPure ranges, sotc_prof, the runtime's sources) and the recompiler's stub list. The lean copies
+  (the same generated code compiled again), the difftest checkers and the profiler's thunks have the generated
+  function's effects.
+- A relocated `jal` (GAMECORE's: the target read from the instruction word in guest RAM) counts as its static target;
+  at the call site the lifted code checks `jumpTarget` against it, and elsewhere (never in a working game) the call is
+  made with everything written back and the generated function resumes at the return label (its entry switch).
+
+Over the 9 024 functions: **2 940 have a summary**; 1 725 are unknown themselves (1 017 may hold a native, 263 `jalr`,
+178 runtime calls, 154 stubs, 83 `break`, 23 refusals), 4 359 reach one. The natives are what most call sites hit
+(gsReg, GetLayoutClass, GetCharacterClass, iosCopyMatrix, memset ...): in D3's 414, 555 of 1 820 call sites
+(30%) have a summarized callee (245 of them relocated).
+
+At a summarized call the lifter writes back only the dirty slots the callee reads or writes; the other dirty slots
+stay in host locals across the call and are written back on the call's not-returning path (a thread switch unwinds
+through `callGuestKnown` returning false: the checkpoint is noexcept, so nothing throws through a call whose callee has
+no runtime call). The undefined-register analysis (64-bit reads of the context) and the write-back flags follow.
+
+**Exact.** Mac difftest (every register, VU0, RAM) of the 205 D1 / D3 functions the first version changed (22 / 183):
+attract, walk, ride, 1 200 s each: 192 of 205 reached, 111 047 checks, **0 register mismatches**; RAM bytes all at
+addresses other functions mismatch too (0x29126c ...) but one single byte. The final version (below) in the A list:
+see "Exactness".
+
+**Not faster.** liftalt (sotc_decomp kLiftAlt, test builds only: `lift_d1.py --alt` writes the same functions'
+pre-summary code as `lift_alt::` copies; `SOTC_AB_FLAG=liftalt` swaps them in, so two lifter versions run in one run's
+alternating windows), Vita3K 222 MHz attract demo, 1 500 s, 48 / 48 windows, sampler:
+
+| version | the set, summaries | without | change | frame, off minus on (draw-matched) |
+|---|---:|---:|---:|---|
+| 1: read back what the callee writes | 2.686% | 2.553% | +5.2% | +0.02 +- 1.36 ms |
+| 2: read back everything but the dirty kept | 2.540% | 2.393% | +6.1% | +1.13 +- 1.35 ms |
+
+Version 1 kept clean values live across the call too; on the A9 a value live across a host call is spilled and filled
+(only r4-r11 and q4-q7 survive a call), a store and a load where the old code re-read the context once. Version 2
+reads back every clean slot as before and keeps only the dirty ones, which still costs about what the old write-back
+and read-back did, plus the not-returning path's code and the write-back flags. Static counts agree in direction
+(armcmp4: all instructions 109.5% of the old). The call-out cost is the A9's calling convention, not the context: a
+win needs the callees' values in host registers across the call (an inlined or register-passing callee), not a
+cheaper context.
+
+Eight functions were clearly faster with the summaries (z <= -3, >= 30 samples a side): AI_OptFloatFrameSample (-29%),
+AI_CheckViewInCameraClipVolume (-25%), gamecore_sub_013DD8D0 (-35%), manager_sub_010CD518 (-12%),
+GetMotionResourceOriginalFrames (-10%), AI_CheckDamage_Impact / _Reaction / _Sword. **D3's files keep the summaries
+for those eight only** (`--summary-only @fast.txt`); the other 406 are byte for byte as committed. D1 has none of
+the eight: unchanged. D4's batch is lifted without summaries. The tool keeps the analysis (--summary, --summary-only,
+--summary-log) for D5.
+
+### D4's batch (SOTC_LIFTD4)
+
+Candidates (cand4.py, from D2's ranking of the still-recompiled code by game-thread samples): D3's 83 slower, D2's 97
+slower (68 a check can run; blk4.py: 29 reach a syscall or a kernel stub), the 36 `jalr` functions D2 left out for the
+wild returns, D3's 37 unreached, and 387 of the rest of the ranking (175 more may block): 611, 607 lift (refused: a
+`break` slot form, two checkpoint patterns, a branch out of the function). They ship behind **SOTC_LIFTD4** (default
+on, A/B `liftd4`, test knob `SOTC_LIFTD4_RANGE=<lo>:<hi>`), game/overrides/decomp_liftd4_NN.cpp, lifted with
+`--d4 --extern @prevlifted.txt` (calls into D1-D3 lifted code direct), no summaries.
+
+| out | functions | why |
+|---|---:|---|
+| slower in the liftd4 A/B | 82 | attract, 1 500 s, z > 3 with >= 30 samples: 32 of D3's 83, 32 of D2's 68, 7 of the 36 `jalr`, 11 of the rest (player_HellDangerDetect again first: 64-bit mode, 30 VU0 registers, 13 calls) |
+| register mismatches | 2 | gamecore_sub_01346000 (returns a hardware timer count: v0 4 apart between legs) and windowSetMouseStatus (t3's upper half): D2's known pair, a control run mismatches them the same; they cannot be proven |
+| register mismatches (walk / ride) | 3 | charrootdyn_getLandingSurface (f0), charrootdyn_clipNoStopCollisionFinder (f0), manager_sub_01168650 (v0, f1): D2's other known three; real result differences, cause not found (a callee's result between legs or a lifter fault) |
+| not reached by any Mac difftest run of the shipped code | 91 | 36 of D3's 37 (the SCRCondition* script tests, the HP / grip ratios, IK helpers; the two judge-volume checks came up only in the pre-fix runs and are left for D5), 4 jalr-group script functions (SCRConditionSubFunc, SCRFuncConditionSendKey, SCRFuncHorseStandRundmSendkey, nico_player_avoid_ControlRootY), 51 of the rest |
+
+**429 ship**: 51 of D3's 83 slower (faster or even now), 36 of D2's 97 slower (retried), 25 of the 36 `jalr`
+functions (no wild return with them on, see below), 1 of D3's 37, 316 of the rest of the ranking. By area: other game
+code 163, display and models 84, characters and motion 71, collision 26, camera 26, boot ELF / SDK 24, script 16,
+system 12, particles 5, sound 2.
+
+**Difftest harness fix** (sotc_decomp.cpp): a thread switch inside a checked leg throws past the checker (its
+ThrowScope); the nesting depth stayed raised for good, so after three such throws every later call ran unchecked. In
+D4's first B-list runs that left 63 of 383 functions checked, all at boot. A scope guard now puts the depth back and logs
+`[difftest] <name>: a leg left by a thread switch, this call not checked` (the script sub-thread jump and the sheet file
+loaders do this). Earlier rounds' runs may have lost checks the same way late in a run.
+
+### Exactness
+
+Mac, `SOTC_DIFFTEST` with every register, VU0 and RAM, 1 200 s a run (nice'd), the build with D4's 525 (the final 429
+plus the cuts below them), after the harness fix. List A: the 8 summary functions and D4's 224 from the first groups
+(D3's 83, D2's 68, the 36, the 37); list B: D4's 383 from the rest of the ranking. Functions of the lists not in the build
+(the 82 slower) are not checked.
+
+| list | runs | functions checked | checks | register mismatches |
+|---|---|---:|---:|---:|
+| A | attract, walk, ride | 120 | 85 504 | 0 |
+| B | attract, walk, ride | 321 | 138 851 | 1 997, all in the 5 excluded functions |
+| exploration (in_mash2, the D4 build before the slow cut: same code for this function) | 1 | chkAttainExecOffsetData | 200 | 0 |
+
+**The 429 shipped and the 8 summary functions: every one checked, 0 register mismatches.** RAM-byte mismatches over
+the six runs: 2 662, of which 1 239 are the timer words 0x1465678 / 0x1465750 (D2 and D3's known pair, stored by the
+interrupt-side timer code), 1 086 at addresses that also mismatch in other functions (other threads writing between
+the legs), 320 in functions with no store instruction, 17 single bytes. Control run (`SOTC_DIFFTEST_CONTROL=1`,
+recompiled code in both legs, list B, walk): 295 functions, 41 779 checks, 0 register mismatches, 132 RAM bytes
+(90 shared addresses, 41 in functions that store nothing, 1 single byte): the same noise with no lifted code.
+
+Before the harness fix (the first build of D4's 607, list A + the 205 summary-changed functions): 194 of 232 reached,
+295 319 checks, 0 register mismatches; the summary version 1 runs above as well.
+
+### Pictures and the console card
+
+Vita3K 222 MHz, muted, window shots every 60 s (looked at). The final build (p5: D1 + D2 + D3 + D4's 429, all on from
+boot): the console card's walk (20 478 frames), ride (10 158), the attract demo with the sampler (24 858) and the walk
+under the console env's rotation (`SOTC_AB_FLAG=liftd4,liftd3,liftd2,liftd1`, 600 frames: 29 238 frames, 49 swaps).
+Every run drew within two minutes (the watchdog never fired); no "No exact recompiled function", no wild return. Wander
+and Agro on the ground ([pos] y -6.9 .. 12.5, the baseline range), the gallop normal with its shadow, the ride to the
+shrine's floor and the altar (y 11.31). Game-thread frames over 300 ms (slowsplit.py): one boot frame per run and one in
+the ride; everything else over 300 ms is a render-thread wait (Vita3K's host stalls).
+
+Earlier builds: p1 (D4's 607 with summaries, on from boot) walk 21 018 frames; p4 (D4's 525) the walk under the rotation
+(20 058 frames) and the ride. That rotation walk logged 22 game-thread frames over 300 ms in the first field load, with
+the hooks' host time up to 10x its usual (host contention: a Mac difftest ran beside it); the final build's rotation walk
+had none. **The 36 `jalr` functions** (the ones D2 linked to wild returns) were all on in p1 and 29 of them in p4: no
+wild return; 25 ship (7 slower, 4 unreached). spalign.py on p5.elf: 755 NEON :128 accesses, 0 sp-based. The Mac and Vita
+builds compile.
+
+### Speed
+
+Vita3K 222 MHz, in-run A/B of the attract demo (`SOTC_AB_FLAG=liftd4 SOTC_AB_ROTATE=1`, windows of 900 frames, the
+sampler every 10 s), the 607: lifted 4.90% of the game thread vs recompiled 4.08%, 82 functions slower (z > 3), 7
+faster; frame off minus on -0.57 +- 1.86 ms (78 matched summaries: within the noise). The 82 are cut. onoff4.py also
+counts the Vita's lean copies (`lean_<name>_0x...`) as the recompiled code (onoff.py did not match them). The A/B was
+not run again on the final 429.
+
+### The 37 unreached
+
+No save reaches a colossus (D3). Two exploration scripts from the console card's shrine save, run on the Mac with the
+difftest over the 37: in_mash.txt (at the shrine: moves in four directions with jumps, R1 held, whistles, attacks, L1)
+and in_mash2.txt (the walk script's ride out with grip / jump / whistle / attack presses at each spur): the first
+reached none, the second chkAttainExecOffsetData (200 checks, 0 register mismatches; it ships). The pre-fix A runs also
+reached CheckPositionInsideOfJudgeVolumeInfo and ScriptAnimationObjCheckPositionInsideOfJudgeVolumeObject, not in the
+shipped code's runs (D5). The SCRCondition* tests (Agro's AI and event scripts), the HP / grip ratios, player_life_anim
+and the IK attention helpers need a colossus fight, fall damage or a script event a blind pad script did not hit.
+
+### Decomp numbers
+
+tools/decomp_status.py (Mac replaced dump of the final build, attract demo to frame 1 500; calls from round 71's attract
+and route dumps): **2 580 of 9 024 functions native (28.59%; D3 23.84%), 27.75% of the MIPS code by size (23.25%),
+90.45% of calls (88.2%), 26.55% of the game's own code.** By area: Math 100%, particles 51%, display 36%, boot ELF / SDK
+33%, characters 30%, collision 29%, other game code 25%, system 23%, camera 22%, sound 19%, script 5%. decomp_tree /
+decomp_history (label D4) from the final build's attract demo (sampler 300-690 s): **78.0% of the game thread in native
+code**, 11.1% recompiled, 10.9% runtime (D3: 75.1 / 13.5 / 11.4).
+
+### What D5 should take
+
+- **Speed of call-heavy lifted code**: not the context (the summaries proved that): the A9's calling convention. Inline
+  small summarized callees into their lifted callers (one host function, values in registers), or give lifted-to-lifted
+  calls a register-passing entry. The summary analysis (--summary, --summary-log) is the base for both.
+- **Natives' callees**: hand natives call guest functions through `sotc_decomp::recompiled()`, straight to the generated
+  code: lifting those callees changes nothing on those calls (and the difftest never sees them). Route natives through
+  the table, or lift natives' callees with the natives.
+- **The 82 slower** and **D2's 6 / D4's 5 register-mismatch functions** (two are timer reads; the other three need a
+  control run of their own).
+- **Coverage**: a colossus-fight recording for the 36 unreached; a difftest mode for the blocking 370 + 63 and the
+  rest's 175 that may block.
+
+## Decomp D5: lifted-to-lifted calls inlined (only where measured faster); natives' fallbacks served by lifted copies; D5's batch (SOTC_LIFTD5) (2026-11-13)
+
+Scripts, lists, runs and builds: `build/agent-scratch/d5/` (STATE.md lists them): regen.sh (D1-D4 regenerated with the
+committed commands plus extra arguments; `regen.sh base` reproduces the committed files byte for byte), genalt.sh (the
+liftalt copies of a set of callers), gen5.sh (D5's files), whyinl.py (why a callee cannot be inlined), rank5.py /
+cand5.py (the ranking from a Vita3K profile of this round's build and its candidates), natrec.py / natfb.py (what the
+natives reach through `recompiled()`, and the game-thread time in natively replaced functions' generated code), dtseq.sh
+(Mac difftest runs in a row), final5.py (the shipped lists from the difftest logs), final5.sh (the final Vita3K runs in
+two lanes). Own Vita3K trees ../vita3k-celosia-d5 / -d5b (222 MHz, 3 cores, muted); at most two heavy processes, all
+`nice -n 20`, builds -j4.
+
+### Lifted-to-lifted calls inlined (tools/lift_d1.py --inline)
+
+D4 showed that call-heavy lifted code is break-even because of the A9's calling convention: a value live across a host
+call is spilled and filled. D5 removes the call itself for small callees. `--inline` splices a callee's instructions
+into its lifted caller as one control-flow graph:
+
+- **Callees inlined**: leaves (no call, jump out, runtime call, `break` or loop) that return only through `jr $ra`,
+  never touch sp or ra, do no 64-bit integer work, are at most 40 instructions long, and whose table slot cannot hold a
+  native (D4's `native_addresses`). Over D1-D4's callers: 616 call sites in 232 functions (getDrawScreenWidth / Height
+  83 of them; the rest are getters, small math helpers, table lookups). Most call sites are not eligible: 1 325 reach
+  natives (gsReg, GetLayoutClass, GetCharacterClass ...), 375 callees call out, 330 are larger (whyinl.py).
+- **The call site** (`ijal`): a guard that the table's slot holds exactly that callee (its lifted copy, or the
+  generated function when the callee is not lifted) and that the host stack has room, then the call's dispatch charge
+  (`kEeDispatchCycles`). When the checkpoint is due the charge is taken back (`run -= 8`: the clock exactly as before)
+  and the call is made as before, as is every case the guard rejects (a hook, a difftest checker, a profiler wrapper, an
+  A/B window that switched the callee off). Otherwise the code jumps into the callee's copy, whose instructions get
+  addresses of their own (0x40000000 + site * 0x10000 + offset) so the analyses see one function.
+- **The return** (`iret`): every `jr $ra` of the copy goes to one block per site that does the call's own check
+  (`m_eeClock.unwinding`: write everything back, pc on the return address, return), then on at the return address.
+- **The analyses run over the combined graph**: the widths, the context's full values, the dirty slots and the
+  write-back flags. The callee's statements use the caller's locals, and nothing is written back or read back around
+  them. The edge where the guard fails carries the full write-back before the call and the read-back after it.
+- `--inline-only @file` (inline only in these callers), `--inline-callees @file`, `--inline-lifted @file` (callees
+  lifted in a later batch: the guard names their lifted copy, direct calls unchanged), `--inline-log`.
+
+**Exact.** Mac difftest (every register, VU0, RAM) of the 232 callers with the first version (inl1), attract / walk /
+ride: 221 reached, 120 067 checks, **0 register mismatches**; RAM bytes at 0x29126c / 0x1568070 (other threads' bytes, as
+in every round). The shipped version: 0 register mismatches in its own runs (Exactness, below).
+
+**Speed.** liftalt A/B (the callers' inlined versions against their committed bodies, `--alt` copies swapped in within
+one run), Vita3K 222 MHz attract demo, 1 500 s, windows of 900 frames, the sampler every 10 s. The callers now hold the
+inlined callees' time, so the comparison is the callers plus their callees:
+
+| version | windows on / off | callers + callees, inlined | not inlined | change | frame, off minus on (draw-matched) |
+|---|---:|---:|---:|---:|---|
+| inl1: a write-back block per site and per return | 46 / 54 | 3.616% | 3.572% | +1.2% | +1.09 +- 3.71 ms |
+| inl3: charge taken back, one return block per site | 49 / 51 | 3.404% | 3.451% | -1.4% | +0.68 +- 1.16 ms |
+
+The first version doubled some callers' code (manager_sub_010EBDB0: 0x675c -> 0xd0b4 bytes): every site had a full
+write-back for the checkpoint's slow path and every `jr $ra` one for the unwinding check. The second version's set is
+1.4% faster, about 0.05% of the game thread: inlining is close to break-even overall, like D4's summaries. Per caller it
+is mixed: 23 callers faster with z <= -2 (with their callees' time inside), 41 slower with z >= 2 (most of them absorbed
+callee time: the callees' own share fell from 0.314% to 0.126%), the rest within the noise. **It ships only in the 15
+callers that were faster in both A/Bs** (z <= -2 in inl3's run, z <= 0 in inl1's): bossStatGetDeadBossNum,
+CheckClothChainDetect, is_reset_or_lws_movie_or_cutout_game_camera, depthOfField, iosInitKPrintfContext,
+manager_sub_0111F430, getConnectPointData, manager_sub_0111DDC0, gamecore_sub_01426B28, is_safety_camera_default_angle,
+GAMEUTIL_is_inside_of_region_yaw, charrootdyn_addWindDynamicsToRoot, screenBrightness, gamecore_sub_013DE688,
+CAM_is_need_obstacle_avoid_ofst (0.128% -> 0.094% of the game thread in inl3's run, 0.179% -> 0.133% in inl1's). D3's
+and D4's files change only in those 15 functions (and the header); D1 and D2 stay as committed. D5's own batch is lifted
+with `--inline` (it was measured that way).
+
+A register-passing entry for lifted-to-lifted calls was not built: the inlining result says the call's own overhead is
+not where the time goes on the A9 (the spill / fill cost reappears inside the merged function as register pressure).
+
+### Natives' fallbacks served by lifted copies (SOTC_DECOMP_LIFT_FALLBACK)
+
+The natives reach 167 guest addresses through `sotc_decomp::recompiled()` (natrec.py). All of them are natively replaced
+functions (the natives' own fallbacks to the original code), so none had a lifted copy. In the Vita3K profile of this
+round's build the generated code of natively replaced functions takes **2.8-3.3% of the game thread** (natfb.py;
+MVHIST_Update, manager_sub_0113C1A8, manager_sub_01146FB8, the geometry pointer getters ...). Part of it is the natives'
+fallbacks, part functions whose native is switched off by default (the generated function runs from the table).
+
+- `lift_d1.py --fallback` writes such functions with SOTC_DECOMP_LIFT_FALLBACK (registry name `<name>_fb`, switch
+  kLiftD5). sotc_decomp's install puts a lifted copy in the table when its slot still holds the generated function (the
+  native is off), and otherwise records it: `recompiled()`'s table then gives the lifted copy to the natives while
+  SOTC_LIFTD5 is on (patched in place when the switch changes: helper threads may read it). Any earlier batch's lifted
+  function whose slot a native or hook holds is served the same way (D1's update_transform_matrix_set and
+  doit_double_spring_interp_cntrl, for example).
+- **Difftest**: `SOTC_DIFFTEST=<name>_fb` puts a checker in `recompiled()`'s table, so the natives' real fallback calls
+  are checked against the generated function.
+- Candidates: the 110 natively replaced functions with game-thread samples, less 44 that may block (blk4.py) and the
+  already lifted: 62 lifted. Cut: 15 slower in the liftd5 A/B (z > 2), 6 with register mismatches (below), the stubs
+  memcpy / memset, isysWakeupSubThread (a coroutine). **44 ship** (decomp_liftd5_50.cpp); on the Mac 39 go into the table
+  (their natives are off) and 5 serve `recompiled()`. Speed in the liftd5 A/B (p3): the 64 together 2.219% of the game
+  thread lifted vs 2.210% generated (neutral); the 44 kept 1.477% vs 1.592% (the same run that chose them).
+- **Register mismatches** (left out): GetGeometryPointerPosition / Quaternion / QuatPos `_fb` differ in v0 on every
+  checked call (a control run, `SOTC_DIFFTEST_CONTROL=1`, has none: a real difference of the lifted copy, cause not
+  found); getLayoutClassCollisionIndepSurfBoundary_fb and manager_sub_01117340_fb differ in v1's upper 64 bits;
+  isysWakeupSubThread_fb (a sub-thread switch) mismatches in the control run too.
+
+### D5's batch (SOTC_LIFTD5)
+
+D2's ranking was used up by D4 (cand5.py: 94 left, D4's unreached and refused). A new ranking from the sampler of this
+round's first build (rank5.py, attract demo): the still-recompiled code is 8.7% of the game thread, and 452 of its 662
+functions may block or switch threads (blk4.py), 72 are D4's slower, 35 interrupt-side, 32 natives, 5 D4's mismatches:
+**66 candidates**, plus D4's 82 slower retried with `--inline`: 148; 143 lift (5 refused: a branch out of the function,
+a `break` form, two checkpoint patterns). They ship behind **SOTC_LIFTD5** (default on, A/B `liftd5`, test knob
+`SOTC_LIFTD5_RANGE=<lo>:<hi>`), game/overrides/decomp_liftd5_00.cpp, lifted with `--d5 --inline --extern` D1-D4.
+
+| out | functions | why |
+|---|---:|---|
+| slower in the first liftd5 A/B | 49 | z > 2 (all 49 are D4's slower again: player_HellDangerDetect 2.2x, gamecore_sub_013B8438 2.7x ...) |
+| slower in the second liftd5 A/B | 2 | manager_sub_010B00A8 (z 12), SpriteMenuIsFadeCheckAllLayer (z 3.9) |
+| may block (found by the difftest) | 3 | iosWaitIopSema, sceMc2ReadFileAsync, sub_0011B458: checking them twice left the Mac on the loading screen (blk4.py does not see their waits) |
+| register mismatch | 1 | gamecore_sub_0142FB60: a3's upper 64 bits, 4 of ~1 000 checks |
+| not reached | 2 | manager_sub_01147F80, demo_op1 (their legs leave by a thread switch: never checked) |
+
+**86 ship**: 55 new from the ranking and 31 of D4's 82 slower (not slower now, lifted with the inlining). By area: other
+game code 27, boot ELF / SDK 14, characters 13, display 12, system 6, camera 6, script 3, collision 3, particles 1,
+sound 1. Speed: in the first A/B (p2) the 86 took 0.199% of the game thread lifted vs 0.265% recompiled, in the second
+(p3, an independent run) 0.202% vs 0.259% (-22%). The whole 143 were +34% (p2) and +20% (p3): the cut functions are
+the same ones each time. Frame off minus on (draw-matched, the whole switch): -0.59 +- 0.92 ms (p2), -0.14 +- 0.95 ms
+(p3): within the noise.
+
+### Exactness
+
+Mac, `SOTC_DIFFTEST` with every register, VU0 and RAM, 1 200 s a run (nice'd), the build with D5's 91 candidates, the 62
+fallback copies and the 15 inlined callers (p4: the shipped code; the final files differ from it only in the direct-call
+targets of three fallback copies that called functions cut afterwards):
+
+| run | functions checked (of the 145 shipped) | checks | register mismatches | RAM-byte mismatches |
+|---|---:|---:|---:|---:|
+| attract | 117 | 44 115 | 0 | 12 |
+| walk (console card) | 145 | 57 618 | 0 | 79 |
+| ride (console card) | 144 | 57 916 | 0 | 193 |
+
+**All 145 shipped functions checked, 159 649 checks, 0 register mismatches.** RAM bytes: 297 of 304 at 0x29126c (the
+word that mismatches in every round's control runs), the rest single bytes other threads write.
+
+### Pictures and the console card
+
+Vita3K 222 MHz, muted, window shots every 60 s (looked at). The final build (p5: D1-D4, D3 / D4 with the 15 inlined
+callers, D5's 86 and the 44 fallback copies, all on from boot): the console card's walk (22 038 frames), ride (19 998),
+the attract demo with the sampler (29 538) and the walk under the console env's rotation
+(`SOTC_AB_FLAG=liftd5,liftd4,liftd3,liftd2,liftd1`, 600 frames: 23 298 frames, 39 windows, each switch off in turn). Every
+run drew within two minutes (the watchdog never fired); no "No exact recompiled function", no wild return; one
+game-thread frame over 300 ms per run (the boot's). Wander and Agro on the ground ([pos] y -5.3 .. 11.3 and -3.8 .. 12.5
+on the walks, the baseline range), Agro standing by Wander with both shadows, the ride to the altar (y 11.31), the
+attract demo's plain, canyon (Agro at y -96 on the canyon floor, as in this round's earlier attract runs) and the gallop
+with its shadow. The test builds' runs (p1-p3: four in-run A/Bs of 1 500 s and p3's walk) had no fault either. The
+first difftest list (p2) hung the Mac at the loading screen: iosWaitIopSema and two other waiting functions (out, above).
+
+spalign (r110/spalign.py) on celosia-d5.elf: 756 NEON :128 accesses, 0 sp-based. The Mac and Vita builds compile.
+
+### Decomp numbers
+
+tools/decomp_status.py (Mac replaced dump of the final build, attract demo to frame 1 500; calls from round 71's attract
+and route dumps): **2 666 of 9 024 functions native (29.54%; D4 28.59%), 28.88% of the MIPS code by size (27.75%),
+91.66% of calls (90.45%), 27.62% of the game's own code.** By area: Math 100%, particles 56%, display 38%, boot ELF / SDK
+35%, characters 31%, collision 30%, other game code 26%, system 26%, camera 26%, sound 20%, script 5%. decomp_tree / decomp_history (label D5) from the final
+build's attract demo (sampler 300-690 s): **79.6% of the game thread in native code**, 9.2% recompiled, 11.2% runtime
+(D4: 78.0 / 11.1 / 10.9).
+
+### What D6 should take
+
+- **The blocking code is what is left on the game thread**: of the 8.7% still recompiled, the 452 functions that may
+  block or switch threads are most of it. They need a difftest mode that can run a leg that waits (the scheduler's state
+  saved and restored per leg, or one leg checked against a recorded trace), then the same pipeline.
+- **The 128-bit upper halves**: three functions (getLayoutClassCollisionIndepSurfBoundary, manager_sub_01117340,
+  gamecore_sub_0142FB60) lose a register's upper 64 bits on some paths, and the three GetGeometryPointer* copies differ
+  in v0 (control clean): find the lifter cause; D1-D4's checks never hit it, but it is a class.
+- **Speed from lifting is exhausted at the function level** (D4's summaries, D5's inlining: both within a few percent).
+  The 30 fps target needs whole-subsystem native rewrites of the hot paths (rounds 43-141's method) on top of the lifted
+  code, starting from the profile's top: the characters' motion and collision, the display walk, the particles.
+- D4's 51 slower that are still slower with inlining, and the 5 + 4 register-mismatch functions (control runs of their own).

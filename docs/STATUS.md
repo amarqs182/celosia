@@ -1,5 +1,7 @@
 # Celosia: where the port stands
 
+> **Fork notice (`amarqs182/celosia`):** This fork targets **exclusively the R36S** (RK3326 aarch64, Mali-G31 MP2 GLES 3.2, SDL2 KMSDRM, Linux `4.4.189`). The upstream macOS / PS Vita table below is historical baseline context; see [`r36s_port.md`](r36s_port.md), [`r36s_native_audit.md`](r36s_native_audit.md), and [`worklist.md`](worklist.md) for the active R36S status and roadmap.
+
 *Updated 2026-10-17.* Progress page (treemaps per area, decompilation,
 history): [henrykun55.github.io/celosia](https://henrykun55.github.io/celosia/),
 built from [`port_status.json`](port_status.json) and the decomp data next to it.

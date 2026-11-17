@@ -28,6 +28,7 @@
 // calls compared). SOTC_CHAR122_LOG=<n>: every n game frames a [char122]
 // line (calls, host us a frame by part).
 #include "sotc_decomp.h"
+#include "sotc_pf141.h"
 
 #include "ps2_runtime_macros.h"
 #include "runtime/ps2_memory.h"
@@ -170,6 +171,7 @@ namespace char122
     {
         if (!inRam(chan, 0x24u))
             return false;
+        pf141::noteGuest(ram, chan, 0x24u); // round 141 (prefetch only)
         const uint32_t target = format < 15u ? rd32(ram, kCurveTable + format * 4u) : 0x010AC700u;
         switch (target)
         {
@@ -188,6 +190,7 @@ namespace char122
             const uint32_t key = rd32(ram, chan + 0x20u) + (index << 2);
             if (!inRam(key, 4u))
                 return false;
+            pf141::noteGuest(ram, key, 16u);
             int s0, s1, s2, s3, l0, l1, l2, l3, sb;
             if (target == 0x010AC978u)
                 s0 = 5, s1 = 14, s2 = 23, s3 = 1, l0 = 1, l1 = 2, l2 = 3, l3 = 0, sb = 31;
@@ -226,6 +229,7 @@ namespace char122
             const uint32_t rec = rd32(ram, chan + 0x18u) + index * 6u;
             if (!inRam(rec, 6u))
                 return false;
+            pf141::noteGuest(ram, rec, 24u);
             float c[6];
             std::memcpy(c, at(ram, chan), 24);
             const float k = 1.0f / 32767.5f;
@@ -786,8 +790,9 @@ namespace char122
                     {
                         const size_t j = (static_cast<size_t>(i) * cols + k) * 4u + l;
                         const double p = rdf(ram, pa + static_cast<uint32_t>(k) * 16u + l * 4u), v = rdf(ram, va + static_cast<uint32_t>(k) * 16u + l * 4u);
-                        dp = std::max(dp, std::fabs(p - np[j]));
-                        dv = std::max(dv, std::fabs(v - nv[j]));
+                        const double a = p - np[j], b = v - nv[j];
+                        dp = std::isnan(a) ? 1e30 : std::max(dp, std::fabs(a));
+                        dv = std::isnan(b) ? 1e30 : std::max(dv, std::fabs(b));
                         span = std::max(span, std::fabs(p));
                     }
             }
@@ -797,7 +802,7 @@ namespace char122
             rDiff += rSame ? 0u : 1u;
             worstP = std::max(worstP, dp);
             worstV = std::max(worstV, dv);
-            if (n % 300u == 1u || dp > 1e-3)
+            if (n % 300u == 1u || dp > 1e-3 || !rSame)
                 std::fprintf(stderr, "[cloth122c] frame %llu cloths %llu worst pos %.3g vel %.3g this pos %.3g vel %.3g (|pos| up to %.1f, %dx%d) R differ %llu\n",
                              (unsigned long long)sotc_decomp::g_gameFrame, (unsigned long long)n, worstP, worstV, dp, dv, span, rows, cols, (unsigned long long)rDiff);
         }
@@ -819,9 +824,13 @@ namespace char122
             const uint32_t a0 = GPR_U32(ctx, 4), a2 = GPR_U32(ctx, 6);
             const uint64_t a1 = GPR_U64(ctx, 5);
             const float dt = ctx->f[12], f13 = ctx->f[13];
-            const uint32_t sp = GPR_U32(ctx, 29) - 0x50u;
-            callGuestAt(rdram, ctx, runtime, kGetLayoutClass, 0x01137AACu, sp);
-            const uint32_t owner = GPR_U32(ctx, 2);
+            const uint32_t sp0 = GPR_U32(ctx, 29), ra0 = GPR_U32(ctx, 31);
+            const uint32_t sp = sp0 - 0x50u;
+            // layoutClassFast falls back to callGuest (overwriting $sp/$ra) for non-plain objects such as
+            // scripted layout entities; restore $sp/$ra so returnTo(ctx) does not jump back to 0x01137AAC.
+            const uint32_t owner = sotc_decomp::layoutClassFast(rdram, ctx, runtime, a0, 0x01137AACu, sp);
+            SET_GPR_U32(ctx, 29, sp0);
+            SET_GPR_U32(ctx, 31, ra0);
             uint32_t v0 = 0u;
             if (rd32(rdram, owner + 0x180u) != 0u)
             {
@@ -901,6 +910,7 @@ namespace char122
                             continue;
                         }
                         uint32_t r = rOf(ctx);
+                        pf141::noteCloth(rdram, c); // round 141 (prefetch only)
                         fused(rdram, c, owner, full, dt, f13, grid, rows, cols, r);
                         if (rows > 0)
                             setR(ctx, r);

@@ -1740,6 +1740,41 @@ const GSCpuBackend::DecodedTexture *GSCpuBackend::decodedTexture(const GSDrawSta
     entry.epoch = m_epochCounter;
     auto decodeRows = [&](int y0, int y1)
     {
+        if ((tex.psm == GS_PSM_CT32 || tex.psm == GS_PSM_CT24) &&
+            (width & 7u) == 0u && (height & 7u) == 0u && (y0 & 7) == 0 && (y1 & 7) == 0)
+        {
+            const uint32_t ta0Shifted = static_cast<uint32_t>(state.texa.ta0) << 24;
+            const bool aem = state.texa.aem != 0;
+            const bool isCt32 = tex.psm == GS_PSM_CT32;
+            for (uint32_t by = static_cast<uint32_t>(y0); by < static_cast<uint32_t>(y1); by += 8u)
+            {
+                for (uint32_t bx = 0; bx < width; bx += 8u)
+                {
+                    const uint64_t blkAddr = GSPSMCT32::addrPSMCT32(tex.tbp0, tex.tbw, bx, by) % m_vramSize;
+                    const uint32_t *blkWords = reinterpret_cast<const uint32_t *>(m_vram + blkAddr);
+                    for (uint32_t ly = 0; ly < 8u; ++ly)
+                    {
+                        uint32_t *row = entry.texels.data() + static_cast<size_t>(by + ly) * width + bx;
+                        const uint8_t *col = GSPSMCT32::columnTable32[ly];
+                        if (isCt32)
+                        {
+                            for (uint32_t lx = 0; lx < 8u; ++lx)
+                                row[lx] = blkWords[col[lx]];
+                        }
+                        else
+                        {
+                            for (uint32_t lx = 0; lx < 8u; ++lx)
+                            {
+                                const uint32_t rgb = blkWords[col[lx]] & 0x00FFFFFFu;
+                                const uint32_t a = (aem && rgb == 0u) ? 0u : ta0Shifted;
+                                row[lx] = rgb | a;
+                            }
+                        }
+                    }
+                }
+            }
+            return;
+        }
         t_clut = clut;
         for (int y = y0; y < y1; ++y)
         {
@@ -2742,6 +2777,55 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
             v0f = (v0.t / q0) * static_cast<float>(texH);
             u1f = (v1.s / q1) * static_cast<float>(texW);
             v1f = (v1.t / q1) * static_cast<float>(texH);
+        }
+
+        const DecodedTexture *decoded = static_cast<const DecodedTexture *>(t_texture);
+        const uint8_t wrapU = static_cast<uint8_t>(ctx.clamp & 0x3u);
+        const uint8_t wrapV = static_cast<uint8_t>((ctx.clamp >> 2) & 0x3u);
+        const bool fastWrap = (wrapU == 0u && wrapV == 0u) || (wrapU == 1u && wrapV == 1u);
+        const bool fastTfx = (tex.tfx == 1u) || (tex.tfx == 0u && r == 128u && g == 128u && b == 128u && a == 128u);
+        const float duDx = (u1f - u0f) * invDx;
+        const float dvDy = (v1f - v0f) * invDy;
+        const bool unitScale = !state.linearFilter || (std::fabs(duDx - 1.0f) < 1e-3f && std::fabs(dvDy - 1.0f) < 1e-3f);
+        const bool fastFmt = (pipe.fpsm == GS_PSM_CT32 || pipe.fpsm == GS_PSM_CT24);
+        if (decoded && state.prim.fst && unitScale && fastWrap && fastTfx && fastFmt &&
+            !pipe.fge && !pipe.abe && !pipe.dateRead && (pipe.test & 0x1u) == 0u &&
+            pipe.ztestMethod == 1u && pipe.zmask != 0 && !pipe.forceAlphaMsb &&
+            pipe.fbmsk == 0u &&
+            decoded->width == static_cast<uint32_t>(texW) && decoded->height == static_cast<uint32_t>(texH) &&
+            texW > 0 && texH > 0 && (texW & (texW - 1)) == 0 && (texH & (texH - 1)) == 0 &&
+            drawX0 >= pipe.scissorX0 && drawX1 <= pipe.scissorX1 &&
+            drawY0Band >= pipe.rowY0 && drawY1 <= pipe.rowY1)
+        {
+            const uint32_t maskU = static_cast<uint32_t>(texW - 1);
+            const uint32_t maskV = static_cast<uint32_t>(texH - 1);
+            const bool clampWrap = (wrapU == 1u);
+            const bool isCt32 = (pipe.fpsm == GS_PSM_CT32);
+            const float uStart = u0f + (static_cast<float>(drawX0) - sx0) * duDx;
+            drawRowsParallel(drawY0Band, drawY1, drawX1 - drawX0 + 1, [&](int y)
+                             {
+                                 const float ty = (static_cast<float>(y) - sy0) * invDy;
+                                 int iv = static_cast<int>(std::floor(lerpf(v0f, v1f, ty)));
+                                 const uint32_t v = clampWrap
+                                                        ? static_cast<uint32_t>(clampInt(iv, 0, texH - 1))
+                                                        : (static_cast<uint32_t>(iv) & maskV);
+                                 const uint32_t *texRow = decoded->texels.data() + static_cast<size_t>(v) * decoded->width;
+                                 float uf = uStart;
+                                 for (int x = drawX0; x <= drawX1; ++x, uf += duDx)
+                                 {
+                                     const int iu = static_cast<int>(std::floor(uf));
+                                     const uint32_t u = clampWrap
+                                                            ? static_cast<uint32_t>(clampInt(iu, 0, texW - 1))
+                                                            : (static_cast<uint32_t>(iu) & maskU);
+                                     const uint32_t dstAddr = GSPSMCT32::addrPSMCT32(pipe.fbp, pipe.fbw, static_cast<uint32_t>(x), static_cast<uint32_t>(y)) % m_vramSize;
+                                     uint32_t *dst = reinterpret_cast<uint32_t *>(m_vram + dstAddr);
+                                     if (isCt32)
+                                         *dst = texRow[u];
+                                     else
+                                         *dst = (*dst & 0xFF000000u) | (texRow[u] & 0x00FFFFFFu);
+                                 }
+                             });
+            return;
         }
 
         auto drawRow = [&](int y)

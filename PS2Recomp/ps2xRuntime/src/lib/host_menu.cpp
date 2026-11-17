@@ -426,7 +426,7 @@ namespace
 
     enum Button
     {
-        kUp, kDown, kLeft, kRight, kCross, kCircle, kTriangle, kL1, kR1, kSelect, kButtonCount
+        kUp, kDown, kLeft, kRight, kCross, kCircle, kTriangle, kL1, kR1, kSelect, kStart, kGuide, kButtonCount
     };
 
     bool g_down[kButtonCount] = {};
@@ -453,6 +453,8 @@ namespace
             g_down[kL1] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_LEFT_TRIGGER_1);
             g_down[kR1] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_RIGHT_TRIGGER_1);
             g_down[kSelect] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_MIDDLE_LEFT);
+            g_down[kStart] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_MIDDLE_RIGHT);
+            g_down[kGuide] = IsGamepadButtonDown(pad, GAMEPAD_BUTTON_MIDDLE);
         }
         // Keyboard: arrows, Enter = Cross, Backspace = Circle, H = help, Q/E = tabs.
         g_down[kUp] |= IsKeyDown(KEY_UP);
@@ -643,10 +645,22 @@ void update()
     if (g_holdBlock && !anyDown())
         g_holdBlock = false;
 
+    // PortMaster-style instant exit on Select + Start (both in-game and in this
+    // menu). Clearing g_lastSelect prevents pressing Select + Start from being
+    // misread as a Select double-tap that opens the settings overlay instead.
+    if (g_down[kSelect] && g_down[kStart] && (pressed(kSelect) || pressed(kStart)))
+    {
+        g_lastSelect = -1.0;
+        g_quit = true;
+        return;
+    }
+    if (g_down[kStart])
+        g_lastSelect = -1.0;
+
     if (!g_open)
     {
-        bool open = IsKeyPressed(KEY_F1);
-        if (pressed(kSelect))
+        bool open = IsKeyPressed(KEY_F1) || (g_down[kGuide] && pressed(kSelect));
+        if (pressed(kSelect) && !g_down[kGuide])
         {
             const double now = GetTime();
             open |= g_lastSelect >= 0.0 && now - g_lastSelect < kDoubleTapSeconds;

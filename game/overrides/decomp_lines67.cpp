@@ -7,7 +7,11 @@
 #include <vector>
 #include <unordered_map>
 #include <algorithm>
-#include <mach-o/dyld.h>
+#if defined(__APPLE__)
+#include <mach-o/dyld.h> // base(): the host image's base (macOS only)
+#else
+#include <dlfcn.h> // base(): the host image's base via dladdr (dli_fbase)
+#endif
 
 namespace lines67
 {
@@ -51,7 +55,15 @@ namespace lines67
             static State s;
             return s;
         }
-        uint64_t base() { return reinterpret_cast<uint64_t>(_dyld_get_image_header(0)); }
+        uint64_t base()
+        {
+#if defined(__APPLE__)
+            return reinterpret_cast<uint64_t>(_dyld_get_image_header(0));
+#else
+            Dl_info info{};
+            return dladdr(reinterpret_cast<void *>(&base), &info) ? reinterpret_cast<uint64_t>(info.dli_fbase) : 0u;
+#endif
+        }
         uint64_t every()
         {
             static const uint64_t n = std::getenv("SOTC_LINES67_EVERY") ? std::strtoull(std::getenv("SOTC_LINES67_EVERY"), nullptr, 10) : 300u;

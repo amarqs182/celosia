@@ -23,6 +23,7 @@ namespace decomp_texanim
 
 namespace decomp_tex64
 {
+    extern uint32_t g_validHead, g_validLast, g_validMove;
     bool post(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, float f12, uint32_t frame); // decomp_tex64.cpp
     void armWatch(uint8_t *rdram);
 }
@@ -82,14 +83,31 @@ namespace decomp_texframe
                 if (n > (1 << 22) || !clear(a) || !clear(b))
                     return sotc_decomp::recompiled(kTexReset)(rdram, ctx, runtime);
             }
-            uint32_t count = 0u;
-            for (uint32_t node = u32(0x0118C184u); node; node = u32(node + 0xCu))
+            const uint32_t head = u32(0x0118C184u);
+            if (head != 0u && head == decomp_tex64::g_validHead &&
+                decomp_tex64::g_validMove == sotc_decomp::g_guestMoveSerial &&
+                decomp_tex64::g_validLast != 0u && okc(decomp_tex64::g_validLast, 0x10u) &&
+                u32(decomp_tex64::g_validLast + 0xCu) == 0u)
             {
-                uint32_t t;
-                if (!okc(node, 0x10u) || ++count > (1u << 20) || (t = u32(node + 4u), !okc(t, 0x2Cu)) || (t = u32(t + 0x28u), !okc(t, 0x24u)) ||
-                    (t = u32(t + 0x20u), !okc(t, 0x10u)) || (t = u32(t + 0xCu), !okc(t, 0x20u)))
-                    return sotc_decomp::recompiled(kTexReset)(rdram, ctx, runtime);
-                lastNode = node;
+                lastNode = decomp_tex64::g_validLast;
+            }
+            else
+            {
+                uint32_t count = 0u;
+                for (uint32_t node = head; node; node = u32(node + 0xCu))
+                {
+                    uint32_t t;
+                    if (!okc(node, 0x10u) || ++count > (1u << 20) || (t = u32(node + 4u), !okc(t, 0x2Cu)) || (t = u32(t + 0x28u), !okc(t, 0x24u)) ||
+                        (t = u32(t + 0x20u), !okc(t, 0x10u)) || (t = u32(t + 0xCu), !okc(t, 0x20u)))
+                    {
+                        decomp_tex64::g_validHead = decomp_tex64::g_validLast = 0u;
+                        return sotc_decomp::recompiled(kTexReset)(rdram, ctx, runtime);
+                    }
+                    lastNode = node;
+                }
+                decomp_tex64::g_validHead = head;
+                decomp_tex64::g_validLast = lastNode;
+                decomp_tex64::g_validMove = sotc_decomp::g_guestMoveSerial;
             }
         }
         sotc_decomp::callGuest(rdram, ctx, runtime, kCamera, 0x010AB2C0u, frame);

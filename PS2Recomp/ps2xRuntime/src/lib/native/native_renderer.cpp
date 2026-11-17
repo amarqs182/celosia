@@ -1,6 +1,8 @@
 // The native renderer's front: picks a backend (native_backend.h) the first
 // time it is used. macOS: Metal, or OpenGL with SOTC_NATIVE_GL=1 (to check
-// the GL path against Metal); the Vita: OpenGL (vitaGL); elsewhere none.
+// the GL path against Metal); the Vita: OpenGL (vitaGL); Linux: OpenGL too
+// (GLES3, once native_renderer_gl.cpp grows the ES path there, r36s);
+// elsewhere none.
 #include "native_backend.h"
 #include "runtime/ps2_diag.h"
 #include "runtime/native_tuning.h"
@@ -34,9 +36,12 @@
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
 extern "C" unsigned int _pthread_stack_default_user; // ps2_vita_runtime.cpp
+#elif defined(__linux__)
+#include <pthread.h>
+#include <sched.h>
 #endif
 
-#if defined(__APPLE__) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
+#if defined(__APPLE__) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)) || defined(__linux__)
 #define PS2X_NATIVE_GL 1
 #endif
 
@@ -59,7 +64,7 @@ namespace native_renderer
         // 3x, the Vita's 1x, the PS2's 512 x 448; the Vita's High also has
         // round 36's particle sacrifice on, as its default had).
         applyPreset(d, kPresetHigh);
-#if defined(__vita__)
+#if defined(__vita__) || defined(__linux__)
         // Copies of the picture made mid-frame came out white in Vita3K when
         // the picture was taken up again after them: drawn again instead, so
         // the heat haze and the water read the PS2's 256 x 256 copy as on the Mac.
@@ -85,6 +90,11 @@ namespace native_renderer
         // frame that takes a little over 33 ms is shown at 30 / 20 steadily
         // instead of alternating 60 / 30 / 20 shows.
         d.frameCap30 = false;
+        // Optimization sacrifices for low-power handheld SoC (Cortex-A35 / Mali-G31)
+        d.sacCamColl = true;
+        d.sacFarChara = true;
+        d.sacFxHalf = true;
+        d.sacDrawDist = true;
         // Round 37 had the body shadows off by default here until measured;
         // round 38 turns them on (Tuning::bodyShadows' default, a menu item).
         // Round 36: the particle sacrifice on by default (half the emitters'
@@ -128,7 +138,7 @@ namespace native_renderer
                                           {"SOTC_NATIVE_NOFEEDBACK", &Tuning::feedback}, {"SOTC_NATIVE_NOREFLECT", &Tuning::reflections},
                                           {"SOTC_NATIVE_NOREFRACT", &Tuning::refraction}})
             if (on(name))
-                d.*field = false;
+                d.*field = !flag(name);
         if (on("SOTC_NATIVE_NOHAZE"))
             d.heatHaze = !flag("SOTC_NATIVE_NOHAZE");
         if (on("SOTC_BODY_SHADOWS"))
@@ -147,6 +157,8 @@ namespace native_renderer
             d.sacLod = flag("SOTC_SAC_LOD");
         if (on("SOTC_SAC_PARTICLES"))
             d.sacParticles = flag("SOTC_SAC_PARTICLES");
+        if (on("SOTC_FUR_SHELLS"))
+            d.furShells = std::max(0, std::atoi(std::getenv("SOTC_FUR_SHELLS")));
         // Round 65: the Quality menu's cuts. SOTC_SAC_MAX=1 all four (the
         // menu's "Max performance"), each one's own variable over it.
         if (on("SOTC_SAC_MAX") && flag("SOTC_SAC_MAX"))
@@ -172,6 +184,7 @@ namespace native_renderer
             d.shadowAllSides = on("SOTC_SHADOW_ALLSIDES") && std::atoi(std::getenv("SOTC_SHADOW_ALLSIDES")) != 0;
             if (on("SOTC_BG_DEPTH"))
                 d.backgroundDepth = std::atoi(std::getenv("SOTC_BG_DEPTH")) != 0;
+            d.additive = !(on("SOTC_NATIVE_NOADDITIVE") && std::atoi(std::getenv("SOTC_NATIVE_NOADDITIVE")) != 0);
             d.mipmaps = !on("SOTC_NATIVE_NOMIPS");
             d.textureScroll = !on("SOTC_NATIVE_NOROW");
             d.rawMirror = on("SOTC_RAW_MIRROR");
@@ -221,7 +234,7 @@ namespace native_renderer
                                          {"SOTC_GL_PRESENT86", &Tuning::glPresent86},
                                          {"SOTC_GL_SORT87", &Tuning::glSort87}, {"SOTC_GL_VOL87", &Tuning::glVol87}, {"SOTC_GL_SHMASK87", &Tuning::glShmask87}, {"SOTC_GL_INFLIGHT87", &Tuning::glInflight87},
                                          {"SOTC_GL_BGSMALL87", &Tuning::glBgSmall87}, {"SOTC_GL_OPAQUE88", &Tuning::glOpaque88}, {"SOTC_GL_MIRROR88", &Tuning::glMirror88},
-                                         {"SOTC_GL_DIAG92_PX", &Tuning::glDiag92Px}, {"SOTC_GL_DIAG92_TEX", &Tuning::glDiag92Tex}, {"SOTC_GL_DIAG92_HALF", &Tuning::glDiag92Half}, {"SOTC_GL_NOSCREEN92", &Tuning::glNoScreen92}, {"SOTC_GL_MIRROR93", &Tuning::glMirror93}, {"SOTC_GL_ATOP93", &Tuning::glAtOpaque93}, {"SOTC_GL_POST93", &Tuning::glPost93}, {"SOTC_GL_BLUR93", &Tuning::glBlur93}, {"SOTC_GL_GLOW93", &Tuning::glGlow93}, {"SOTC_GL_BGCOPY94", &Tuning::glBgCopy94}, {"SOTC_GL_GLOW94", &Tuning::glGlow94}, {"SOTC_GL_FX94", &Tuning::glFx94}, {"SOTC_GL_BLOOM94", &Tuning::glBloom94}, {"SOTC_GL_DIAG98", &Tuning::glDiag98}, {"SOTC_GL_AT98", &Tuning::glAt98}, {"SOTC_GL_UNTEX98", &Tuning::glUntex98}, {"SOTC_GL_GLOW98", &Tuning::glGlow98}, {"SOTC_GL_NOFOG98", &Tuning::glNoFog98}, {"SOTC_GL_LOD0_98", &Tuning::glLod0_98}, {"SOTC_GL_PSOFT98", &Tuning::glPlainSoft98}, {"SOTC_GL_INFLIGHT100", &Tuning::glInflight100}, {"SOTC_CD_AHEAD100", &Tuning::cdAhead100}, {"SOTC_PRIO100", &Tuning::prio100}, {"SOTC_GL_FAT116", &Tuning::glFat116}})
+                                         {"SOTC_GL_DIAG92_PX", &Tuning::glDiag92Px}, {"SOTC_GL_DIAG92_TEX", &Tuning::glDiag92Tex}, {"SOTC_GL_DIAG92_HALF", &Tuning::glDiag92Half}, {"SOTC_GL_NOSCREEN92", &Tuning::glNoScreen92}, {"SOTC_GL_MIRROR93", &Tuning::glMirror93}, {"SOTC_GL_ATOP93", &Tuning::glAtOpaque93}, {"SOTC_GL_POST93", &Tuning::glPost93}, {"SOTC_GL_BLUR93", &Tuning::glBlur93}, {"SOTC_GL_GLOW93", &Tuning::glGlow93}, {"SOTC_GL_BGCOPY94", &Tuning::glBgCopy94}, {"SOTC_GL_GLOW94", &Tuning::glGlow94}, {"SOTC_GL_FX94", &Tuning::glFx94}, {"SOTC_GL_BLOOM94", &Tuning::glBloom94}, {"SOTC_GL_DIAG98", &Tuning::glDiag98}, {"SOTC_GL_AT98", &Tuning::glAt98}, {"SOTC_GL_UNTEX98", &Tuning::glUntex98}, {"SOTC_GL_GLOW98", &Tuning::glGlow98}, {"SOTC_GL_NOFOG98", &Tuning::glNoFog98}, {"SOTC_GL_LOD0_98", &Tuning::glLod0_98}, {"SOTC_GL_PSOFT98", &Tuning::glPlainSoft98}, {"SOTC_GL_INFLIGHT100", &Tuning::glInflight100}, {"SOTC_CD_AHEAD100", &Tuning::cdAhead100}, {"SOTC_PRIO100", &Tuning::prio100}, {"SOTC_GL_FAT116", &Tuning::glFat116}, {"SOTC_GL_INSTANCING", &Tuning::glInstancing}})
                 if (on(name))
                     d.*flag = std::atoi(std::getenv(name)) != 0;
             if (on("SOTC_GL_REDRAW"))
@@ -310,7 +323,7 @@ namespace native_renderer
                                          {"SOTC_GL_PRESENT86", &Tuning::glPresent86},
                                          {"SOTC_GL_SORT87", &Tuning::glSort87}, {"SOTC_GL_VOL87", &Tuning::glVol87}, {"SOTC_GL_SHMASK87", &Tuning::glShmask87}, {"SOTC_GL_INFLIGHT87", &Tuning::glInflight87},
                                          {"SOTC_GL_BGSMALL87", &Tuning::glBgSmall87}, {"SOTC_GL_OPAQUE88", &Tuning::glOpaque88}, {"SOTC_GL_MIRROR88", &Tuning::glMirror88},
-                                         {"SOTC_GL_DIAG92_PX", &Tuning::glDiag92Px}, {"SOTC_GL_DIAG92_TEX", &Tuning::glDiag92Tex}, {"SOTC_GL_DIAG92_HALF", &Tuning::glDiag92Half}, {"SOTC_GL_NOSCREEN92", &Tuning::glNoScreen92}, {"SOTC_GL_MIRROR93", &Tuning::glMirror93}, {"SOTC_GL_ATOP93", &Tuning::glAtOpaque93}, {"SOTC_GL_POST93", &Tuning::glPost93}, {"SOTC_GL_BLUR93", &Tuning::glBlur93}, {"SOTC_GL_GLOW93", &Tuning::glGlow93}, {"SOTC_GL_BGCOPY94", &Tuning::glBgCopy94}, {"SOTC_GL_GLOW94", &Tuning::glGlow94}, {"SOTC_GL_FX94", &Tuning::glFx94}, {"SOTC_GL_BLOOM94", &Tuning::glBloom94}, {"SOTC_GL_DIAG98", &Tuning::glDiag98}, {"SOTC_GL_AT98", &Tuning::glAt98}, {"SOTC_GL_UNTEX98", &Tuning::glUntex98}, {"SOTC_GL_GLOW98", &Tuning::glGlow98}, {"SOTC_GL_NOFOG98", &Tuning::glNoFog98}, {"SOTC_GL_LOD0_98", &Tuning::glLod0_98}, {"SOTC_GL_PSOFT98", &Tuning::glPlainSoft98}, {"SOTC_GL_INFLIGHT100", &Tuning::glInflight100}, {"SOTC_CD_AHEAD100", &Tuning::cdAhead100}, {"SOTC_PRIO100", &Tuning::prio100}, {"SOTC_GL_FAT116", &Tuning::glFat116}})
+                                         {"SOTC_GL_DIAG92_PX", &Tuning::glDiag92Px}, {"SOTC_GL_DIAG92_TEX", &Tuning::glDiag92Tex}, {"SOTC_GL_DIAG92_HALF", &Tuning::glDiag92Half}, {"SOTC_GL_NOSCREEN92", &Tuning::glNoScreen92}, {"SOTC_GL_MIRROR93", &Tuning::glMirror93}, {"SOTC_GL_ATOP93", &Tuning::glAtOpaque93}, {"SOTC_GL_POST93", &Tuning::glPost93}, {"SOTC_GL_BLUR93", &Tuning::glBlur93}, {"SOTC_GL_GLOW93", &Tuning::glGlow93}, {"SOTC_GL_BGCOPY94", &Tuning::glBgCopy94}, {"SOTC_GL_GLOW94", &Tuning::glGlow94}, {"SOTC_GL_FX94", &Tuning::glFx94}, {"SOTC_GL_BLOOM94", &Tuning::glBloom94}, {"SOTC_GL_DIAG98", &Tuning::glDiag98}, {"SOTC_GL_AT98", &Tuning::glAt98}, {"SOTC_GL_UNTEX98", &Tuning::glUntex98}, {"SOTC_GL_GLOW98", &Tuning::glGlow98}, {"SOTC_GL_NOFOG98", &Tuning::glNoFog98}, {"SOTC_GL_LOD0_98", &Tuning::glLod0_98}, {"SOTC_GL_PSOFT98", &Tuning::glPlainSoft98}, {"SOTC_GL_INFLIGHT100", &Tuning::glInflight100}, {"SOTC_CD_AHEAD100", &Tuning::cdAhead100}, {"SOTC_PRIO100", &Tuning::prio100}, {"SOTC_GL_FAT116", &Tuning::glFat116}, {"SOTC_GL_INSTANCING", &Tuning::glInstancing}})
             if (t.*flag != d.*flag)
                 add(std::string(name) + "=" + (t.*flag ? "1" : "0"));
         if (t.holdIncomplete != d.holdIncomplete)
@@ -625,7 +638,7 @@ namespace native_renderer
         debugToggle("dbg_lighting", "Lighting", "Iluminação", "Off: lit models at their vertex colour.", "Desligado: modelos iluminados na cor do vértice.",
                     &Tuning::lighting);
         debugToggle("dbg_additive", "Additive draws", "Desenhos aditivos", "Draws that add light (glows, light shafts).",
-                    "Desenhos que somam luz (brilhos, feixes).", &Tuning::additive);
+                    "Desenhos que somam luz (brilhos, feixes).", &Tuning::additive, "SOTC_NATIVE_NOADDITIVE");
         debugToggle("dbg_subtract", "Subtract draws", "Desenhos subtrativos", "Draws that darken by subtracting.", "Desenhos que escurecem subtraindo.",
                     &Tuning::subtract);
         debugToggle("dbg_overlays", "Second passes", "Segundas passadas", "A second pass drawn over the same geometry.",
@@ -1188,6 +1201,7 @@ namespace
         bool hasMesh(uint64_t id) override { return a->hasMesh(id) && b->hasMesh(id); }
         uint64_t meshEvictions() override { return a->meshEvictions() + b->meshEvictions(); }
         void uploadMesh(uint64_t id, const native_renderer::Vertex *v, uint32_t n, bool f) override { a->uploadMesh(id, v, n, f), b->uploadMesh(id, v, n, f); }
+        void uploadIndexedMesh(uint64_t id, const native_renderer::Vertex *v, uint32_t n, const uint32_t *idx, uint32_t in) override { a->uploadIndexedMesh(id, v, n, idx, in), b->uploadIndexedMesh(id, v, n, idx, in); }
         bool hasTexture(uint64_t id) override { return a->hasTexture(id) && b->hasTexture(id); }
         void uploadTexture(uint64_t id, uint32_t w, uint32_t h, const uint8_t *p, uint32_t l) override { a->uploadTexture(id, w, h, p, l), b->uploadTexture(id, w, h, p, l); }
         void beginFrame() override { a->beginFrame(), b->beginFrame(); }
@@ -1254,6 +1268,9 @@ namespace
     {
 #if defined(__vita__)
         return true;
+#elif defined(__linux__)
+        const char *gl = std::getenv("SOTC_NATIVE_GL");
+        return !gl || std::atoi(gl) != 0;
 #else
         const char *gl = std::getenv("SOTC_NATIVE_GL");
         return gl && (std::atoi(gl) != 0 || std::string(gl) == "check");
@@ -1314,7 +1331,11 @@ namespace native_renderer
     bool available()
     {
         if (!g_tried && wantGl())
+#if defined(__linux__)
+            return true; // PS2Runtime::run() sets the GL context before EeScheduler::run()
+#else
             return static_cast<bool>(g_glMakeCurrent); // not created here: this may not be the game thread
+#endif
         return backend() != nullptr;
     }
     FrameCounters &frameCounters()
@@ -1593,7 +1614,51 @@ namespace native_renderer
             return at;
         }
 #else
-        void place(Kind) {}
+        void place(Kind kind)
+        {
+#if defined(__linux__)
+            if (layout() == 0)
+                return;
+            static const char *const kNames[kKinds] = {"game", "worker", "render", "build", "audio", "main", "loader", "recorder", "log", "dma", "lane", "offload"};
+            cpu_set_t cpuset;
+            CPU_ZERO(&cpuset);
+            switch (kind)
+            {
+            case kGame:
+                // Core 0 dedicated exclusively to the EE GameThread
+                CPU_SET(0, &cpuset);
+                break;
+            case kWorker:
+            case kLane:
+            case kOffload:
+                // Fast parallel scene/mesh/texture lanes on Cores 1 & 2
+                CPU_SET(1, &cpuset);
+                CPU_SET(2, &cpuset);
+                break;
+            case kRender:
+                // OpenGL ES 3.2 RenderThread on Core 3 (and Core 2 fallback)
+                CPU_SET(2, &cpuset);
+                CPU_SET(3, &cpuset);
+                break;
+            default:
+                // BuildWorker, Audio, Main, Loader, DMA, Log on Cores 1-3 (never preempt Core 0)
+                CPU_SET(1, &cpuset);
+                CPU_SET(2, &cpuset);
+                CPU_SET(3, &cpuset);
+                break;
+            }
+            const int rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+            unsigned mask = 0;
+            for (int c = 0; c < 4; ++c)
+                if (CPU_ISSET(c, &cpuset))
+                    mask |= (1u << c);
+            std::fprintf(stderr, "[threads] %s: cores 0x%x%s\n",
+                         (kind >= 0 && kind < kKinds) ? kNames[kind] : "other",
+                         mask, rc != 0 ? " (refused)" : "");
+#else
+            (void)kind;
+#endif
+        }
         void setKindPriority(Kind, int) {}
         void sample() {}
         int line(char *out, size_t room, double, bool, bool)
@@ -2059,6 +2124,7 @@ namespace native_renderer
         };
         std::mutex mutex;
         std::condition_variable wake;
+        std::deque<Job> todoUrgent;
         std::deque<Job> todo;
         std::vector<Job> done;
         bool started = false;
@@ -2078,7 +2144,12 @@ namespace native_renderer
             {
                 std::lock_guard<std::mutex> lock(mutex);
                 for (Job &job : staged)
-                    todo.push_back(std::move(job));
+                {
+                    if (job.w && job.w->priority)
+                        todoUrgent.push_back(std::move(job));
+                    else
+                        todo.push_back(std::move(job));
+                }
                 sleeper = sleeping;
             }
             staged.clear();
@@ -2103,7 +2174,7 @@ namespace native_renderer
                 Job job;
                 {
                     std::unique_lock<std::mutex> lock(mutex);
-                    while (todo.empty())
+                    while (todoUrgent.empty() && todo.empty())
                     {
 #if defined(__vita__)
                         // Round 105 (build105): idle on a kernel semaphore
@@ -2124,11 +2195,21 @@ namespace native_renderer
                             sleeping = false;
                             continue;
                         }
-#endif
                         wake.wait_for(lock, std::chrono::milliseconds(2));
+#else
+                        wake.wait(lock);
+#endif
                     }
-                    job = std::move(todo.front());
-                    todo.pop_front();
+                    if (!todoUrgent.empty())
+                    {
+                        job = std::move(todoUrgent.front());
+                        todoUrgent.pop_front();
+                    }
+                    else
+                    {
+                        job = std::move(todo.front());
+                        todo.pop_front();
+                    }
                 }
                 if (job.w)
                     job.w->work();
@@ -2176,7 +2257,7 @@ namespace native_renderer
         // queued at a later frame.
         static uint32_t queueBudget()
         {
-#if defined(__vita__)
+#if defined(__vita__) || defined(__linux__)
             constexpr uint32_t kDefault = 500u;
 #else
             constexpr uint32_t kDefault = 0u;
@@ -2191,7 +2272,7 @@ namespace native_renderer
         // meanwhile. SOTC_TAKEUP_MS (the Vita: 8; 0: all at once, as before).
         static uint64_t takeUpUs()
         {
-#if defined(__vita__)
+#if defined(__vita__) || defined(__linux__)
             constexpr double kDefault = 8.0;
 #else
             constexpr double kDefault = 0.0;
@@ -2433,6 +2514,28 @@ namespace native_renderer
         c.meshUs += nowUs() - start;
         ++c.meshUploads;
         c.meshBytes += static_cast<uint64_t>(count) * sizeof(Vertex);
+    }
+    void uploadIndexedMesh(uint64_t id, const Vertex *vertices, uint32_t count, const uint32_t *indices, uint32_t indexCount)
+    {
+        RaceScope race("uploadIndexedMesh");
+        if (g_uploads.on)
+        {
+            g_uploads.staticMeshes += 1;
+            g_uploads.staticBytes += static_cast<uint64_t>(count) * sizeof(Vertex) + static_cast<uint64_t>(indexCount) * sizeof(uint32_t);
+        }
+        if (!backend())
+            return;
+        if (!tuning().frameTiming())
+        {
+            g_backend->uploadIndexedMesh(id, vertices, count, indices, indexCount);
+            return;
+        }
+        const uint64_t start = nowUs();
+        g_backend->uploadIndexedMesh(id, vertices, count, indices, indexCount);
+        FrameCounters &c = frameCounters();
+        c.meshUs += nowUs() - start;
+        ++c.meshUploads;
+        c.meshBytes += static_cast<uint64_t>(count) * sizeof(Vertex) + static_cast<uint64_t>(indexCount) * sizeof(uint32_t);
     }
     Vertex *frameMesh(uint32_t count)
     {
@@ -2941,6 +3044,11 @@ namespace native_renderer
     {
         if (g_backend)
             g_backend->finishFrames();
+    }
+    void shutdown()
+    {
+        if (g_backend)
+            g_backend->shutdown();
     }
     void setShown(bool shown) { g_shown.store(shown, std::memory_order_relaxed); }
     bool shown() { return g_shown.load(std::memory_order_relaxed); }

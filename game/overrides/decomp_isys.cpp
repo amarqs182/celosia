@@ -97,7 +97,7 @@ namespace decomp_isys
     };
     Lock acquire(const M &m, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        ps2_syscalls::GetThreadId(rdram, ctx, runtime);
+        sotc_decomp::getThreadId139(rdram, ctx, runtime);
         const uint32_t tid = GPR_U32(ctx, 2);
         if (tid == m.u32(kOwner))
         {
@@ -112,7 +112,7 @@ namespace decomp_isys
             return Lock::Nested;
         }
         SET_GPR_U32(ctx, 4, m.u32(kSemaWord));
-        ps2_syscalls::PollSema(rdram, ctx, runtime);
+        sotc_decomp::pollSema139(rdram, ctx, runtime);
         if (static_cast<int32_t>(GPR_U32(ctx, 2)) < 0)
         {
             stat(2);
@@ -141,7 +141,7 @@ namespace decomp_isys
     void signal(const M &m, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t ra, uint32_t sp)
     {
         SET_GPR_U32(ctx, 4, m.u32(kSemaWord));
-        sotc_decomp::callGuest(rdram, ctx, runtime, kSignalSema, ra, sp);
+        sotc_decomp::callNative(rdram, ctx, runtime, kSignalSema, &decomp_sema::signalSema, ra, sp);
     }
     // The callee-saved registers s0..s(n-1) and ra into a frame as a prologue
     // writes them (s at +8 i, ra at raAt).
@@ -441,7 +441,7 @@ namespace decomp_isys
         SET_GPR_U32(ctx, 5, group);
         SET_GPR_U64(ctx, 6, 0u);
         SET_GPR_U64(ctx, 7, 0u);
-        sotc_decomp::callGuest(rdram, ctx, runtime, kAdd, 0x001C0108u, sp);
+        sotc_decomp::callNative(rdram, ctx, runtime, kAdd, &addGroup, 0x001C0108u, sp);
         SET_GPR_U64(ctx, 16, s0);
         SET_GPR_U64(ctx, 17, s1);
         const uint32_t counter = (m.u32(kDl + 0x18u) << 2) + kDl + 0x28u;

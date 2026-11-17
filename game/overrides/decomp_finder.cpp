@@ -233,7 +233,7 @@ namespace decomp_finder
 
         // GetLayoutClass(a1), a0 = a1 (daddu), s0 = t0.
         SET_GPR_U64(ctx, 4, a1Full);
-        const uint32_t lc = call(kGetLayoutClass, 0x011169C4u);
+        const uint32_t lc = sotc_decomp::layoutClassFast(rdram, ctx, runtime, static_cast<uint32_t>(a1Full), 0x011169C4u, SP);
         w32(SP + 0xDCu, lc);
         if (static_cast<int8_t>(READ8(lc + 0x1BBu)) == 0 || static_cast<int8_t>(READ8(lc + 0x1B8u)) == 0)
             return finish(0u);

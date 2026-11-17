@@ -25,35 +25,13 @@
 
 namespace decomp_hot44g
 {
-    constexpr uint32_t kGsReg = 0x001C5B00u, kPacket = 0x001E11A4u;
-
-    inline uint64_t sx(uint32_t v) { return static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(v))); }
+    constexpr uint32_t kGsReg = 0x001C5B00u;
 
     void gsReg(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         if (!sotc_decomp::hotList44On())
             return sotc_decomp::recompiled(kGsReg)(rdram, ctx, runtime);
-        SET_GPR_U64(ctx, 7, sx(kPacket));
-        uint32_t record = READ32(kPacket);
-        SET_GPR_U64(ctx, 3, sx(record));
-        const uint32_t closed = READ32(record + 0x1Cu);
-        SET_GPR_U64(ctx, 6, sx(record + 0xCu));
-        if (closed != 0u)
-        {
-            SET_GPR_U64(ctx, 2, sx(closed));
-            sotc_decomp::returnTo(ctx);
-            return;
-        }
-        uint32_t at = READ32(record + 0xCu);
-        WRITE64(at, GPR_U64(ctx, 5));
-        WRITE32(record + 0xCu, at + 8u);
-        record = READ32(kPacket) + 0xCu;
-        SET_GPR_U64(ctx, 3, sx(record));
-        at = READ32(record);
-        WRITE64(at, GPR_U64(ctx, 4));
-        SET_GPR_U64(ctx, 2, sx(at + 8u));
-        WRITE32(record, at + 8u);
-        sotc_decomp::returnTo(ctx);
+        sotc_decomp::gsRegWrite(rdram, ctx);
     }
 }
 

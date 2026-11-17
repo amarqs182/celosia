@@ -457,7 +457,7 @@ namespace coll115
         float ax, ay, az, dx, dy, dz, bx, by, bz, invLen2, eps;
         uint32_t mode;
     };
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
     // ARMv7 NEON (GCC leaves generic float vectors to the VFP, lane by lane,
     // without -funsafe-math-optimizations); flush-to-zero changes nothing at
     // these margins.

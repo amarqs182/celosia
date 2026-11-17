@@ -154,6 +154,7 @@ namespace native_renderer
     // perFrame: made again every frame (skinned, 2D, particles...): kept only
     // for this frame (one shared buffer per frame on GL).
     void uploadMesh(uint64_t id, const Vertex *vertices, uint32_t count, bool perFrame = false);
+    void uploadIndexedMesh(uint64_t id, const Vertex *vertices, uint32_t count, const uint32_t *indices, uint32_t indexCount);
     // A per-frame mesh written in place (no copy): room for `count` vertices,
     // then commitFrameMesh(id, n) keeps the first n as uploadMesh(id, ...,
     // n, true) would. The room is valid until that commit; no other renderer
@@ -213,6 +214,7 @@ namespace native_renderer
     {
         uint64_t ids[2] = {0, 0};
         uint32_t idCount = 0;
+        bool priority = false; // high-priority (e.g. terrain layers 1-3) queued ahead of normal props
         virtual ~AsyncWork() = default;
         virtual void work() = 0;
         virtual void finish() = 0;
@@ -423,6 +425,8 @@ namespace native_renderer
     // Returns once every frame handed to a backend's own thread is drawn
     // (the recorder's replay reads each picture back right after).
     void finishFrames();
+    // Stops any backend worker thread cleanly before destroying the GL context.
+    void shutdown();
 
     // Shown instead of the emulated picture (the emulator's present path asks).
     void setShown(bool shown);

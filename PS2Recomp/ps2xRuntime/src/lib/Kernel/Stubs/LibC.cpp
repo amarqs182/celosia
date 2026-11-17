@@ -1,5 +1,6 @@
 #include "Common.h"
 #include "runtime/ps2_diag.h"
+#include "runtime/ee_scheduler.h"
 #include "LibC.h"
 #include "ps2_log.h"
 #include "runtime/ps2_fast_paths.h"
@@ -647,8 +648,9 @@ namespace ps2_stubs
                 }
                 if (count <= kMaxPrintfLogs)
                 {
-                    RUNTIME_LOG("PS2 printf: " << logLine);
-                    RUNTIME_LOG(std::flush);
+                    std::fprintf(stderr, "[ee:th] printf id=%d text=%s\n",
+                                 runtime ? runtime->eeScheduler().currentThreadId() : -1,
+                                 logLine.c_str());
                 }
                 else if (count == kMaxPrintfLogs + 1)
                 {

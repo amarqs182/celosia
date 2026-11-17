@@ -863,6 +863,12 @@ namespace decomp_hot46j
         // jal `target` at `site` (ra site + 8, the frame's sp).
         void call(uint32_t target, uint32_t site)
         {
+            uint32_t res = 0u;
+            if (target == kGetLayoutClass && !ps2_worker::isShell(runtime) && sotc_decomp::layoutClassPlainOnly(rdram, GPR_U32(ctx, 4), res))
+            {
+                SET_GPR_S32(ctx, 2, static_cast<int32_t>(res));
+                return;
+            }
             sync();
             callGuest(rdram, ctx, runtime, target, site + 8u, sp);
         }

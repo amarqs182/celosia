@@ -1059,7 +1059,7 @@ namespace decomp_skeleton
             return out;
         }
         inline bool same(__m128 a, __m128 b) { return std::memcmp(&a, &b, 16) == 0; }
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
         // vuFree (the Vita): ARMv7 NEON flushes denormal operands and results
         // to signed zero itself, so a VU0 op's clamp (ps2VuResult, Inf / NaN
         // to +-FLT_MAX) changes the bits of a result of clamped operands only
@@ -1337,7 +1337,7 @@ namespace decomp_skeleton
                 __m128 tw;
                 {
                     const __m128 c11 = vu::clamp(x), c12 = vu::clamp(vf12m);
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
                     McqOut mo = mcq<true>(c11, c12);
                     if (__builtin_expect(!finite(vmaxq_u32(mag(mo.tw), mag(mo.s13))) || chk, 0))
                         mo = mcqChecked(c11, c12, chk);
@@ -1387,7 +1387,7 @@ namespace decomp_skeleton
                     P = PS2_VMUL(vf5, vf6);
                     stq(sp + 0x40u, selW(one4, P)); // vf5's x, y, z and the 1.0 at sp + 0x4c
                 };
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
                 ColOut co;
                 {
                     uint32x4_t fm;

@@ -135,7 +135,16 @@ namespace decomp_hot46g
         void arg(int r, uint32_t v) const { SET_GPR_S32(ctx, r, static_cast<int32_t>(v)); }
         void arg64(int r, uint64_t v) const { SET_GPR_U64(ctx, r, v); }
         uint64_t v0() const { return GPR_U64(ctx, 2); }
-        void call(uint32_t target, uint32_t ra) const { callGuest(rdram, ctx, runtime, target, ra, sp); }
+        void call(uint32_t target, uint32_t ra) const
+        {
+            uint32_t res = 0u;
+            if (target == kGetLayoutClass && !ps2_worker::isShell(runtime) && sotc_decomp::layoutClassPlainOnly(rdram, GPR_U32(ctx, 4), res))
+            {
+                SET_GPR_S32(ctx, 2, static_cast<int32_t>(res));
+                return;
+            }
+            callGuest(rdram, ctx, runtime, target, ra, sp);
+        }
         void setC(bool c) const { ctx->fcr31 = c ? (ctx->fcr31 | 0x800000u) : (ctx->fcr31 & ~0x800000u); }
 
         // sd / ld of the saved registers, swc1 / lwc1 of the saved floats.

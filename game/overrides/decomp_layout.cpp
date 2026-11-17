@@ -204,7 +204,7 @@ namespace decomp_layout
             const uint32_t b = a & PS2_RAM_MASK;
             return b <= PS2_RAM_SIZE - bytes ? rdram + b : nullptr;
         }
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
         // Clamp-free (ARMv7 NEON only: denormals flushed by the unit).
         LAYOUT_FI V applyF(const V *r, V c)
         {
@@ -394,14 +394,14 @@ namespace decomp_layout
             {
                 const fast::Q sq{{s.r[0], s.r[1], s.r[2], s.r[3]}};
                 const fast::Q sc = fast::clampQ(sq);
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
                 const uint32x4_t base = fast::amaxQ(vdupq_n_u32(0u), sq);
                 const bool check = sotc_decomp::fastCheckOn();
 #endif
                 for (int32_t i = 0; i < count; ++i, po += 0x40, ps += 0x40, pl += 0x40)
                 {
                     const fast::Q a = fast::ldm(ps), b = fast::ldm(pl);
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
                     if (__builtin_expect(fast::small(fast::amaxQ(fast::amaxQ(base, a), b)), 1))
                     {
                         // The rows' clamps change nothing either (inputs
@@ -441,7 +441,7 @@ namespace decomp_layout
             const fast::InvK k = fast::invK(vf0);
             const fast::Q sq{{s.r[0], s.r[1], s.r[2], s.r[3]}};
             const fast::Q sc = fast::clampQ(sq);
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
             const uint32x4_t base = fast::amaxQ(vdupq_n_u32(0u), sq);
             const bool check = sotc_decomp::fastCheckOn();
 #endif
@@ -454,7 +454,7 @@ namespace decomp_layout
                 // The inverse's rows as mul clamps them: its 3x3 clamped,
                 // r[3] a VU result.
                 rc[3] = inv.v[3];
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
                 const fast::Q rq{{rc[0], rc[1], rc[2], rc[3]}};
                 if (__builtin_expect(fast::small(fast::amaxQ(fast::amaxQ(base, rq), b)), 1))
                 {

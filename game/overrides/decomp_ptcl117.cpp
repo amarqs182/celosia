@@ -40,12 +40,19 @@
 
 #include "ps2_runtime_macros.h"
 #include "runtime/ps2_memory.h"
+#include "runtime/native_tuning.h"
+#include "runtime/native_renderer.h"
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <vector>
+
+namespace sotc_native
+{
+    bool nativeDraws();
+}
 
 namespace decomp_ptcl117
 {
@@ -806,6 +813,8 @@ namespace decomp_ptcl117
 
     void list(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        if (sotc_native::nativeDraws() && !native_renderer::tuning().particles)
+            return returnTo(ctx);
         if (on() && checkDue(1))
         {
             const uint32_t sp0 = GPR_U32(ctx, 29);
@@ -823,6 +832,8 @@ namespace decomp_ptcl117
     // ---- disp_particle_geodisp (0x113f6a8; a1 the geodisp) -------------
     void geodispDraw(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        if (sotc_native::nativeDraws() && !native_renderer::tuning().particles)
+            return returnTo(ctx);
         const uint32_t gd = GPR_U32(ctx, 5);
         const uint32_t sp0 = GPR_U32(ctx, 29), sp = sp0 - 0x20u;
         if (!on() || (sp & 0xFu) != 0u || !ram(sp, 0x20u) || (gd != 0u && !ram(gd, 0x110u)))

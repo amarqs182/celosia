@@ -134,6 +134,7 @@ namespace decomp_tex64
     bool g_started = false, g_pending = false;
     int g_verify = -1;
     uint64_t g_frame0 = 0;
+    uint32_t g_validHead = 0u, g_validLast = 0u, g_validMove = ~0u;
     // Stats (the game thread's).
     uint64_t g_jobs = 0, g_offNodes = 0, g_bails = 0, g_waits = 0, g_waitUs = 0, g_workUs = 0, g_refused = 0;
     std::unordered_map<int, uint64_t> g_joinSites;
@@ -525,6 +526,8 @@ namespace decomp_tex64
     template <int I>
     void wrap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        if constexpr (I == 3 || I == 4 || I == 7 || I == 8 || I == 9)
+            g_validHead = g_validLast = 0u;
         join(I + 1);
         g_orig[I](rdram, ctx, runtime);
     }

@@ -137,7 +137,7 @@ inline void clear_runtime_log_entries()
 #define RUNTIME_LOG(x) do {} while(0)
 #endif
 
-#if AGRESSIVE_LOGS
+#if 0 && AGRESSIVE_LOGS
 
 namespace ps2_log
 {

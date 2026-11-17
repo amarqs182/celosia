@@ -46,6 +46,7 @@
 // each compare. SOTC_MOTION=0 (or a jal site naming another function, checked
 // once): the recompiled code.
 #include "sotc_decomp.h"
+#include "sotc_pf141.h"
 #include "runtime/ps2_diag.h"
 
 #include "ps2_runtime_macros.h"
@@ -337,8 +338,52 @@ namespace decomp_charageo
         }
     }
     void execCharaGeometryBody(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    // Round 141 (pf141): the character's object and class lines and the pose buffers its class points to, noted
+    // for the next frame's helper (prefetch only; nothing here changes what the geometry reads or writes).
+    __attribute__((noinline)) void note141(uint8_t *rdram, uint32_t obj)
+    {
+        const Ram r{rdram};
+        const uint32_t c = classOf(r, obj);
+        if (c == 0u || obj >= 0x01FF0000u)
+            return;
+        pf141::noteGuest(rdram, obj, 0x1210u);
+        // the link list (charaLinks: count +0xc, 28-byte entries from +0x10), the 0x80-byte slots (+0x30c, +0x3fc of
+        // them), the motion slot's record
+        if (const uint32_t L = r.u32(c + 0x10ECu); L >= 0x1000u && L < 0x01FF0000u)
+        {
+            const int32_t k = r.s32(L + 0xCu);
+            pf141::noteGuest(rdram, L, 0x10u + static_cast<uint32_t>(k > 0 && k <= 512 ? k : 0) * 28u);
+        }
+        if (const int32_t k = r.s32(c + 0x3FCu); k > 0 && k <= 64)
+            pf141::noteGuest(rdram, r.u32(c + 0x30Cu), static_cast<uint32_t>(k) * 0x80u);
+        pf141::noteGuest(rdram, r.u32(c + 0x1C0u), 0x80u);
+        const int32_t n = r.s16(c + 0x1B4u);
+        if (n <= 0 || n > 256)
+            return;
+        const uint32_t m = static_cast<uint32_t>(n);
+        for (uint32_t off : {0x158u, 0x15Cu, 0x160u, 0x2D8u, 0x310u, 0x314u})
+            pf141::noteGuest(rdram, r.u32(c + off), m * 0x40u);
+        for (uint32_t off : {0x154u, 0x2E8u})
+            pf141::noteGuest(rdram, r.u32(c + off), m * 0x10u);
+        const uint32_t skel = r.u32(c + 0x358u);
+        if (skel == 0u || skel >= 0x01FF0000u)
+            return;
+        pf141::noteGuest(rdram, skel, 0x40u);
+        pf141::noteGuest(rdram, r.u32(skel + 8u), m * 0x40u);
+        // the IK node records (0xd0 each) and the per-node weights / rates
+        const int32_t ik = r.s32(skel + 0x20u), w = r.s32(skel + 4u);
+        if (ik > 0 && ik <= 256)
+            pf141::noteGuest(rdram, r.u32(c + 0x31Cu), static_cast<uint32_t>(ik) * 0xD0u);
+        if (w > 0 && w <= 1024)
+        {
+            pf141::noteGuest(rdram, r.u32(c + 0x320u), static_cast<uint32_t>(w) * 4u);
+            pf141::noteGuest(rdram, r.u32(c + 0x324u), static_cast<uint32_t>(w) * 4u);
+        }
+    }
     void execCharaGeometry(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        if (__builtin_expect(pf141::g_cur != nullptr, 0))
+            note141(rdram, GPR_U32(ctx, 4));
         rest81::nameCharacter(rdram, ctx, runtime, GPR_U32(ctx, 4));
         if (__builtin_expect(geo80::every() == 0u, 1) || geo80::g_depth != 0)
             return execCharaGeometryBody(rdram, ctx, runtime);
@@ -367,6 +412,16 @@ namespace decomp_charageo
                 return sotc_decomp::callGuest(rdram, ctx, runtime, target, site + 8u, sp);
             const uint64_t t0 = geo80::nowUs();
             sotc_decomp::callGuest(rdram, ctx, runtime, target, site + 8u, sp);
+            auto &c = geo80::g_objs[obj].callee[target];
+            c.first += geo80::nowUs() - t0;
+            ++c.second;
+        };
+        auto callDirect = [&](uint32_t site, uint32_t target, PS2Runtime::RecompiledFunction known)
+        {
+            if (__builtin_expect(geo80::g_cur == 0u, 1))
+                return sotc_decomp::callNative(rdram, ctx, runtime, target, known, site + 8u, sp);
+            const uint64_t t0 = geo80::nowUs();
+            sotc_decomp::callNative(rdram, ctx, runtime, target, known, site + 8u, sp);
             auto &c = geo80::g_objs[obj].callee[target];
             c.first += geo80::nowUs() - t0;
             ++c.second;
@@ -750,7 +805,7 @@ namespace decomp_charageo
                 SET_GPR_U32(ctx, 8, s4);
                 setF(14, f21);
                 setF(15, f20);
-                call(0x010BFCBCu, 0x010D9FC0u);
+                callDirect(0x010BFCBCu, 0x010D9FC0u, &rest81::rootDynamics);
             }
 
             // ---- 4 ----
@@ -771,7 +826,7 @@ namespace decomp_charageo
             SET_GPR_U32(ctx, 5, s2);
             SET_GPR_U32(ctx, 6, s4);
             setF(12, f21);
-            call(0x010BFD94u, 0x010BB258u);
+            callDirect(0x010BFD94u, 0x010BB258u, &decomp_nodeinterp::calcNodeInterp);
             // stored with sw and loaded back with lw: the low word, sign-extended
             const uint64_t interp = static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(GPR_U32(ctx, 2))));
             r.put32(sp + 0x78u, GPR_U32(ctx, 2));
@@ -985,7 +1040,7 @@ namespace decomp_charageo
                 SET_GPR_U32(ctx, 5, sphereKind);
                 setF(12, f21);
                 setF(13, f20);
-                call(0x010C0248u, 0x010DAE30u);
+                callDirect(0x010C0248u, 0x010DAE30u, &decomp_hot47c::rootDynamicsAfter);
                 r.put32(s0 + 0x438u, sphereKind);
             }
             if (gaze)
@@ -1002,7 +1057,7 @@ namespace decomp_charageo
             SET_GPR_U32(ctx, 7, r.u32(s0 + 0x2E8u));
             // (not with sub geometries: they change the pose's matrices in place)
             if (!native_renderer::tuning().sacFarChara || subgeo || !farchara::skip(r, s0, r.u32(s0 + 0x158u), r.u32(s0 + 0x154u)))
-                call(0x010C0284u, 0x010B1D60u);
+                callDirect(0x010C0284u, 0x010B1D60u, &decomp_skeleton::motionMatrix);
             if (subgeo)
             {
                 const uint32_t sites[2][3] = {{0x010C0294u, 0x010C029Cu, 0x010C02B4u}, {0x010C02BCu, 0x010C02C0u, 0x010C02DCu}};
@@ -1037,7 +1092,7 @@ namespace decomp_charageo
             auto layout = [&](uint32_t updateSite, uint32_t bc718Site)
             {
                 SET_GPR_U32(ctx, 4, s0);
-                call(updateSite, 0x010F26D0u);
+                callDirect(updateSite, 0x010F26D0u, &decomp_layout::updateLayoutClassGeometry);
                 uint8_t f1bc = r.u8(s0 + 0x1BCu);
                 if ((f1bc & 8u) != 0u && r.s16(s0 + 0x1B4u) > 0 && sotc_decomp::pose82On() && pose82::boneProducts(rdram, r.u32(s0 + 0x160u), r.u32(s0 + 0x15Cu), r.u32(s0 + 0x2D8u), r.s16(s0 + 0x1B4u)))
                     f1bc = r.u8(s0 + 0x1BCu);
@@ -1080,7 +1135,7 @@ namespace decomp_charageo
                 if (f1bc & 1u)
                     r.putq(s0 + 0x450u, r.q(r.u32(s0 + 0x154u)));
                 SET_GPR_U32(ctx, 4, s0);
-                call(bc718Site, 0x010BC718u);
+                callDirect(bc718Site, 0x010BC718u, &decomp_hot47a::childNodes);
             };
             layout(0x010C031Cu, 0x010C0404u);
             if (r.s8(s0 + 0x10A0u) != 0)
@@ -1118,7 +1173,10 @@ namespace decomp_charageo
 
         // ---- 8 ----
         SET_GPR_U32(ctx, 4, obj);
-        call(0x010C0580u, 0x010F1A20u);
+        if (__builtin_expect(geo80::g_cur == 0u, 1))
+            sotc_decomp::layoutClassFast(rdram, ctx, runtime, obj, 0x010C0588u, sp);
+        else
+            call(0x010C0580u, 0x010F1A20u);
         const uint32_t layoutClass = GPR_U32(ctx, 2);
         SET_GPR_U64(ctx, 20, GPR_U64(ctx, 2)); // s4 (daddu)
         if (r.u32(layoutClass + 0x180u) != 0u)
@@ -1158,7 +1216,7 @@ namespace decomp_charageo
                         setF(13, f20);
                         SET_GPR_U64(ctx, 5, a1);
                         SET_GPR_U32(ctx, 6, a2);
-                        call(site, 0x01137A68u);
+                        callDirect(site, 0x01137A68u, &char122::cloth::dynamics);
                     };
                     cloth(0x010C0648u, 1u, 0u);
                     SET_GPR_U32(ctx, 4, obj);
@@ -1200,7 +1258,7 @@ namespace decomp_charageo
                 setF(13, f20);
                 SET_GPR_U32(ctx, 6, s0c);
                 SET_GPR_U32(ctx, 4, obj);
-                call(0x010C06F4u, 0x01137A68u);
+                callDirect(0x010C06F4u, 0x01137A68u, &char122::cloth::dynamics);
             }
         }
         // the anime tables, near enough

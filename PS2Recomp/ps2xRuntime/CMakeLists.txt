@@ -13,6 +13,9 @@ option(PS2X_ENABLE_SCCACHE "Use sccache as compiler launcher when available" ON)
 option(PS2X_ENABLE_RUNTIME_LOGS "Enable PS2 runtime logs" ON)
 option(PS2X_ENABLE_AGRESSIVE_LOGS "Enable very verbose/agressive PS2 runtime logs" ON)
 option(PS2X_ENABLE_IOP_RPC_TRACE "Log unhandled IOP/SIF RPC trace suggestions" ON)
+option(PS2X_ENABLE_GUEST_READ_WATCH "Enable guest RAM load watch map checks" ON)
+option(PS2X_ENABLE_GUEST_WRITE_TRACE "Enable guest RAM write trace checks" ON)
+option(PS2X_LINUX_RELEASE "Linux/aarch64: release build (SOTC_RELEASE=1 diagnostics compiled out)" OFF)
 option(PS2X_STRICT_RETURN_DIAGNOSTICS "Route generated JR $ra returns through runtime branch diagnostics" OFF)
 option(PS2X_SHOW_WINDOWS_CONSOLE "Show a console window for ps2EntryRunner on Windows release builds" ON)
 option(PS2X_ENABLE_DEBUG_UI "Build the desktop runtime debug UI" ON)
@@ -64,6 +67,12 @@ if(ANDROID)
     set(PS2X_IS_ANDROID ON)
 endif()
 
+set(PS2X_IS_LINUX OFF)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(PS2X_IS_LINUX ON)
+endif()
+
 option(PS2X_VITA_CREATE_PACKAGE "Create Vita eboot/vpk targets" ON)
 set(PS2X_VITA_APP_NAME "PS2 Retro X" CACHE STRING "Display name for the Vita bubble")
 set(PS2X_VITA_TITLEID "RANJ00001" CACHE STRING "9-character Vita title id")
@@ -100,7 +109,7 @@ else()
     )
     FetchContent_MakeAvailable(raylib)
 
-    if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_ANDROID)
+    if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_ANDROID AND NOT PS2X_IS_LINUX)
         FetchContent_Declare(
             imgui
             GIT_REPOSITORY https://github.com/ocornut/imgui.git
@@ -284,6 +293,28 @@ elseif(PS2X_IS_VITA)
         c
         pthread
     )
+elseif(PS2X_IS_LINUX)
+    # Linux (incl. AArch64): the raylib subset on SDL2 (window, input,
+    # audio) and GLES3 (drawing, textures) — platform/linux, mirrored from
+    # the Vita's SDL2 shim. The raylib FetchContent above still runs (it is
+    # the non-Vita branch); the shim resolves the subset instead of stock
+    # raylib, so the stock library is not linked here.
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(PS2X_LINUX_SDL2 REQUIRED IMPORTED_TARGET GLOBAL sdl2)
+
+    find_library(PS2X_LINUX_GLES_LIBRARY NAMES GLESv3 GLESv2 GLES REQUIRED)
+    find_library(PS2X_LINUX_EGL_LIBRARY NAMES EGL REQUIRED)
+
+    add_library(ps2x_linux_raylib STATIC "${CMAKE_CURRENT_SOURCE_DIR}/platform/linux/raylib_linux.cpp")
+    target_include_directories(ps2x_linux_raylib PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/platform/linux")
+    target_link_libraries(ps2x_linux_raylib PUBLIC
+        PkgConfig::PS2X_LINUX_SDL2
+        ${PS2X_LINUX_GLES_LIBRARY}
+        ${PS2X_LINUX_EGL_LIBRARY}
+        m
+    )
+    target_compile_definitions(ps2_host_backend INTERFACE PLATFORM_LINUX PS2X_LINUX_SDL2_SHIM=1)
+    target_link_libraries(ps2_host_backend INTERFACE ps2x_linux_raylib)
 else()
     target_link_libraries(ps2_host_backend INTERFACE raylib)
 
@@ -455,7 +486,12 @@ add_library(ps2_runtime STATIC
 # SOTC_NATIVE_GL=1, the Vita through vitaGL).
 target_sources(ps2_runtime PRIVATE src/lib/native/native_renderer.cpp src/lib/native/native_renderer_gl.cpp src/lib/native/native_recorder.cpp)
 # The scene recorder's blocks are zlib-compressed (the Vita SDK has libz).
-target_link_libraries(ps2_runtime PUBLIC z)
+find_package(ZLIB QUIET)
+if(TARGET ZLIB::ZLIB)
+    target_link_libraries(ps2_runtime PUBLIC ZLIB::ZLIB ${CMAKE_DL_LIBS})
+else()
+    target_link_libraries(ps2_runtime PUBLIC z ${CMAKE_DL_LIBS})
+endif()
 
 # GPU GS rasterizer (Metal) on macOS, the default there (PS2X_GS_GPU=0 = CPU).
 if(NOT APPLE)
@@ -468,26 +504,46 @@ if(APPLE)
     target_compile_definitions(ps2_runtime PUBLIC PS2X_HAVE_METAL=1)
 endif()
 
-if(PS2X_ENABLE_RUNTIME_LOGS)
+if(PS2X_ENABLE_RUNTIME_LOGS AND NOT PS2X_LINUX_RELEASE)
     target_compile_definitions(ps2_runtime PUBLIC
         PS2_RUNTIME_LOGS=1
     )
 endif()
 
-if(PS2X_ENABLE_AGRESSIVE_LOGS)
+if(PS2X_ENABLE_AGRESSIVE_LOGS AND NOT PS2X_LINUX_RELEASE)
     target_compile_definitions(ps2_runtime PUBLIC
         AGRESSIVE_LOGS=1
         PS2_FUNCTION_LOG_TRACKER=1
     )
 endif()
 
-if(PS2X_ENABLE_IOP_RPC_TRACE)
+if(PS2X_ENABLE_IOP_RPC_TRACE AND NOT PS2X_LINUX_RELEASE)
     target_compile_definitions(ps2_runtime PUBLIC
         PS2X_ENABLE_IOP_RPC_TRACE=1
     )
 else()
     target_compile_definitions(ps2_runtime PUBLIC
         PS2X_ENABLE_IOP_RPC_TRACE=0
+    )
+endif()
+
+if(PS2X_ENABLE_GUEST_READ_WATCH AND NOT PS2X_LINUX_RELEASE)
+    target_compile_definitions(ps2_runtime PUBLIC
+        PS2X_GUEST_READ_WATCH=1
+    )
+else()
+    target_compile_definitions(ps2_runtime PUBLIC
+        PS2X_GUEST_READ_WATCH=0
+    )
+endif()
+
+if(PS2X_ENABLE_GUEST_WRITE_TRACE AND NOT PS2X_LINUX_RELEASE)
+    target_compile_definitions(ps2_runtime PUBLIC
+        PS2X_GUEST_WRITE_TRACE=1
+    )
+else()
+    target_compile_definitions(ps2_runtime PUBLIC
+        PS2X_GUEST_WRITE_TRACE=0
     )
 endif()
 
@@ -518,6 +574,31 @@ foreach(runner_dir IN LISTS PS2X_RUNNER_DIRS)
     file(GLOB runner_dir_files CONFIGURE_DEPENDS "${runner_dir}/*.cpp")
     list(APPEND RUNNER_SRC_FILES ${runner_dir_files})
 endforeach()
+
+# Game overrides (game/overrides, next to PS2Recomp): the Vita and Windows
+# builds pass this directory through PS2X_RUNNER_DIRS, but the
+# linux-aarch64 (R36S) build was configured without it, so none of the
+# *_overrides.cpp files -- including sotc_overrides.cpp (the idle wait, the
+# host clock sync) -- were compiled there. Add the directory to the runner
+# sources (and to the include path below) whenever a non-Vita build did
+# not already list it. Vita always passes it, so it is left alone.
+if(NOT PS2X_IS_VITA)
+    set(PS2X_GAME_OVERRIDES_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../game/overrides")
+    if(EXISTS "${PS2X_GAME_OVERRIDES_DIR}")
+        # PS2X_RUNNER_DIRS may spell the directory differently (e.g.
+        # /d/celosia_upstream/game/overrides); normalise before testing so
+        # the files are not added twice.
+        set(PS2X_RUNNER_DIRS_NORM "${PS2X_RUNNER_DIRS}")
+        string(REPLACE "\\" "/" PS2X_RUNNER_DIRS_NORM "${PS2X_RUNNER_DIRS_NORM}")
+        if(NOT PS2X_RUNNER_DIRS_NORM MATCHES "game/overrides")
+            file(GLOB PS2X_GAME_OVERRIDES_SRC
+                 CONFIGURE_DEPENDS "${PS2X_GAME_OVERRIDES_DIR}/*.cpp")
+            list(APPEND RUNNER_SRC_FILES ${PS2X_GAME_OVERRIDES_SRC})
+            list(REMOVE_DUPLICATES RUNNER_SRC_FILES)
+            list(APPEND PS2X_RUNNER_DIRS "${PS2X_GAME_OVERRIDES_DIR}")
+        endif()
+    endif()
+endif()
 
 set(RUNNER_MAIN_CPP "${CMAKE_CURRENT_SOURCE_DIR}/src/runner/main.cpp")
 set(ROOT_MAIN_CPP "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp")
@@ -552,6 +633,12 @@ endif()
 # translation unit of its own.
 foreach(PS2X_SOURCE IN LISTS RUNNER_SRC_FILES)
     if(PS2X_SOURCE MATCHES "/overrides/lean_[^/]*\\.cpp$")
+        set_source_files_properties(${PS2X_SOURCE} PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
+    endif()
+    # Decomp D2: the lifted batches (decomp_liftd*_NN.cpp, D4: decomp_liftalt_NN.cpp; tools/lift_d1.py) are large and share namespace lift_d1:
+    # each a translation unit of its own (a guest function named like a libm one, D1's fabsf, stays out of the
+    # other batches; they build in parallel).
+    if(PS2X_SOURCE MATCHES "/overrides/decomp_lift(d[0-9]+|alt)_[0-9]+\\.cpp$")
         set_source_files_properties(${PS2X_SOURCE} PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
     endif()
     # The second set (lean_part_tN.cpp) defines PS2X_EE_TRUST_FINITE before
@@ -599,13 +686,23 @@ target_include_directories(ps2_runtime PUBLIC
 )
 
 target_link_libraries(ps2_runtime PUBLIC ps2_host_backend ffmpeg ps2_iop)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/meshoptimizer/CMakeLists.txt")
+    set(MESHOPT_BUILD_DEMO OFF CACHE BOOL "" FORCE)
+    set(MESHOPT_BUILD_GLTFPACK OFF CACHE BOOL "" FORCE)
+    set(MESHOPT_INSTALL OFF CACHE BOOL "" FORCE)
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/meshoptimizer" "${CMAKE_CURRENT_BINARY_DIR}/meshoptimizer" EXCLUDE_FROM_ALL)
+    target_link_libraries(ps2_runtime PUBLIC meshoptimizer)
+    target_include_directories(ps2_runtime PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/meshoptimizer/src")
+endif()
 target_link_libraries(ps2EntryRunner
     PRIVATE
     ps2_runtime
 )
 target_include_directories(ps2EntryRunner PRIVATE ${PS2X_RUNNER_DIRS})
 
-if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_VITA AND NOT PS2X_IS_ANDROID)
+# Linux: the debug UI needs the stock raylib (rlImGui), which the SDL2/GLES
+# shim does not provide yet (PLATFORM_LINUX; TODO r36s).
+if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_VITA AND NOT PS2X_IS_ANDROID AND NOT PS2X_IS_LINUX)
     target_sources(ps2EntryRunner PRIVATE
         src/lib/ps2_debug_panel.cpp
     )
@@ -867,6 +964,91 @@ if(PS2X_IS_VITA)
         SKIP_UNITY_BUILD_INCLUSION TRUE
         COMPILE_OPTIONS "-fno-lto"
     )
+endif()
+
+if(PS2X_IS_LINUX AND PS2X_IS_AARCH64_TARGET)
+    set(PS2X_LINUX_GAME_OPT "-Os" CACHE STRING "Optimization level of cold recompiled game code on Linux/aarch64 (-Os, -O2, or -O3)")
+    target_compile_options(ps2_runtime PRIVATE -O3)
+    target_compile_options(ps2EntryRunner PRIVATE ${PS2X_LINUX_GAME_OPT})
+
+    set(PS2X_LINUX_OVERRIDE_OPTS -O3)
+    if(PS2X_LINUX_RELEASE)
+        message(STATUS "Linux/aarch64: release build (SOTC_RELEASE=1)")
+        list(APPEND PS2X_LINUX_OVERRIDE_OPTS -DSOTC_RELEASE=1)
+        foreach(PS2X_LINUX_TARGET IN ITEMS ps2_runtime ps2_iop)
+            if(TARGET ${PS2X_LINUX_TARGET})
+                target_compile_definitions(${PS2X_LINUX_TARGET} PRIVATE SOTC_RELEASE=1)
+            endif()
+        endforeach()
+    endif()
+
+    set(PS2X_LINUX_PGO "OFF" CACHE STRING "Linux/aarch64 PGO mode: OFF, gen, or collected profile directory")
+    set(PS2X_LINUX_PGO_OPTS "")
+    file(TO_NATIVE_PATH "${CMAKE_BINARY_DIR}" PS2X_LINUX_PGO_PREFIX)
+    if(PS2X_LINUX_PGO STREQUAL "gen")
+        message(STATUS "Linux/aarch64: PGO generate (runtime + overrides + lean_part_t*, prefix=${PS2X_LINUX_PGO_PREFIX})")
+        set(PS2X_LINUX_PGO_OPTS
+            -fprofile-generate=/tmp/sotc_pgo/
+            -fprofile-prefix-path=${PS2X_LINUX_PGO_PREFIX}
+            -fprofile-update=single
+            -fno-profile-values
+            -fno-profile-reorder-functions)
+        list(APPEND PS2X_LINUX_OVERRIDE_OPTS ${PS2X_LINUX_PGO_OPTS})
+        target_compile_options(ps2_runtime PRIVATE ${PS2X_LINUX_PGO_OPTS})
+        target_link_options(ps2EntryRunner PRIVATE -fprofile-generate=/tmp/sotc_pgo/ -Wl,-u,__gcov_dump)
+    elseif(NOT PS2X_LINUX_PGO STREQUAL "" AND NOT PS2X_LINUX_PGO STREQUAL "OFF")
+        get_filename_component(PS2X_LINUX_PGO_USE_DIR "${PS2X_LINUX_PGO}" ABSOLUTE)
+        message(STATUS "Linux/aarch64: PGO use from ${PS2X_LINUX_PGO_USE_DIR} (prefix=${PS2X_LINUX_PGO_PREFIX})")
+        set(PS2X_LINUX_PGO_OPTS
+            -fprofile-use=${PS2X_LINUX_PGO_USE_DIR}
+            -fprofile-prefix-path=${PS2X_LINUX_PGO_PREFIX}
+            -fprofile-partial-training
+            -fprofile-correction
+            -fno-profile-values
+            -fno-profile-reorder-functions
+            -fno-vpt
+            -Wno-missing-profile
+            -Wno-coverage-mismatch)
+        list(APPEND PS2X_LINUX_OVERRIDE_OPTS ${PS2X_LINUX_PGO_OPTS})
+        target_compile_options(ps2_runtime PRIVATE ${PS2X_LINUX_PGO_OPTS})
+    endif()
+
+    get_target_property(PS2X_RUNNER_SOURCES ps2EntryRunner SOURCES)
+    foreach(PS2X_SOURCE IN LISTS PS2X_RUNNER_SOURCES)
+        if(PS2X_SOURCE MATCHES "/overrides/lean_part[0-9]+\\.cpp$")
+            set_source_files_properties(${PS2X_SOURCE} PROPERTIES COMPILE_OPTIONS "${PS2X_LINUX_GAME_OPT}")
+        elseif(PS2X_SOURCE MATCHES "/overrides/[^/]*\\.cpp$")
+            set_source_files_properties(${PS2X_SOURCE} PROPERTIES COMPILE_OPTIONS "${PS2X_LINUX_OVERRIDE_OPTS}")
+        elseif(PS2X_SOURCE MATCHES "vu1rec_[^/]*\\.cpp$")
+            set_source_files_properties(${PS2X_SOURCE} PROPERTIES COMPILE_OPTIONS "-O2")
+        endif()
+    endforeach()
+
+    option(PS2X_LINUX_FUNCTION_SECTIONS "Linux/aarch64: -ffunction-sections and hot-code order file" ON)
+    set(PS2X_LINUX_HOT_ORDER "" CACHE FILEPATH "Linux/aarch64: ld --section-ordering-file (empty: linux_hot_order.ld)")
+    if(PS2X_LINUX_FUNCTION_SECTIONS)
+        foreach(PS2X_LINUX_TARGET IN ITEMS ps2_runtime ps2EntryRunner ps2_iop)
+            if(TARGET ${PS2X_LINUX_TARGET})
+                target_compile_options(${PS2X_LINUX_TARGET} PRIVATE -ffunction-sections)
+            endif()
+        endforeach()
+        set(PS2X_LINUX_HOT_ORDER_FILE "${PS2X_LINUX_HOT_ORDER}")
+        if(NOT PS2X_LINUX_HOT_ORDER_FILE)
+            foreach(PS2X_RUNNER_DIR IN LISTS PS2X_RUNNER_DIRS)
+                if(EXISTS "${PS2X_RUNNER_DIR}/linux_hot_order.ld")
+                    set(PS2X_LINUX_HOT_ORDER_FILE "${PS2X_RUNNER_DIR}/linux_hot_order.ld")
+                endif()
+            endforeach()
+        endif()
+        if(NOT PS2X_LINUX_HOT_ORDER_FILE AND EXISTS "${CMAKE_SOURCE_DIR}/../game/overrides/linux_hot_order.ld")
+            set(PS2X_LINUX_HOT_ORDER_FILE "${CMAKE_SOURCE_DIR}/../game/overrides/linux_hot_order.ld")
+        endif()
+        if(PS2X_LINUX_HOT_ORDER_FILE AND EXISTS "${PS2X_LINUX_HOT_ORDER_FILE}")
+            message(STATUS "Linux/aarch64: hot-code order from ${PS2X_LINUX_HOT_ORDER_FILE}")
+            target_link_options(ps2EntryRunner PRIVATE "-Wl,--section-ordering-file=${PS2X_LINUX_HOT_ORDER_FILE}")
+            set_property(TARGET ps2EntryRunner APPEND PROPERTY LINK_DEPENDS "${PS2X_LINUX_HOT_ORDER_FILE}")
+        endif()
+    endif()
 endif()
 
 if(PS2X_IS_ANDROID)

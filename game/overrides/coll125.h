@@ -487,13 +487,30 @@ namespace coll125
         __builtin_prefetch(r + m.vtx[0]);
         __builtin_prefetch(r + m.vtx[1]);
         __builtin_prefetch(r + m.vtx[2]);
+        if (__builtin_expect(pf141::g_cur != nullptr && pf141::g_coll, 0))
+        {
+            // Round 141 (pfc141): the kept surface's values, for the next frame's helper.
+            pf141::noteGuest(r, m.plane, 16u);
+            pf141::noteGuest(r, m.bnd, 16u);
+            pf141::noteGuest(r, m.vtx[0], 16u);
+            pf141::noteGuest(r, m.vtx[1], 16u);
+            pf141::noteGuest(r, m.vtx[2], 16u);
+        }
     }
     inline unsigned validate138(const G g, const Meta &m, const Entry &e)
     {
-        prefetch138(g, m);
+        if (__builtin_expect(pf141::g_cur != nullptr && pf141::g_coll, 0))
+        {
+            const uint8_t *r = g.rdram;
+            pf141::noteGuest(r, m.plane, 16u);
+            pf141::noteGuest(r, m.bnd, 16u);
+            pf141::noteGuest(r, m.vtx[0], 16u);
+            pf141::noteGuest(r, m.vtx[1], 16u);
+            pf141::noteGuest(r, m.vtx[2], 16u);
+        }
         const uint32_t s3 = m.w1 & 0x00FFFFFFu, s1 = (m.w1 >> 24) & 0x7Fu;
-        uint32_t cls = 0u;
-        bool chain = g.u8(m.w0 + 8u) == m.type && layoutClass(g, m.w0, cls) && cls == m.cls;
+        // m.cls was derived from (m.w0, m.type) via static table 0x01194070, so unchanged m.type preserves cls.
+        bool chain = g.u8(m.w0 + 8u) == m.type;
         chain = chain & (g.u32(m.cls + 0x174u) == m.work) & (g.u32(m.cls + 0x184u) == m.rec);
         bool addr;
         if (m.indep)
@@ -667,7 +684,7 @@ namespace coll125
         const __m128 vf0 = ctx->vu0_vf[0];
         float d0, d1;
         const float zero = 0.0f;
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
         bool small = false;
         const uint64_t dBits = fast::planeDistances(e.n, vf0, a, b, small);
         if (__builtin_expect(!small, 0))
@@ -677,11 +694,11 @@ namespace coll125
         d0 = fast::asFloat(static_cast<uint32_t>(dBits));
         d1 = fast::asFloat(static_cast<uint32_t>(dBits >> 32));
 #else
-        const __m128 n = vu::clamp(e.n), vf0c = vu::clamp(vf0);
+        const __m128 n = vu::clamp(e.n), vf0p = vu::clamp(vf0);
         auto distance = [&](__m128 q)
         {
             const __m128 prod = vu::mulN(n, vu::clamp(q));
-            __m128 acc = vu::addN(vf0c, lane<0>(prod));
+            __m128 acc = vu::addN(vf0p, lane<0>(prod));
             acc = vu::addN(acc, lane<1>(prod));
             const __m128 d = vu::addN(acc, lane<2>(prod));
             return x(vu::addN(d, lane<3>(n)));
@@ -700,13 +717,23 @@ namespace coll125
             p = a;
         else
         {
-            const float t = ps2FpuDivide(ctx->fcr31, d1, span);
+            const float t = fastDiv(ctx->fcr31, d1, span);
             const __m128 vt = _mm_set1_ps(t);
             const __m128 oneMinus = PS2_VSUB(vf0, lane<0>(vt));
             const __m128 acc = PS2_VMUL(a, lane<0>(vt));
             p = setXyz(a, PS2_VADD(acc, PS2_VMUL(b, lane<3>(oneMinus))));
         }
         {
+#if defined(__aarch64__)
+            const float32x4_t es_v = vreinterpretq_f32_m128(e.s);
+            const float32x4_t p_v = vreinterpretq_f32_m128(p);
+            const float32x4_t dv = vsubq_f32(es_v, p_v);
+            const float32x4_t dv2 = vmulq_f32(dv, dv);
+            const float dist2 = vgetq_lane_f32(dv2, 0) + vgetq_lane_f32(dv2, 1) + vgetq_lane_f32(dv2, 2);
+            const float r2 = vgetq_lane_f32(es_v, 3);
+            if (dist2 > r2)
+                return 0;
+#else
             __m128 dv = PS2_VSUB(e.s, p);
             dv = setXyz(dv, PS2_VMUL(dv, dv));
             dv = setLane0(dv, PS2_VADD(dv, lane<1>(dv)));
@@ -715,6 +742,7 @@ namespace coll125
             std::memcpy(&r2, reinterpret_cast<const float *>(&e.s) + 3, 4);
             if (FPU_C_OLT_S(r2, dist2))
                 return 0;
+#endif
         }
         // u / v: the triangle's terms made once (triangleTerms), the crossing's side here, as ClipCollisionDB
         const __m128 vf0c = vu::clamp(vf0);
@@ -726,8 +754,8 @@ namespace coll125
             acc = vu::addN(acc, lane<1>(prod));
             return x(vu::addN(acc, lane<2>(prod)));
         };
-        u = ps2FpuDivide(ctx->fcr31, dot(e.c2, w), e.d2);
-        v = ps2FpuDivide(ctx->fcr31, dot(e.c1, w), e.d1);
+        u = fastDiv(ctx->fcr31, dot(e.c2, w), e.d2);
+        v = fastDiv(ctx->fcr31, dot(e.c1, w), e.d1);
         const float lo = -2e-05f;
         if (FPU_C_OLT_S(u, lo) || FPU_C_OLT_S(v, lo))
             return 0;
@@ -1055,7 +1083,7 @@ namespace coll125
             return -1;
         {
             // clipKeep's first test (its round 49 NEON form) on the kept plane
-#if PS2X_VU_NEON_A32
+#if PS2X_VU_NEON_FAST
             __m128 pa;
             std::memcpy(&pa, rdram + (point & ~0xFu), 16);
             bool small = false;

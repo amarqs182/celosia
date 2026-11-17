@@ -19,7 +19,10 @@ ROOT = os.path.join(os.path.dirname(__file__), '..')
 
 def load_functions():
     starts, entries = [], []
-    for line in open(os.path.join(ROOT, 'recomp/game/functions.csv')):
+    csv_path = os.path.join(ROOT, 'recomp/game/functions.csv')
+    if not os.path.exists(csv_path):
+        csv_path = os.path.join(ROOT, 'build/recomp/game/functions.csv')
+    for line in open(csv_path):
         p = line.strip().split(',')
         try:
             start, end = int(p[1], 16), int(p[2], 16)

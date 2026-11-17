@@ -15,11 +15,19 @@
 // frame the prologue makes. Objects with +0x194 set (the other path) go to
 // the recompiled code from the start.
 #include "sotc_decomp.h"
+#include "sotc_pf141.h"
 
 #include "ps2_runtime_macros.h"
 #include "runtime/ps2_memory.h"
+#include "runtime/native_tuning.h"
+#include "runtime/native_renderer.h"
 
 #include <cstring>
+
+namespace sotc_native
+{
+    bool nativeDraws();
+}
 
 namespace decomp_skinpal
 {
@@ -52,6 +60,12 @@ namespace decomp_skinpal
         }
         void putq(uint32_t a, __m128 v) const { std::memcpy(rdram + (a & PS2_RAM_MASK & ~0xFu), &v, 16); }
         void put64(uint32_t a, uint64_t v) const { std::memcpy(rdram + (a & PS2_RAM_MASK), &v, 8); }
+        uint64_t u64(uint32_t a) const
+        {
+            uint64_t v;
+            std::memcpy(&v, rdram + (a & PS2_RAM_MASK), 8);
+            return v;
+        }
     };
 
     void skinned(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -74,6 +88,14 @@ namespace decomp_skinpal
             const uint32_t last = static_cast<uint32_t>(bones - 1);
             if (!inRam(palette, ((last * 4u + ((last + 1u) >> 6)) << 4) + 0x40u))
                 return sotc_decomp::recompiled(kSkinned)(rdram, ctx, runtime);
+        }
+        if (__builtin_expect(pf141::g_cur != nullptr, 0) && bones)
+        {
+            // Round 141 (prefetch only): the bones and the palette, for the next frame's helper.
+            pf141::noteGuest(rdram, object, 0x1C0u);
+            pf141::noteGuest(rdram, bonesAt, static_cast<uint32_t>(bones) * 0x40u);
+            const uint32_t last = static_cast<uint32_t>(bones - 1);
+            pf141::noteGuest(rdram, palette, ((last * 4u + ((last + 1u) >> 6)) << 4) + 0x40u);
         }
 
         // The prologue: the frame and its saved registers.
@@ -118,6 +140,31 @@ namespace decomp_skinpal
         SET_GPR_U32(ctx, 8, camera);
         SET_GPR_U32(ctx, 7, bonesAt + i * 0x40u);
         SET_GPR_U32(ctx, 3, i);
+        if (sotc_native::nativeDraws() && !native_renderer::tuning().shadows)
+        {
+            const uint32_t geo = ram.u32(object + 0x144u);
+            if (inRam(geo, 0x268u))
+            {
+                if ((ram.u64(geo + 0x260u) & 0x20u) == 0u)
+                {
+                    SET_GPR_S32(ctx, 4, static_cast<int32_t>(geo));
+                    SET_GPR_S32(ctx, 5, static_cast<int32_t>(ram.u32(object + 0x160u)));
+                    const uint32_t dispTarget = sotc_decomp::jalTarget(rdram, 0x010F3E14u);
+                    if (dispTarget == 0x01097118u)
+                        sotc_decomp::callNative(rdram, ctx, runtime, dispTarget, &sotc_native::modelDispHook, 0x010F3E1Cu, frame);
+                    else
+                        sotc_decomp::callGuest(rdram, ctx, runtime, dispTarget, 0x010F3E1Cu, frame);
+                }
+                SET_GPR_S32(ctx, 2, static_cast<int32_t>(ram.u32(object + 0x144u)));
+                SET_GPR_U64(ctx, 16, ram.u64(frame));
+                SET_GPR_U64(ctx, 17, ram.u64(frame + 8u));
+                SET_GPR_U64(ctx, 18, ram.u64(frame + 0x10u));
+                SET_GPR_U64(ctx, 19, ram.u64(frame + 0x18u));
+                SET_GPR_U64(ctx, 31, ram.u64(frame + 0x20u));
+                SET_GPR_U32(ctx, 29, sp0);
+                return sotc_decomp::returnTo(ctx);
+            }
+        }
         // The rest: the recompiled code from 0x10f3df0 with v0 = the object (see above).
         SET_GPR_U32(ctx, 29, frame);
         SET_GPR_U32(ctx, 31, 0x010F3D20u);

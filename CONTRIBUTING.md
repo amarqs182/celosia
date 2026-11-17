@@ -53,9 +53,9 @@ git config --local core.hooksPath .githooks
 git config --get core.hooksPath
 ```
 
-The `.githooks/pre-push` hook blocks pushes to `HenryKun55/celosia` and direct pushes to `main`. It applies to normal Git pushes after installation. Do not bypass it with `--no-verify`.
+The `.githooks/pre-push` hook blocks pushes to `HenryKun55/celosia`. It applies to normal Git pushes after installation. Do not bypass it with `--no-verify`.
 
-The hook is a client-side safeguard, not a GitHub permission boundary. The pull-request destination must still be checked explicitly. The `Contribution policy` GitHub Action checks every PR that is opened against this fork and requires base `main`.
+The hook is a client-side safeguard, not a GitHub permission boundary. Direct maintainers commit and push directly to `amarqs182/celosia:main` instead of creating topic branches. External pull requests are still checked by the `Contribution policy` GitHub Action, which requires base `amarqs182/celosia:main`.
 
 ## Development lifecycle
 
@@ -85,18 +85,18 @@ Every change walks these steps, in this order:
 - `docs/<slug>` - documentation only.
 - `hotfix/<slug>` - an urgent production fix, branched from `main`.
 
-Use a short kebab-case slug that says what the branch does. Do not commit directly to `main`; create a topic branch for each change:
+Use `main` as the single working branch for maintainers (never force-push `main`):
 
 ```sh
 git switch main
 git pull --ff-only origin main
-git switch -c fix/short-description
 # make and test the change
 git add <files>
 git commit -m "fix: describe the change"
-git push -u origin HEAD
+git push origin main
 ```
 
+Do not create extra topic branches in this repository unless explicitly requested. External contributors without write access may still open PRs from their own fork targeting `amarqs182/celosia:main`.
 ## Building
 
 The bash script [`./celosia`](celosia) is the single entry point: `./celosia setup` extracts the disc and builds, while `build`, `recompile`, `run`, `vita` and `clean` do the obvious things; `./celosia help` lists every command and environment variable (`CELOSIA_DISC`, `CELOSIA_BUILD`, `CELOSIA_JOBS`, `CELOSIA_CMAKE_ARGS`, ...).
@@ -155,13 +155,13 @@ If GitHub shows `HenryKun55/celosia` as the base repository, stop. Do not submit
 
 ### Before submitting
 
-- [ ] The change is for this port of *Shadow of the Colossus* or this fork's maintenance.
-- [ ] The branch is not `main`.
-- [ ] No push remote points to `HenryKun55/celosia`.
-- [ ] The pull request base repository is `amarqs182/celosia`.
-- [ ] The pull request base branch is `main`.
-- [ ] Tests relevant to the change have been run, or the PR explains why they could not be run.
 
+
+- [ ] The change is for the R36S adaptation or this fork's maintenance.
+- [ ] No push remote points to `HenryKun55/celosia`.
+- [ ] Direct maintainer changes go straight to `amarqs182/celosia:main` (any external PR targets base `amarqs182/celosia:main`).
+- [ ] Tests relevant to the change have been run, or the summary explains why they could not be run.
+ 
 A pull request is also ready when:
 
 - `PS2Recomp` builds with no new warnings, `ps2x_tests` passes and the `ctest` `gs_cache` suites pass;

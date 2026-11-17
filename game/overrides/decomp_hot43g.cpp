@@ -53,8 +53,15 @@
 
 #include "ps2_runtime_macros.h"
 #include "runtime/ps2_memory.h"
+#include "runtime/native_tuning.h"
+#include "runtime/native_renderer.h"
 
 #include <cstring>
+
+namespace sotc_native
+{
+    bool nativeDraws();
+}
 
 namespace decomp_hot43g
 {
@@ -246,6 +253,8 @@ namespace decomp_hot43g
     {
         if (!sotc_decomp::hotListOn())
             return sotc_decomp::recompiled(kSelf)(rdram, ctx, runtime);
+        if (sotc_native::nativeDraws() && !native_renderer::tuning().reflections)
+            return sotc_decomp::returnTo(ctx);
 
         const uint32_t sp = GPR_U32(ctx, 29) - 0x1F0u;
         G g{rdram, ctx, runtime, sp};

@@ -65,7 +65,7 @@ cmd_extract() {
         say "unpacking $(basename "$iso")"
         local tmp=$BUILD/iso
         rm -rf "$tmp" && mkdir -p "$tmp"
-        (cd "$tmp" && unzip -q "$iso")
+        bsdtar -xf "$iso" -C "$tmp"
         iso=$(find "$tmp" -iname '*.iso' | head -1)
         [ -n "$iso" ] || die "no .iso inside the zip"
         ;;

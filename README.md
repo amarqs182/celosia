@@ -32,6 +32,7 @@ it talks to (DMA, IOP, SPU2) is reimplemented as host code.
 | New Game, intro, riding Agro, gameplay | ✅ |
 | Performance, Mac (M4 Pro) | 60 fps, drawn at 1536×1344 |
 | PS Vita | ✅ builds and runs (18–25 fps in Vita3K's intro); fidelity and speed in progress |
+| R36S (RK3326, aarch64) | ✅ builds and runs (`32.34 avg / 33.00 med FPS` on matched Phase A Shrine walk, `59.8–60.1 FPS` in menus/light scenes; GLES 3.2 via ARM libmali over SDL2 KMSDRM; [docs/R36S_PORT.md](docs/R36S_PORT.md), [docs/worklist.md](docs/worklist.md), [SOTC_OPTIMIZATION_LOG.md](SOTC_OPTIMIZATION_LOG.md)) |
 | Decompilation | started: software doubles rewritten and proven ([docs/decomp.md](docs/decomp.md)) |
 
 ## Requirements
@@ -206,31 +207,31 @@ listed in [docs/decomp_status.json](docs/decomp_status.json)
 
 <!-- decomp:start (tools/decomp_tree.py --readme writes this block) -->
 
-**Game thread time on the Vita** (r122, Vita3K profile of the route):
+**Game thread time on the Vita** (D5, Vita3K profile):
 
 | | share | |
 |---|---:|---|
-| Native code | 68.9% | `██████████████░░░░░░` |
-| Recompiled MIPS | 20.5% | `████░░░░░░░░░░░░░░░░` |
-| Runtime (DMA walk, memory, scheduler, glue) | 10.6% | `██░░░░░░░░░░░░░░░░░░` |
+| Native code | 79.6% | `████████████████░░░░` |
+| Recompiled MIPS | 9.2% | `██░░░░░░░░░░░░░░░░░░` |
+| Runtime (DMA walk, memory, scheduler, glue) | 11.2% | `██░░░░░░░░░░░░░░░░░░` |
 
 <details open>
 <summary><b>By area of the game</b>: what is native and what still runs as recompiled MIPS</summary>
 
 | Area | Code native | | Functions | Game thread time: native / MIPS |
 |---|---:|---|---:|---|
-| Display and models | 24.2% | `███░░░░░░░░░` | 91 / 975 | 21.0% / 2.8% |
-| Other game code (names not identified yet) | 13.3% | `██░░░░░░░░░░` | 205 / 2897 | 11.4% / 8.1% |
-| Characters and motion | 14.4% | `██░░░░░░░░░░` | 58 / 1195 | 15.0% / 3.3% |
-| Collision and physics | 16.7% | `██░░░░░░░░░░` | 47 / 329 | 11.3% / 0.7% |
-| System and memory | 8.3% | `█░░░░░░░░░░░` | 16 / 231 | 4.3% / 0.3% |
-| Boot ELF, SDK and libc | 18.0% | `██░░░░░░░░░░` | 375 / 2145 | 0.0% / 3.2% |
-| Script and events | 1.7% | `░░░░░░░░░░░░` | 13 / 632 | 2.4% / 0.4% |
-| Math | 28.2% | `███░░░░░░░░░` | 20 / 122 | 1.6% / 0.6% |
-| Particles and effects | 39.2% | `█████░░░░░░░` | 33 / 115 | 1.6% / 0.3% |
-| Camera | 0.6% | `░░░░░░░░░░░░` | 1 / 281 | 0.1% / 0.6% |
-| Sound | 1.8% | `░░░░░░░░░░░░` | 2 / 102 | 0.0% / 0.1% |
-| Runtime (DMA walk, memory, scheduler) | | | | 10.6% (runtime) |
+| Other game code (names not identified yet) | 25.7% | `███░░░░░░░░░` | 689 / 2902 | 19.6% / 5.1% |
+| Display and models | 38.1% | `█████░░░░░░░` | 273 / 973 | 19.5% / 1.0% |
+| Collision and physics | 30.1% | `████░░░░░░░░` | 103 / 326 | 12.7% / 0.1% |
+| Characters and motion | 30.9% | `████░░░░░░░░` | 254 / 1204 | 12.0% / 0.7% |
+| Particles and effects | 55.6% | `███████░░░░░` | 49 / 115 | 5.1% / 0.3% |
+| System and memory | 25.6% | `███░░░░░░░░░` | 43 / 229 | 4.2% / 0.1% |
+| Boot ELF, SDK and libc | 34.7% | `████░░░░░░░░` | 983 / 2137 | 1.5% / 1.4% |
+| Math | 100.0% | `████████████` | 122 / 122 | 2.7% / 0.0% |
+| Script and events | 4.9% | `█░░░░░░░░░░░` | 48 / 633 | 1.7% / 0.2% |
+| Camera | 25.5% | `███░░░░░░░░░` | 89 / 281 | 0.6% / 0.3% |
+| Sound | 20.5% | `██░░░░░░░░░░` | 13 / 102 | 0.1% / 0.0% |
+| Runtime (DMA walk, memory, scheduler) | | | | 11.2% (runtime) |
 
 </details>
 
@@ -264,15 +265,20 @@ listed in [docs/decomp_status.json](docs/decomp_status.json)
 | 2026-10-31 | r48 | 12.71% | 64.8% | 69.5% |
 | 2026-11-04 | r71 | 12.95% | 66.2% | 61.7% |
 | 2026-11-09 | r122 | 14.77% | 68.4% | 68.9% |
+| 2026-11-10 | D1 | 16.94% | 79.7% | 70.0% |
+| 2026-11-11 | D2 | 18.39% | 83.8% | 71.1% |
+| 2026-11-12 | D3 | 23.25% | 88.2% | 75.1% |
+| 2026-11-12 | D4 | 27.75% | 90.5% | 78.0% |
+| 2026-11-13 | D5 | 28.88% | 91.7% | 79.6% |
 
 </details>
 
 ```mermaid
 xychart-beta
     title "Game thread time in native code (%)"
-    x-axis ["r32", "r35", "r36", "r39", "r40", "r41", "r42", "r43", "r44", "r46", "r47", "r48", "r71", "r122"]
+    x-axis ["r32", "r35", "r36", "r39", "r40", "r41", "r42", "r43", "r44", "r46", "r47", "r48", "r71", "r122", "D1", "D2", "D3", "D4", "D5"]
     y-axis "%" 0 --> 100
-    line [45.0, 43.5, 44.5, 44.7, 45.1, 52.2, 56.0, 59.9, 60.6, 64.7, 66.9, 69.5, 61.7, 68.9]
+    line [45.0, 43.5, 44.5, 44.7, 45.1, 52.2, 56.0, 59.9, 60.6, 64.7, 66.9, 69.5, 61.7, 68.9, 70.0, 71.1, 75.1, 78.0, 79.6]
 ```
 
 <!-- decomp:end -->
@@ -546,6 +552,16 @@ xychart-beta
 | `SOTC_INPUT_REPLAY=<file>` | (input replay) plays a recording back: the recorded timer count, pad state, disc read timing and VBlank count in each logic frame (any frame rate); `[rstate]` lines to compare; `tools/replay_compare.sh <file>` does the three replays and the page |
 | `SOTC_REPLAY_SHOTS=-6,-3,0,3,6`, `SOTC_REPLAY_SHOT_TICKS=t,t,...` | (input replay) the frames pictured: offsets around each mark, and absolute ticks; the Mac saves `snap_<tick>.png` (and `native_snap_<tick>.png` with `SOTC_NATIVE=2`) in `PS2X_SNAPSHOT_DIR`, the Vita holds the frame `SOTC_REPLAY_HOLD_MS` (1500) with `[replay] hold <tick>` in the log for a window capture (`SOTC_REPLAY_FB=1`: the display buffer to a file too, console only) |
 | `SOTC_REPLAY_EXIT=1`, `SOTC_REPLAY_TRACE=1`, `SOTC_INPUT_STATE_EVERY=<n>` | (input replay) leave at the recording's end; a `[rtick]` line per frame; the state check every n frames (30) |
+| `PS2X_SWAP_INTERVAL=0/1` | (R36S / Linux SDL2, default `0`) passes `0` or `1` to `SDL_GL_SetSwapInterval` (`1` to lock to VSync). Measured on RK3326 KMSDRM + ARM libmali: `SDL_GL_SetSwapInterval(0)` returns `0` while `SDL_GL_GetSwapInterval()` stays `1` (`actual=1`, ~16.3–18.5 ms page-flip cadence); logged once as `[linux] swap interval req=... setRc=... actual=...` |
+| `SOTC_FPS_CAP=n` | (R36S / Linux SDL2, default `60`, `0` uncapped) software frame limiter using `clock_gettime(CLOCK_MONOTONIC)` / `clock_nanosleep(..., TIMER_ABSTIME, ...)` in `EndDrawing`; locks light/menu scenes to 59.8–60.1 FPS with `wait 0.0` even when swap interval `0` is honored, with zero overhead below 60 FPS |
+| `SOTC_CAM_INVERT_X=0/1` | (R36S / Linux SDL2, default `1`) invert `SDL_CONTROLLER_AXIS_RIGHTX` before PS2 pad packing so right-stick right pans the camera right (`0` restores original PS2 SCUS-97472 horizontal camera; menus and Y axis unchanged) |
+| `SOTC_GCOV_DUMP_FRAME=<n>` | (R36S / Linux aarch64 PGO-gen builds) triggers `__gcov_dump()` once at logic frame `n` and suppresses the periodic `frame % 600 == 0` dump so runtime PGO profiles accumulate through gameplay (`214` `.gcda` TUs) |
+| `SOTC_PF141=0/1`, `SOTC_PFC141=0/1` | (round 141, default **0** on Linux `aarch64`, **1** elsewhere) background thread speculative cache-line prefetch across character geometry segments (`decomp_pf141.cpp`) and collision ranges (`PFC141`); disabled by default on RK3326 (`256 KB` shared L2) where `B5_FINAL` A/B measured `+1.15` mean / `+1.28` med FPS (`33.89 / 34.72` vs `32.74 / 33.44`) with `PF141=0` |
+| `SOTC_GLEND_ASYNC=0/1` | (Pass 9.5, default `1`) controls async GL end-of-frame hook synchronization in `sotc_native.cpp`; `0` forces synchronous hand-off for debugging |
+| `SOTC_MESHOPT=0/1/2`, `SOTC_MESHOPT_VCACHE=0/1`, `SOTC_MESHOPT_OVERDRAW=0/1` | (default `0` / `0` / `0`) static-mesh `meshoptimizer` pipeline in `sotc_native.cpp`: `1` deduplicates vertices with `meshopt_generateVertexRemap` + `meshopt_optimizeVertexFetch` and uploads indexed VBO/EBO buffers (`uploadIndexedMesh`) preserved through GL batch merging (`copyIndexedRun`) and instancing without expanding back into duplicate triangles; `2` expands to a non-indexed triangle stream (legacy opt-in). Vertex-cache (`SOTC_MESHOPT_VCACHE=1`) and overdraw (`SOTC_MESHOPT_OVERDRAW=1`) reordering are off by default and gated to verified opaque non-two-pass static packets (`reorderSafe`) without partial vertex alpha |
+| `SOTC_SORT_OPAQUE=0/1` | (default `0`) opt-in free-draw opaque reordering in `native_renderer_gl.cpp` (`sortFree` and non-adjacent instancing), gated by `isSafeOpaqueDraw` (rejecting alpha-tested discards, `<1.0` min texel/vertex alpha under `Blend::Normal`, translucent opacity `<1.0`, overlays, depth-disable/write flags, reflection/refraction/screen copies, and missing textures; never treats `opacity >= 0.95` or `Blend::Normal` alone as freely reorderable) |
+| `SOTC_NATIVE_NO*` (`NOGLOW`, `NODOF`, `NOSHADOWS`, `NOPTCL`, `NOSBLUR`, `NOFEEDBACK`, `NOREFLECT`, `NOREFRACT`, `NOHAZE`, `NOADDITIVE`) | setting `<VAR>=0` explicitly clears the disable bit even if an earlier preset turned it off (`!flag(name)`); `SOTC_NATIVE_NOADDITIVE` is also bound directly to `dbg_additive` so additive light draws follow it dynamically |
+| `-DPS2X_LINUX_RELEASE=ON`, `-DPS2X_LINUX_PGO=OFF\|gen\|<dir>`, `-DPS2X_LINUX_GAME_OPT=-Os`, `-DPS2X_LINUX_FUNCTION_SECTIONS=ON`, `-DPS2X_LINUX_HOT_ORDER=<file>` | (CMake, Linux aarch64) release build (`SOTC_RELEASE=1` diagnostics compiled out across `ps2_runtime`, `ps2_iop`, and `overrides/*.cpp`), portable `-fprofile-generate=/tmp/sotc_pgo/` / `-fprofile-use=<dir>` with `-fprofile-prefix-path`, cold/warm opt split (`-Os` cold TUs, `-O3` runtime/overrides/`lean_part_t*`, `-O2` `vu1rec_*`), and `--section-ordering-file` (defaults to `game/overrides/linux_hot_order.ld`) |
 
 With `SOTC_FRAME_LOG=1` the `[frame]` lines also end in `| sync ... | joins ...`: the game
 thread's work at the frame's change by part (the join, endFrame, the frame log, the sound log,
