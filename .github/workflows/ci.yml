@@ -68,7 +68,7 @@ jobs:
             libgl-dev:arm64 libx11-dev:arm64 libxrandr-dev:arm64 \
             libxinerama-dev:arm64 libxcursor-dev:arm64 libxi-dev:arm64 \
             libavcodec-dev:arm64 libavformat-dev:arm64 libavutil-dev:arm64 \
-            libswresample-dev:arm64 libswscale-dev:arm64
+            libswresample-dev:arm64 libswscale-dev:arm64 zlib1g-dev:arm64
 
       - name: Configure (AArch64)
         run: |
