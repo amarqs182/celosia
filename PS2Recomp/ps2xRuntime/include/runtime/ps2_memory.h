@@ -475,6 +475,15 @@ public:
     // Scratchpad memory (16KB)
     uint8_t *m_scratchpad;
 
+#if defined(PS2X_LINUX_FASTMEM) && PS2X_LINUX_FASTMEM
+    int m_fastmemRamFd = -1;
+    int m_fastmemSprFd = -1;
+    bool m_fastmemMapped = false;
+#endif
+public:
+    static void ensureFastmemHandler();
+private:
+
     // IOP RAM (2MB)
     uint8_t *iop_ram;
 

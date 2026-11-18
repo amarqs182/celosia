@@ -2872,9 +2872,9 @@ void kernel_sub_001C37F0(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     (a1 = (uint64_t)((int64_t)(int32_t)((int32_t)ADD32(0u, 2))));
     (v0 = (uint64_t)(v0 | (uint64_t)(uint16_t)4096));
     (a0 = (uint64_t)((uint64_t)s0 + (uint64_t)0ULL));
-    (v1 = (uint64_t)(READ64(ADD32((uint32_t)v0, 0))));
+    (v1 = (uint64_t)(runtime->memory().read64(0x12001000u)));
     (v1 = (uint64_t)(v1 | RC_U64X(a1)));
-    WRITE64(ADD32((uint32_t)v0, 0), v1);
+    runtime->memory().write64(0x12001000u, v1);
     {
         ra = 0x1C3858u;
         Ps2SetGpr64(ctx, 16, s0); Ps2SetGpr64(ctx, 2, v0); Ps2SetGpr64(ctx, 3, v1); Ps2SetGpr64(ctx, 31, ra); Ps2SetGpr64(ctx, 4, a0); Ps2SetGpr64(ctx, 5, a1);
@@ -9724,7 +9724,7 @@ SOTC_DECOMP_LIFT_FUNCTION_D4(0x001B8ED0u, iosPushVu0Registers, lift_d1::iosPushV
 SOTC_DECOMP_LIFT_FUNCTION_D4(0x001BC898u, SetQuaternionByAxisRotateVWithNoRegularizeRadian, lift_d1::SetQuaternionByAxisRotateVWithNoRegularizeRadian, SetQuaternionByAxisRotateVWithNoRegularizeRadian_0x1bc898);
 SOTC_DECOMP_LIFT_FUNCTION_D4(0x001BCD28u, GetQuaternionByEulerYXZExact, lift_d1::GetQuaternionByEulerYXZExact, GetQuaternionByEulerYXZExact_0x1bcd28);
 SOTC_DECOMP_LIFT_FUNCTION_D4(0x001BDA70u, GetQuaternionByDegEulerYXZ, lift_d1::GetQuaternionByDegEulerYXZ, GetQuaternionByDegEulerYXZ_0x1bda70);
-SOTC_DECOMP_LIFT_FUNCTION_D4(0x001C37F0u, kernel_sub_001C37F0, lift_d1::kernel_sub_001C37F0, kernel_sub_001C37F0_0x1c37f0);
+SOTC_DECOMP_LIFT_FALLBACK(0x001C37F0u, kernel_sub_001C37F0, lift_d1::kernel_sub_001C37F0, kernel_sub_001C37F0_0x1c37f0);
 SOTC_DECOMP_LIFT_FUNCTION_D4(0x001C3878u, iStart, lift_d1::iStart, iStart_0x1c3878);
 SOTC_DECOMP_LIFT_FUNCTION_D4(0x001C97A8u, _isysSendSubMsg, lift_d1::_isysSendSubMsg, _isysSendSubMsg_0x1c97a8);
 SOTC_DECOMP_LIFT_FUNCTION_D4(0x001CCA50u, kernel_sub_001CCA50, lift_d1::kernel_sub_001CCA50, kernel_sub_001CCA50_0x1cca50);

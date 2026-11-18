@@ -26,6 +26,13 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#if defined(PS2X_LINUX_FASTMEM) && PS2X_LINUX_FASTMEM && defined(__linux__) && defined(__aarch64__)
+#include <signal.h>
+#include <sys/mman.h>
+#include <sys/syscall.h>
+#include <ucontext.h>
+#include <unistd.h>
+#endif
 
 namespace
 {
@@ -444,6 +451,365 @@ struct PS2Memory::Vif1Async
     uint64_t checked = 0, differ = 0, touched = 0, unverifiable = 0, rewalkDiffer = 0, wholeKB = 0;
 };
 
+#if defined(PS2X_LINUX_FASTMEM) && PS2X_LINUX_FASTMEM && defined(__linux__) && defined(__aarch64__)
+namespace
+{
+    constexpr size_t kFastmemWindowBytes = 4ULL << 30;
+    PS2Memory *g_fastmemOwner = nullptr;
+    uint8_t *g_fastmemBase = nullptr;
+    struct sigaction g_prevSigsegv{};
+    bool g_sigsegvInstalled = false;
+    std::atomic<uint64_t> g_fastmemTraps{0};
+
+    static inline int createFastmemFd(const char *name)
+    {
+#ifndef SYS_memfd_create
+#define SYS_memfd_create 279
+#endif
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001u
+#endif
+        return static_cast<int>(::syscall(SYS_memfd_create, name, MFD_CLOEXEC));
+    }
+
+    static inline fpsimd_context *findFpsimdCtx(mcontext_t *mc)
+    {
+        uint8_t *p = reinterpret_cast<uint8_t *>(mc->__reserved);
+        uint8_t *end = p + sizeof(mc->__reserved);
+        while (p + sizeof(_aarch64_ctx) <= end)
+        {
+            auto *hdr = reinterpret_cast<_aarch64_ctx *>(p);
+            if (hdr->magic == 0u || hdr->size == 0u)
+                break;
+            if (hdr->magic == FPSIMD_MAGIC && hdr->size >= sizeof(fpsimd_context))
+                return reinterpret_cast<fpsimd_context *>(p);
+            p += hdr->size;
+        }
+        return nullptr;
+    }
+
+    static inline uint64_t signExt(uint64_t val, uint32_t bits)
+    {
+        const uint64_t shift = 64u - bits;
+        return static_cast<uint64_t>(static_cast<int64_t>(val << shift) >> shift);
+    }
+
+    static bool fastmemReadScalar(PS2Memory *mem, uint32_t vaddr, uint32_t width, uint64_t &out)
+    {
+        try
+        {
+            switch (width)
+            {
+            case 1u: out = mem->read8(vaddr); return true;
+            case 2u: out = mem->read16(vaddr); return true;
+            case 4u: out = mem->read32(vaddr); return true;
+            case 8u: out = mem->read64(vaddr); return true;
+            default: return false;
+            }
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    static bool fastmemWriteScalar(PS2Memory *mem, uint32_t vaddr, uint32_t width, uint64_t val)
+    {
+        try
+        {
+            switch (width)
+            {
+            case 1u: mem->write8(vaddr, static_cast<uint8_t>(val)); return true;
+            case 2u: mem->write16(vaddr, static_cast<uint16_t>(val)); return true;
+            case 4u: mem->write32(vaddr, static_cast<uint32_t>(val)); return true;
+            case 8u: mem->write64(vaddr, val); return true;
+            default: return false;
+            }
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    static bool fastmemReadSimd(PS2Memory *mem, uint32_t vaddr, uint32_t width, __uint128_t &out)
+    {
+        out = 0;
+        if (width == 16u)
+        {
+            try
+            {
+                const __m128i q = mem->read128(vaddr);
+                std::memcpy(&out, &q, 16);
+                return true;
+            }
+            catch (...)
+            {
+                return false;
+            }
+        }
+        uint64_t v = 0;
+        if (!fastmemReadScalar(mem, vaddr, width, v))
+            return false;
+        std::memcpy(&out, &v, width);
+        return true;
+    }
+
+    static bool fastmemWriteSimd(PS2Memory *mem, uint32_t vaddr, uint32_t width, __uint128_t val)
+    {
+        if (width == 16u)
+        {
+            try
+            {
+                __m128i q;
+                std::memcpy(&q, &val, 16);
+                mem->write128(vaddr, q);
+                return true;
+            }
+            catch (...)
+            {
+                return false;
+            }
+        }
+        uint64_t v = 0;
+        std::memcpy(&v, &val, width);
+        return fastmemWriteScalar(mem, vaddr, width, v);
+    }
+
+    static void fastmemSigsegv(int sig, siginfo_t *si, void *uctx)
+    {
+        PS2Memory *mem = g_fastmemOwner;
+        uint8_t *basePtr = g_fastmemBase;
+        if (mem && basePtr && si)
+        {
+            const uintptr_t fault = reinterpret_cast<uintptr_t>(si->si_addr);
+            const uintptr_t base = reinterpret_cast<uintptr_t>(basePtr);
+            if (fault >= base && fault < base + kFastmemWindowBytes)
+            {
+                auto *uc = reinterpret_cast<ucontext_t *>(uctx);
+                const uint32_t vaddr = static_cast<uint32_t>(fault - base);
+                const uint32_t insn = *reinterpret_cast<const uint32_t *>(uc->uc_mcontext.pc);
+                bool handled = false;
+
+                if ((insn & 0x3A000000u) == 0x38000000u)
+                {
+                    const uint32_t size = (insn >> 30) & 3u;
+                    const bool V = ((insn >> 26) & 1u) != 0u;
+                    const uint32_t opc = (insn >> 22) & 3u;
+                    const uint32_t rt = insn & 0x1Fu;
+                    const uint32_t rn = (insn >> 5) & 0x1Fu;
+
+                    if (!V)
+                    {
+                        if (size == 3u && opc == 2u)
+                        {
+                            // PRFM prefetch: ignore safely.
+                            handled = true;
+                        }
+                        else
+                        {
+                            const uint32_t width = 1u << size;
+                            if (opc == 0u)
+                            {
+                                const uint64_t val = (rt < 31u) ? uc->uc_mcontext.regs[rt] : 0ull;
+                                handled = fastmemWriteScalar(mem, vaddr, width, val);
+                            }
+                            else
+                            {
+                                uint64_t val = 0;
+                                if (fastmemReadScalar(mem, vaddr, width, val))
+                                {
+                                    if (opc == 2u)
+                                        val = signExt(val, width * 8u);
+                                    else if (opc == 3u)
+                                        val = static_cast<uint32_t>(signExt(val, width * 8u));
+                                    if (rt < 31u)
+                                        uc->uc_mcontext.regs[rt] = val;
+                                    handled = true;
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        fpsimd_context *fp = findFpsimdCtx(&uc->uc_mcontext);
+                        if (fp)
+                        {
+                            const uint32_t width = (opc >= 2u) ? 16u : (1u << size);
+                            const bool isStore = (opc & 1u) == 0u;
+                            if (isStore)
+                                handled = fastmemWriteSimd(mem, vaddr, width, fp->vregs[rt]);
+                            else
+                                handled = fastmemReadSimd(mem, vaddr, width, fp->vregs[rt]);
+                        }
+                    }
+
+                    if (handled && ((insn >> 24) & 3u) == 0u && (insn & (1u << 21)) == 0u)
+                    {
+                        const uint32_t idxType = (insn >> 10) & 3u;
+                        if (idxType == 1u || idxType == 3u)
+                        {
+                            const int64_t imm9 = static_cast<int32_t>(insn << 11) >> 23;
+                            if (rn < 31u)
+                                uc->uc_mcontext.regs[rn] += static_cast<uint64_t>(imm9);
+                            else
+                                uc->uc_mcontext.sp += static_cast<uint64_t>(imm9);
+                        }
+                    }
+                }
+                else if ((insn & 0x3A000000u) == 0x28000000u)
+                {
+                    const uint32_t opc = (insn >> 30) & 3u;
+                    const bool V = ((insn >> 26) & 1u) != 0u;
+                    const uint32_t idxMode = (insn >> 23) & 3u;
+                    const bool isLoad = ((insn >> 22) & 1u) != 0u;
+                    const uint32_t rt = insn & 0x1Fu;
+                    const uint32_t rt2 = (insn >> 10) & 0x1Fu;
+                    const uint32_t rn = (insn >> 5) & 0x1Fu;
+                    const int64_t imm7 = static_cast<int32_t>(insn << 10) >> 25;
+                    const uint32_t width = V ? (4u << opc) : ((opc == 2u) ? 8u : 4u);
+                    const int64_t off = imm7 * static_cast<int64_t>(width);
+                    const uint64_t rnVal = (rn < 31u) ? uc->uc_mcontext.regs[rn] : uc->uc_mcontext.sp;
+                    const uint64_t startPtr = (idxMode == 1u) ? rnVal : static_cast<uint64_t>(static_cast<int64_t>(rnVal) + off);
+                    if (startPtr >= base && startPtr + width * 2u <= base + kFastmemWindowBytes)
+                    {
+                        const uint32_t a0 = static_cast<uint32_t>(startPtr - base);
+                        const uint32_t a1 = a0 + width;
+                        if (!V)
+                        {
+                            if (!isLoad)
+                            {
+                                const uint64_t v0 = (rt < 31u) ? uc->uc_mcontext.regs[rt] : 0ull;
+                                const uint64_t v1 = (rt2 < 31u) ? uc->uc_mcontext.regs[rt2] : 0ull;
+                                handled = fastmemWriteScalar(mem, a0, width, v0) && fastmemWriteScalar(mem, a1, width, v1);
+                            }
+                            else
+                            {
+                                uint64_t v0 = 0, v1 = 0;
+                                if (fastmemReadScalar(mem, a0, width, v0) && fastmemReadScalar(mem, a1, width, v1))
+                                {
+                                    if (opc == 1u)
+                                    {
+                                        v0 = signExt(v0, 32u);
+                                        v1 = signExt(v1, 32u);
+                                    }
+                                    if (rt < 31u) uc->uc_mcontext.regs[rt] = v0;
+                                    if (rt2 < 31u) uc->uc_mcontext.regs[rt2] = v1;
+                                    handled = true;
+                                }
+                            }
+                        }
+                        else if (fpsimd_context *fp = findFpsimdCtx(&uc->uc_mcontext))
+                        {
+                            if (!isLoad)
+                                handled = fastmemWriteSimd(mem, a0, width, fp->vregs[rt]) && fastmemWriteSimd(mem, a1, width, fp->vregs[rt2]);
+                            else
+                                handled = fastmemReadSimd(mem, a0, width, fp->vregs[rt]) && fastmemReadSimd(mem, a1, width, fp->vregs[rt2]);
+                        }
+                        if (handled && (idxMode == 1u || idxMode == 3u))
+                        {
+                            if (rn < 31u)
+                                uc->uc_mcontext.regs[rn] = static_cast<uint64_t>(static_cast<int64_t>(rnVal) + off);
+                            else
+                                uc->uc_mcontext.sp = static_cast<uint64_t>(static_cast<int64_t>(rnVal) + off);
+                        }
+                    }
+                }
+
+                if (handled)
+                {
+                    uc->uc_mcontext.pc += 4u;
+                    const uint64_t trapNum = g_fastmemTraps.fetch_add(1u, std::memory_order_relaxed) + 1u;
+                    static const bool statTraps = []() {
+                        const char *st = std::getenv("SOTC_FASTMEM_STAT");
+                        return st && std::atoi(st) != 0;
+                    }();
+                    if (statTraps && (trapNum <= 16u || (trapNum & (trapNum - 1u)) == 0u || (trapNum % 1000u) == 0u))
+                    {
+                        std::fprintf(stderr, "[fastmem] trap #%llu vaddr=%08x pc=%llx insn=%08x\n",
+                                     static_cast<unsigned long long>(trapNum), vaddr,
+                                     static_cast<unsigned long long>(uc->uc_mcontext.pc - 4u), insn);
+                    }
+                    return;
+                }
+                std::fprintf(stderr, "[fastmem] unhandled fault vaddr=%08x pc=%llx insn=%08x\n",
+                             vaddr, static_cast<unsigned long long>(uc->uc_mcontext.pc), insn);
+            }
+        }
+        if (g_prevSigsegv.sa_flags & SA_SIGINFO)
+        {
+            if (g_prevSigsegv.sa_sigaction)
+                g_prevSigsegv.sa_sigaction(sig, si, uctx);
+        }
+        else if (g_prevSigsegv.sa_handler != SIG_IGN && g_prevSigsegv.sa_handler != SIG_DFL)
+        {
+            g_prevSigsegv.sa_handler(sig);
+        }
+        else
+        {
+            auto *uc = reinterpret_cast<ucontext_t *>(uctx);
+            std::fprintf(stderr, "[fastmem] external segv addr=%p base=%p pc=%llx traps=%llu\n",
+                         si ? si->si_addr : nullptr, static_cast<void *>(basePtr),
+                         uc ? static_cast<unsigned long long>(uc->uc_mcontext.pc) : 0ull,
+                         static_cast<unsigned long long>(g_fastmemTraps.load(std::memory_order_relaxed)));
+            struct sigaction dfl{};
+            dfl.sa_handler = SIG_DFL;
+            ::sigaction(SIGSEGV, &dfl, nullptr);
+            ::raise(SIGSEGV);
+        }
+    }
+
+    static void installFastmemSigsegv()
+    {
+        struct sigaction cur{};
+        ::sigaction(SIGSEGV, nullptr, &cur);
+        if ((cur.sa_flags & SA_SIGINFO) && cur.sa_sigaction == fastmemSigsegv)
+            return;
+        struct sigaction sa{};
+        sa.sa_sigaction = fastmemSigsegv;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = SA_SIGINFO | SA_RESTART;
+        if (::sigaction(SIGSEGV, &sa, &g_prevSigsegv) != 0)
+            std::fprintf(stderr, "[fastmem] sigaction failed\n");
+        else
+            g_sigsegvInstalled = true;
+    }
+
+    static void releaseFastmem(uint8_t *&rdram, uint8_t *&scratchpad, int &ramFd, int &sprFd, bool &mapped)
+    {
+        if (mapped)
+        {
+            if (const char *st = std::getenv("SOTC_FASTMEM_STAT"); st && std::atoi(st) != 0)
+            {
+                std::fprintf(stderr, "[fastmem] traps=%llu\n",
+                             static_cast<unsigned long long>(g_fastmemTraps.load(std::memory_order_relaxed)));
+            }
+            if (g_fastmemBase == rdram)
+            {
+                g_fastmemOwner = nullptr;
+                g_fastmemBase = nullptr;
+            }
+            ps2SetScratchpadHostPtr(nullptr);
+            if (rdram)
+                ::munmap(rdram, kFastmemWindowBytes);
+            rdram = nullptr;
+            scratchpad = nullptr;
+            if (ramFd >= 0) { ::close(ramFd); ramFd = -1; }
+            if (sprFd >= 0) { ::close(sprFd); sprFd = -1; }
+            mapped = false;
+        }
+    }
+}
+#endif
+
+void PS2Memory::ensureFastmemHandler()
+{
+#if defined(PS2X_LINUX_FASTMEM) && PS2X_LINUX_FASTMEM && defined(__linux__) && defined(__aarch64__)
+    if (g_fastmemOwner && g_fastmemBase)
+        installFastmemSigsegv();
+#endif
+}
+
 PS2Memory::~PS2Memory()
 {
     if (m_vif1A)
@@ -466,17 +832,26 @@ PS2Memory::~PS2Memory()
     m_mtvuSpace.notify_all();
     if (m_mtvuThread.joinable())
         m_mtvuThread.join();
-    if (m_rdram)
+#if defined(PS2X_LINUX_FASTMEM) && PS2X_LINUX_FASTMEM && defined(__linux__) && defined(__aarch64__)
+    if (m_fastmemMapped)
     {
-        ::operator delete[](m_rdram, kRdramAlignment);
-        m_rdram = nullptr;
+        releaseFastmem(m_rdram, m_scratchpad, m_fastmemRamFd, m_fastmemSprFd, m_fastmemMapped);
     }
-
-    if (m_scratchpad)
+    else
+#endif
     {
-        ps2SetScratchpadHostPtr(nullptr);
-        delete[] m_scratchpad;
-        m_scratchpad = nullptr;
+        if (m_rdram)
+        {
+            ::operator delete[](m_rdram, kRdramAlignment);
+            m_rdram = nullptr;
+        }
+
+        if (m_scratchpad)
+        {
+            ps2SetScratchpadHostPtr(nullptr);
+            delete[] m_scratchpad;
+            m_scratchpad = nullptr;
+        }
     }
 
     if (m_gsVRAM)
@@ -517,9 +892,18 @@ bool PS2Memory::initialize(size_t ramSize)
 {
     auto cleanup = [this]()
     {
-        if (m_rdram)
-            ::operator delete[](m_rdram, kRdramAlignment);
-        delete[] m_scratchpad;
+#if defined(PS2X_LINUX_FASTMEM) && PS2X_LINUX_FASTMEM && defined(__linux__) && defined(__aarch64__)
+        if (m_fastmemMapped)
+        {
+            releaseFastmem(m_rdram, m_scratchpad, m_fastmemRamFd, m_fastmemSprFd, m_fastmemMapped);
+        }
+        else
+#endif
+        {
+            if (m_rdram)
+                ::operator delete[](m_rdram, kRdramAlignment);
+            delete[] m_scratchpad;
+        }
         delete[] iop_ram;
         if (m_gsVRAM)
             ::operator delete[](m_gsVRAM, kGsVramAlignment);
@@ -566,6 +950,55 @@ bool PS2Memory::initialize(size_t ramSize)
         // malloc on the Vita): a guest qword then straddled two of the
         // Cortex-A9's 32-byte cache lines one time in two, and a guest
         // 64-byte record touched three lines instead of two.
+#if defined(PS2X_LINUX_FASTMEM) && PS2X_LINUX_FASTMEM && defined(__linux__) && defined(__aarch64__)
+        void *fastBase = ::mmap(nullptr, kFastmemWindowBytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+        if (fastBase == MAP_FAILED)
+        {
+            std::fprintf(stderr, "[fastmem] mmap 4GiB failed\n");
+            cleanup();
+            return false;
+        }
+        m_fastmemRamFd = createFastmemFd("ps2_rdram");
+        m_fastmemSprFd = createFastmemFd("ps2_spr");
+        if (m_fastmemRamFd < 0 || ::ftruncate(m_fastmemRamFd, static_cast<off_t>(ramSize)) != 0 ||
+            m_fastmemSprFd < 0 || ::ftruncate(m_fastmemSprFd, static_cast<off_t>(PS2_SCRATCHPAD_SIZE)) != 0)
+        {
+            std::fprintf(stderr, "[fastmem] memfd_create/ftruncate failed\n");
+            ::munmap(fastBase, kFastmemWindowBytes);
+            cleanup();
+            return false;
+        }
+        uint8_t *baseBytes = static_cast<uint8_t *>(fastBase);
+        const uint32_t ramMirrors[] = {0x00000000u, 0x20000000u, 0x30000000u, 0x80000000u, 0xA0000000u};
+        constexpr size_t kRamOverhangBytes = 64u * 1024u;
+        for (uint32_t off : ramMirrors)
+        {
+            if (::mmap(baseBytes + off, ramSize, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, m_fastmemRamFd, 0) == MAP_FAILED ||
+                ::mmap(baseBytes + off + ramSize, kRamOverhangBytes, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, m_fastmemRamFd, 0) == MAP_FAILED)
+            {
+                std::fprintf(stderr, "[fastmem] mmap mirror %08x failed\n", off);
+                ::munmap(fastBase, kFastmemWindowBytes);
+                cleanup();
+                return false;
+            }
+        }
+        if (::mmap(baseBytes + 0x70000000u, PS2_SCRATCHPAD_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, m_fastmemSprFd, 0) == MAP_FAILED ||
+            ::mmap(baseBytes + 0x70000000u + PS2_SCRATCHPAD_SIZE, PS2_SCRATCHPAD_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, m_fastmemSprFd, 0) == MAP_FAILED)
+        {
+            std::fprintf(stderr, "[fastmem] mmap scratchpad failed\n");
+            ::munmap(fastBase, kFastmemWindowBytes);
+            cleanup();
+            return false;
+        }
+        m_rdram = baseBytes;
+        m_scratchpad = baseBytes + 0x70000000u;
+        m_fastmemMapped = true;
+        ps2SetScratchpadHostPtr(m_scratchpad);
+        g_fastmemOwner = this;
+        g_fastmemBase = baseBytes;
+        installFastmemSigsegv();
+        std::fprintf(stderr, "[fastmem] 4GiB mmap window active at %p\n", fastBase);
+#else
         m_rdram = static_cast<uint8_t *>(::operator new[](ramSize + 16u, kRdramAlignment));
         std::memset(m_rdram, 0, ramSize + 16u);
 #if defined(PLATFORM_VITA)
@@ -576,6 +1009,7 @@ bool PS2Memory::initialize(size_t ramSize)
         m_scratchpad = new uint8_t[PS2_SCRATCHPAD_SIZE];
         std::memset(m_scratchpad, 0, PS2_SCRATCHPAD_SIZE);
         ps2SetScratchpadHostPtr(m_scratchpad);
+#endif
 
         // Initialize EE TLB entries (R5900 has 48 entries).
         m_tlbEntries.assign(48, TLBEntry{0, 0, 0, false});
@@ -4159,47 +4593,87 @@ namespace ps2_guest_mem
             std::memcpy(&v, p, sizeof(T));
             return v;
         }
+        inline void memStatNote(int kind, uint32_t a, const R5900Context *ctx)
+        {
+            static const bool on = ps2_diag::env("SOTC_MEM_STAT") && std::atoi(ps2_diag::env("SOTC_MEM_STAT")) != 0;
+            if (PS2_EXPECT(!on, 1))
+                return;
+            static std::atomic<uint64_t> tot{0}, sprC{0}, mirC{0}, spcC{0};
+            static std::atomic<uint32_t> lastSpc{0}, lastSpcPc{0}, lastMir{0};
+            if (kind == 0)
+                sprC.fetch_add(1, std::memory_order_relaxed);
+            else if (kind == 1)
+            {
+                mirC.fetch_add(1, std::memory_order_relaxed);
+                lastMir.store(a, std::memory_order_relaxed);
+            }
+            else
+            {
+                spcC.fetch_add(1, std::memory_order_relaxed);
+                lastSpc.store(a, std::memory_order_relaxed);
+                if (ctx)
+                    lastSpcPc.store(ctx->pc, std::memory_order_relaxed);
+            }
+            const uint64_t n = tot.fetch_add(1, std::memory_order_relaxed) + 1u;
+            if ((n % 100000u) == 0u)
+                std::fprintf(stderr, "[mem:slow] n=%llu spr=%llu mirror=%llu special=%llu (lastMir=%08x lastSpc=%08x@%08x)\n",
+                             (unsigned long long)n, (unsigned long long)sprC.load(std::memory_order_relaxed),
+                             (unsigned long long)mirC.load(std::memory_order_relaxed), (unsigned long long)spcC.load(std::memory_order_relaxed),
+                             lastMir.load(std::memory_order_relaxed), lastSpc.load(std::memory_order_relaxed), lastSpcPc.load(std::memory_order_relaxed));
+        }
     }
 
     uint8_t read8(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t a)
     {
         if (const uint8_t *p = spr<1>(runtime, a))
-            return *p;
-        return Ps2IsSpecialAddress(a) ? ps2_worker::real(runtime)->Load8(rdram, ctx, a) : Ps2FastRead8(rdram, a);
+            return memStatNote(0, a, ctx), *p;
+        if (Ps2IsSpecialAddress(a))
+            return memStatNote(2, a, ctx), ps2_worker::real(runtime)->Load8(rdram, ctx, a);
+        return memStatNote(1, a, ctx), Ps2FastRead8(rdram, a);
     }
     uint16_t read16(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t a)
     {
         if (const uint8_t *p = spr<2>(runtime, a))
-            return sprLoad<uint16_t>(p);
-        return Ps2IsSpecialAddress(a) ? ps2_worker::real(runtime)->Load16(rdram, ctx, a) : Ps2FastRead16(rdram, a);
+            return memStatNote(0, a, ctx), sprLoad<uint16_t>(p);
+        if (Ps2IsSpecialAddress(a))
+            return memStatNote(2, a, ctx), ps2_worker::real(runtime)->Load16(rdram, ctx, a);
+        return memStatNote(1, a, ctx), Ps2FastRead16(rdram, a);
     }
     uint32_t read32(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t a)
     {
         if (const uint8_t *p = spr<4>(runtime, a))
-            return sprLoad<uint32_t>(p);
-        return Ps2IsSpecialAddress(a) ? ps2_worker::real(runtime)->Load32(rdram, ctx, a) : Ps2FastRead32(rdram, a);
+            return memStatNote(0, a, ctx), sprLoad<uint32_t>(p);
+        if (Ps2IsSpecialAddress(a))
+            return memStatNote(2, a, ctx), ps2_worker::real(runtime)->Load32(rdram, ctx, a);
+        return memStatNote(1, a, ctx), Ps2FastRead32(rdram, a);
     }
     uint64_t read64(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t a)
     {
         if (const uint8_t *p = spr<8>(runtime, a))
-            return sprLoad<uint64_t>(p);
-        return Ps2IsSpecialAddress(a) ? ps2_worker::real(runtime)->Load64(rdram, ctx, a) : Ps2FastRead64(rdram, a);
+            return memStatNote(0, a, ctx), sprLoad<uint64_t>(p);
+        if (Ps2IsSpecialAddress(a))
+            return memStatNote(2, a, ctx), ps2_worker::real(runtime)->Load64(rdram, ctx, a);
+        return memStatNote(1, a, ctx), Ps2FastRead64(rdram, a);
     }
     __m128i read128(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t a)
     {
         if (const uint8_t *p = spr<16>(runtime, a))
-            return sprLoad<__m128i>(p);
-        return Ps2IsSpecialAddress(a) ? ps2_worker::real(runtime)->Load128(rdram, ctx, a) : Ps2FastRead128(rdram, a);
+            return memStatNote(0, a, ctx), sprLoad<__m128i>(p);
+        if (Ps2IsSpecialAddress(a))
+            return memStatNote(2, a, ctx), ps2_worker::real(runtime)->Load128(rdram, ctx, a);
+        return memStatNote(1, a, ctx), Ps2FastRead128(rdram, a);
     }
     void write8(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t a, uint8_t v)
     {
         if (uint8_t *p = spr<1>(runtime, a))
         {
+            memStatNote(0, a, ctx);
             *p = v;
             return;
         }
         if (Ps2IsSpecialAddress(a))
-            return ps2_worker::real(runtime)->Store8(rdram, ctx, a, v);
+            return memStatNote(2, a, ctx), ps2_worker::real(runtime)->Store8(rdram, ctx, a, v);
+        memStatNote(1, a, ctx);
         trace<uint8_t>(rdram, a, v, "WRITE8", ctx);
         Ps2FastWrite8(rdram, a, v);
     }
@@ -4207,11 +4681,13 @@ namespace ps2_guest_mem
     {
         if (uint8_t *p = spr<2>(runtime, a))
         {
+            memStatNote(0, a, ctx);
             std::memcpy(p, &v, sizeof(v));
             return;
         }
         if (Ps2IsSpecialAddress(a))
-            return ps2_worker::real(runtime)->Store16(rdram, ctx, a, v);
+            return memStatNote(2, a, ctx), ps2_worker::real(runtime)->Store16(rdram, ctx, a, v);
+        memStatNote(1, a, ctx);
         trace<uint16_t>(rdram, a, v, "WRITE16", ctx);
         Ps2FastWrite16(rdram, a, v);
     }
@@ -4219,11 +4695,13 @@ namespace ps2_guest_mem
     {
         if (uint8_t *p = spr<4>(runtime, a))
         {
+            memStatNote(0, a, ctx);
             std::memcpy(p, &v, sizeof(v));
             return;
         }
         if (Ps2IsSpecialAddress(a))
-            return ps2_worker::real(runtime)->Store32(rdram, ctx, a, v);
+            return memStatNote(2, a, ctx), ps2_worker::real(runtime)->Store32(rdram, ctx, a, v);
+        memStatNote(1, a, ctx);
         trace<uint32_t>(rdram, a, v, "WRITE32", ctx);
         Ps2FastWrite32(rdram, a, v);
     }
@@ -4231,11 +4709,13 @@ namespace ps2_guest_mem
     {
         if (uint8_t *p = spr<8>(runtime, a))
         {
+            memStatNote(0, a, ctx);
             std::memcpy(p, &v, sizeof(v));
             return;
         }
         if (Ps2IsSpecialAddress(a))
-            return ps2_worker::real(runtime)->Store64(rdram, ctx, a, v);
+            return memStatNote(2, a, ctx), ps2_worker::real(runtime)->Store64(rdram, ctx, a, v);
+        memStatNote(1, a, ctx);
         trace<uint64_t>(rdram, a, v, "WRITE64", ctx);
         Ps2FastWrite64(rdram, a, v);
     }
@@ -4243,11 +4723,13 @@ namespace ps2_guest_mem
     {
         if (uint8_t *p = spr<16>(runtime, a))
         {
+            memStatNote(0, a, ctx);
             std::memcpy(p, &v, sizeof(v));
             return;
         }
         if (Ps2IsSpecialAddress(a))
-            return ps2_worker::real(runtime)->Store128(rdram, ctx, a, v);
+            return memStatNote(2, a, ctx), ps2_worker::real(runtime)->Store128(rdram, ctx, a, v);
+        memStatNote(1, a, ctx);
         trace<__m128i>(rdram, a, v, "WRITE128", ctx);
         Ps2FastWrite128(rdram, a, v);
     }

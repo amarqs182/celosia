@@ -784,6 +784,20 @@ namespace ps2_guest_mem
     static PS2_FORCE_INLINE void write128_slow(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t a, __m128i v) { write128(rdram, ctx, runtime, a, v); }
 }
 
+#if defined(PS2X_LINUX_FASTMEM) && PS2X_LINUX_FASTMEM && defined(__linux__) && defined(__aarch64__)
+#define PS2_GUEST_READ(T, fn, addr) ([&]() -> T {                                                          \
+    const uint32_t _addr = (uint32_t)(addr);                                                               \
+    ps2_guest_mem::readWatch<T>(_addr);                                                                    \
+    return ps2_guest_mem::load<T>(rdram, _addr); }())
+#define PS2_GUEST_WRITE(T, fn, op, addr, val)                     \
+    do                                                            \
+    {                                                             \
+        const uint32_t _addr = (uint32_t)(addr);                  \
+        const T _val = (T)(val);                                  \
+        ps2_guest_mem::trace<T>(rdram, _addr, _val, op, ctx);     \
+        ps2_guest_mem::store<T>(rdram, _addr, _val);              \
+    } while (0)
+#else
 #define PS2_GUEST_READ(T, fn, addr) ([&]() -> T {                                                          \
     const uint32_t _addr = (uint32_t)(addr);                                                               \
     if (PS2_EXPECT(_addr < PS2_RAM_SIZE, 1))                                                               \
@@ -805,6 +819,7 @@ namespace ps2_guest_mem
         else                                                      \
             ps2_guest_mem::fn##_slow(rdram, ctx, runtime, _addr, _val); \
     } while (0)
+#endif
 
 // Generated code's calls and jumps (round 16). The recompiler writes the
 // function table's base and size as PS2X_RECOMP_TABLE_BASE / _SLOTS into

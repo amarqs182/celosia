@@ -1232,6 +1232,7 @@ bool PS2Runtime::initialize(const char *title)
 
 bool PS2Runtime::loadELF(const std::string &elfPath)
 {
+    PS2Memory::ensureFastmemHandler();
     configureIoPathsFromElf(elfPath);
 
     std::ifstream file(elfPath, std::ios::binary);
