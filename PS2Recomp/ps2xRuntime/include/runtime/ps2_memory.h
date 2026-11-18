@@ -480,9 +480,7 @@ public:
     int m_fastmemSprFd = -1;
     bool m_fastmemMapped = false;
 #endif
-public:
     static void ensureFastmemHandler();
-private:
 
     // IOP RAM (2MB)
     uint8_t *iop_ram;
