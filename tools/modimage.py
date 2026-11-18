@@ -15,6 +15,8 @@ Typical use::
 This module is a library helper; ``build_elf.py`` is its only in-tree consumer
 and owns the command-line entry point.
 """
+from __future__ import annotations  # `bytes | None` on Python 3.9
+
 import struct
 from dataclasses import dataclass
 from pathlib import Path

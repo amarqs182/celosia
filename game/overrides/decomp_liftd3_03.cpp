@@ -3765,7 +3765,7 @@ L_1416cf8:
     (v0 = (uint64_t)(((int64_t)(int64_t)sx64(v1) < (int64_t)(int64_t)RC_U64X(s3)) ? 1 : 0));
     if (RC_U64X(v0) != 0) do { const __m128i _v = (Ps2GprVecWithLow(ctx->r[3], sx64(v1))); ctx->r[19] = _v; std::memcpy(&s3, &_v, 8); } while (0);
     {
-        const bool c = (int64_t)s3 <= 0;
+        const bool c = (int32_t)s3 <= 0;
         (s0 = (uint64_t)((uint64_t)0ULL + (uint64_t)0ULL));
         if (!c) {
             (s4 = (uint64_t)((int64_t)(int32_t)((int32_t)ADD32(0u, 1))));
@@ -9705,7 +9705,7 @@ void gamecore_sub_01426BE0(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtim
         if (!PS2_CALL_GUEST_KNOWN(jumpTarget, memset_0x1283d0, 0x1426C0Cu, 0x1426C04u, IndirectCall, "JALR")) { return; }
     }
     f12 = ctx->f[12]; f20 = ctx->f[20]; s0 = Ps2GprU64(ctx, 16); s1 = Ps2GprU64(ctx, 17); sp = Ps2GprU32(ctx, 29); ra = Ps2GprU32(ctx, 31); a1 = Ps2GprU64(ctx, 5); a2 = Ps2GprU64(ctx, 6);
-    if ((int64_t)s0 <= 0) {
+    if ((int32_t)s0 <= 0) {
         { const uint64_t v = READ64(sp + 0u); Ps2SetGpr64(ctx, 16, v); s0 = (uint64_t)v; } // restore s0
     } else {
         (a1 = (uint64_t)((uint64_t)s1 + (uint64_t)0ULL));
@@ -10148,7 +10148,7 @@ L_142ee40:
                     }
                     s0 = Ps2GprU64(ctx, 16); s1 = Ps2GprU64(ctx, 17); s2 = Ps2GprU64(ctx, 18); s3 = Ps2GprU64(ctx, 19); v0 = Ps2GprU64(ctx, 2); s4 = Ps2GprU32(ctx, 20); s5 = Ps2GprU32(ctx, 21); s6 = Ps2GprU32(ctx, 22); s7 = Ps2GprU64(ctx, 23); sp = Ps2GprU32(ctx, 29); v1 = Ps2GprU64(ctx, 3); fp = Ps2GprU32(ctx, 30); ra = Ps2GprU32(ctx, 31); a0 = Ps2GprU64(ctx, 4); a1 = Ps2GprU64(ctx, 5); a2 = Ps2GprU64(ctx, 6); a3 = Ps2GprU32(ctx, 7); t0 = Ps2GprU32(ctx, 8); df_a3 = false; df_s4 = false; df_s5 = false; df_sp = false; df_fp = false;
                     {
-                        const bool c = (int64_t)s7 < 0;
+                        const bool c = (int32_t)s7 < 0;
                         (s0 = (uint64_t)((uint64_t)v0 + (uint64_t)0ULL));
                         if (!c) {
                             (s1 = (uint64_t)((int64_t)(int32_t)((int32_t)SLL32((uint32_t)s0, 1))));
@@ -10221,7 +10221,7 @@ L_142eea0:
                             (v0 = (uint64_t)((int64_t)(int32_t)((int32_t)ADD32((uint32_t)v0, fp))));
                             (s5 = (uint32_t)((int32_t)((int16_t)READ16(ADD32((uint32_t)v0, 4))))); df_s5 = true;
                             {
-                                const bool c = (int64_t)s7 >= 0;
+                                const bool c = (int32_t)s7 >= 0;
                                 (s4 = (uint32_t)((int32_t)((int16_t)READ16(ADD32((uint32_t)v0, 2))))); df_s4 = true;
                                 if (c) {
                                     if (__builtin_expect(!runtime->m_eeClock.charge(32u), 0)) { Ps2SetGpr64(ctx, 16, s0); Ps2SetGpr64(ctx, 17, s1); Ps2SetGpr64(ctx, 2, v0); if (df_s4) Ps2SetGpr64(ctx, 20, sx64(s4)); if (df_s5) Ps2SetGpr64(ctx, 21, sx64(s5)); Ps2SetGpr64(ctx, 23, s7); Ps2SetGpr64(ctx, 3, v1); Ps2SetGpr64(ctx, 4, a0); ctx->pc = 0x142EEA0u; if (runtime->eeCheckpointSlow()) return; s0 = Ps2GprU64(ctx, 16); s1 = Ps2GprU64(ctx, 17); s2 = Ps2GprU64(ctx, 18); s3 = Ps2GprU64(ctx, 19); v0 = Ps2GprU64(ctx, 2); s4 = Ps2GprU32(ctx, 20); s5 = Ps2GprU32(ctx, 21); s6 = Ps2GprU32(ctx, 22); s7 = Ps2GprU64(ctx, 23); sp = Ps2GprU32(ctx, 29); v1 = Ps2GprU64(ctx, 3); fp = Ps2GprU32(ctx, 30); ra = Ps2GprU32(ctx, 31); a0 = Ps2GprU64(ctx, 4); a1 = Ps2GprU64(ctx, 5); a2 = Ps2GprU64(ctx, 6); a3 = Ps2GprU32(ctx, 7); t0 = Ps2GprU32(ctx, 8); df_a3 = false; df_s4 = false; df_s5 = false; df_sp = false; df_fp = false; }
@@ -10231,7 +10231,7 @@ L_142eea0:
                         }
                     }
                     (v0 = (uint64_t)((int64_t)(int32_t)((int32_t)READ32(ADD32(sp, 0)))));
-                    if ((int64_t)v0 <= 0) {
+                    if ((int32_t)v0 <= 0) {
                         (a0 = (uint64_t)((int64_t)(int32_t)((int32_t)READ32(ADD32((uint32_t)s2, 896)))));
                     } else {
                         (v1 = (uint64_t)((int64_t)(int32_t)((int32_t)READ32(ADD32(sp, 0)))));

@@ -966,7 +966,12 @@ namespace char122
                 return ++why[3], false;
             const int32_t k = static_cast<int32_t>(f12);
             const float frac = f12 - static_cast<float>(k);
-            static float tmp[512 * 4];
+            // One scratch per lane (the race D10 found): 0x10AD1B0 is in round 108's kNat108, so off the Vita
+            // the guest worker runs this native beside the game thread. A shared static buffer let one thread's
+            // keys overwrite the other's between the decode and the memcpy. Not on the stack: 8 KB, and the NEON
+            // stores below would be sp-based.
+            static float s_tmp[2][512 * 4];
+            float *const tmp = s_tmp[sotc_decomp::lane(runtime)];
             if (frac == 0.0f)
             {
                 for (int32_t i = 0; i < n; ++i)

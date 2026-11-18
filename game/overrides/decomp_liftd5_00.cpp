@@ -2244,7 +2244,7 @@ void sub_0011C200(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     WRITE64(sp + 0x20u, Ps2GprU64(ctx, 18));
     (t1 = (uint32_t)((int32_t)((int32_t)ADD32((uint32_t)v1, (uint32_t)v0)))); df_t1 = true;
     {
-        const bool c = (int64_t)a1 >= 0;
+        const bool c = (int32_t)a1 >= 0;
         WRITE64(sp, Ps2GprU64(ctx, 16));
         if (!c) {
             (v0 = (uint64_t)(0ULL | (uint64_t)(uint16_t)65535));
@@ -2300,7 +2300,7 @@ void sub_0011C200(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     (v0 = (uint64_t)((int64_t)(int32_t)((int32_t)ADD32((uint32_t)v0, (uint32_t)v1))));
     (v0 = (uint64_t)((int64_t)(int32_t)((int32_t)ADD32((uint32_t)v0, (uint32_t)a0))));
     (v0 = (uint64_t)((int64_t)(int32_t)((int32_t)READ32(ADD32((uint32_t)v0, 0)))));
-    if ((int64_t)v0 >= 0) {
+    if ((int32_t)v0 >= 0) {
         WRITE32(ADD32((uint32_t)s3, 0), 0u);
     } else {
         (v1 = (uint64_t)((int64_t)(int32_t)((int32_t)((uint32_t)33025 << 16))));
@@ -4130,7 +4130,7 @@ L_11fec4:
                     (t0 = (uint64_t)((int64_t)(int32_t)((int32_t)READ32(ADD32((uint32_t)sp, 1348)))));
                     if (!c) {
                         {
-                            const bool c = (int64_t)t0 <= 0;
+                            const bool c = (int32_t)t0 <= 0;
                             (v1 = (uint64_t)((int64_t)(int32_t)((int32_t)READ32(ADD32((uint32_t)sp, 324)))));
                             if (!c) {
                                 (a0 = (uint64_t)((int64_t)(int32_t)((int32_t)ADD32((uint32_t)s1, 24))));
@@ -4188,7 +4188,7 @@ L_11fec4:
                 }
                 (v1 = (uint64_t)((int64_t)(int32_t)((int32_t)READ32(ADD32((uint32_t)sp, 1348)))));
                 {
-                    const bool c = (int64_t)v1 <= 0;
+                    const bool c = (int32_t)v1 <= 0;
                     (fp = (uint64_t)((int64_t)(int32_t)((int32_t)ADD32((uint32_t)fp, 1))));
                     if (!c) {
                         (v0 = (uint64_t)(((int64_t)(int64_t)RC_U64X(fp) < (int64_t)(int64_t)RC_U64X(v1)) ? 1 : 0));
@@ -7671,7 +7671,7 @@ L_10ae8f8:
                     (a1 = (uint64_t)((int64_t)(int32_t)((int32_t)READ32(ADD32(a2, 0)))));
                     (t0 = (uint32_t)((int32_t)((int32_t)ADD32((uint32_t)a1, (uint32_t)v1)))); df_t0 = true;
                     {
-                        const bool c = (int64_t)a1 < 0;
+                        const bool c = (int32_t)a1 < 0;
                         (a3 = (uint64_t)((uint64_t)RC_U64X(a1) + (uint64_t)0ULL));
                         if (!c) {
                             { uint32_t bits = (uint32_t)a1; std::memcpy(&f0, &bits, sizeof(bits)); }
@@ -7689,7 +7689,7 @@ L_10ae930:
                     fcr31 = (FPU_C_OLT_S(f0, f12)) ? (fcr31 | 0x800000) : (fcr31 & ~0x800000);
                     if ((fcr31 & 0x800000u) != 0u) {
                         {
-                            const bool c = (int64_t)a3 < 0;
+                            const bool c = (int32_t)a3 < 0;
                             (v1 = (uint64_t)((int64_t)(int32_t)((int32_t)SRL32((uint32_t)a3, 1))));
                             if (!c) {
                                 { uint32_t bits = (uint32_t)a3; std::memcpy(&f0, &bits, sizeof(bits)); }
@@ -7723,7 +7723,7 @@ L_10ae96c:
                         (a1 = (uint64_t)((int64_t)(int32_t)((int32_t)READ32(ADD32(a2, 0)))));
                     }
                     {
-                        const bool c = (int64_t)a1 < 0;
+                        const bool c = (int32_t)a1 < 0;
                         (v0 = (uint64_t)(RC_U64X(a1) & (uint64_t)(uint16_t)1));
                         if (!c) {
                             { uint32_t bits = (uint32_t)a1; std::memcpy(&f0, &bits, sizeof(bits)); }
@@ -7747,7 +7747,7 @@ L_10ae9cc:
                         }
                     }
                     {
-                        const bool c = (int64_t)a1 < 0;
+                        const bool c = (int32_t)a1 < 0;
                         (v0 = (uint64_t)(a1 & (uint64_t)(uint16_t)1));
                         if (!c) {
                             { uint32_t bits = (uint32_t)a1; std::memcpy(&f0, &bits, sizeof(bits)); }
@@ -7772,7 +7772,7 @@ L_10aea1c:
                         }
                     }
                     {
-                        const bool c = (int64_t)a1 < 0;
+                        const bool c = (int32_t)a1 < 0;
                         (v0 = (uint64_t)(a1 & (uint64_t)(uint16_t)1));
                         if (!c) {
                             { uint32_t bits = (uint32_t)a1; std::memcpy(&f0, &bits, sizeof(bits)); }
@@ -7797,7 +7797,7 @@ L_10aea74:
                         }
                     }
                     {
-                        const bool c = (int64_t)a1 < 0;
+                        const bool c = (int32_t)a1 < 0;
                         (v1 = (uint64_t)((int64_t)(int32_t)((int32_t)SRL32((uint32_t)a1, 1))));
                         if (!c) {
                             { uint32_t bits = (uint32_t)a1; std::memcpy(&f0, &bits, sizeof(bits)); }
@@ -10120,10 +10120,10 @@ L_110450c:
     f0 = ctx->f[0]; f1 = ctx->f[1]; at = Ps2GprU32(ctx, 1); t2 = Ps2GprU64(ctx, 10); t3 = Ps2GprU32(ctx, 11); s0 = Ps2GprU64(ctx, 16); s1 = Ps2GprU64(ctx, 17); s2 = Ps2GprU64(ctx, 18); s3 = Ps2GprU64(ctx, 19); v0 = Ps2GprU64(ctx, 2); s4 = Ps2GprU64(ctx, 20); s5 = Ps2GprU32(ctx, 21); s6 = Ps2GprU32(ctx, 22); s7 = Ps2GprU64(ctx, 23); sp = Ps2GprU64(ctx, 29); v1 = Ps2GprU64(ctx, 3); fp = Ps2GprU64(ctx, 30); ra = Ps2GprU32(ctx, 31); a0 = Ps2GprU64(ctx, 4); a1 = Ps2GprU64(ctx, 5); a2 = Ps2GprU64(ctx, 6); a3 = Ps2GprU64(ctx, 7); t0 = Ps2GprU64(ctx, 8); t1 = Ps2GprU64(ctx, 9); vf0 = ctx->vu0_vf[0]; vf10 = ctx->vu0_vf[10]; vf11 = ctx->vu0_vf[11]; vf12 = ctx->vu0_vf[12]; vf13 = ctx->vu0_vf[13]; vf14 = ctx->vu0_vf[14]; vf15 = ctx->vu0_vf[15]; vf16 = ctx->vu0_vf[16]; vf17 = ctx->vu0_vf[17]; vf4 = ctx->vu0_vf[4]; vf5 = ctx->vu0_vf[5]; vf6 = ctx->vu0_vf[6]; vf8 = ctx->vu0_vf[8]; fcr31 = ctx->fcr31; vacc = ctx->vu0_acc; vq = ctx->vu0_q; vstat = ctx->vu0_status; df_at = false; df_s5 = false; df_ra = false;
     (a0 = (uint64_t)((uint64_t)v0 + (uint64_t)0ULL));
     {
-        const bool c = (int64_t)s1 < 0;
+        const bool c = (int32_t)s1 < 0;
         (s5 = (uint32_t)((int32_t)((int32_t)ADD32((uint32_t)s4, 16)))); df_s5 = true;
         if (!c) {
-            if ((int64_t)s1 <= 0) {
+            if ((int32_t)s1 <= 0) {
                 (a1 = (uint64_t)((int64_t)(int32_t)((int32_t)READ32(ADD32((uint32_t)a0, 348)))));
             } else {
                 (v0 = (uint64_t)((int64_t)(int32_t)((int32_t)((uint32_t)1 << 16))));
@@ -10467,7 +10467,7 @@ void manager_sub_0110E508(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime
     WRITE64(sp + 0x40u, Ps2GprU64(ctx, 31));
     (a0 = (uint64_t)((int64_t)(int32_t)((int32_t)READ32(ADD32((uint32_t)s7, 8)))));
     {
-        const bool c = (int64_t)a0 <= 0;
+        const bool c = (int32_t)a0 <= 0;
         f20 = FPU_MOV_S(f12);
         if (!c) {
             (v0 = (uint32_t)((int32_t)((int32_t)SLL32((uint32_t)s6, 4)))); df_v0 = true;
@@ -11134,7 +11134,7 @@ L_11113dc:
     WRITE32(ADD32((uint32_t)s5, 16), 0u);
     WRITE32(ADD32((uint32_t)s5, 24), (uint32_t)a1);
     {
-        const bool c = (int64_t)s0 <= 0;
+        const bool c = (int32_t)s0 <= 0;
         WRITE32(ADD32((uint32_t)s5, 32), 0u);
         if (!c) {
             (v0 = (uint64_t)((int64_t)(int32_t)((int32_t)((uint32_t)3 << 16))));
@@ -12692,7 +12692,7 @@ void ClipCollisionDirectCallBackOneObj(uint8_t *rdram, R5900Context *ctx, PS2Run
                     WRITE32(ADD32((uint32_t)sp, 448), (uint32_t)v0);
                     (v1 = (uint64_t)((int64_t)(int32_t)((int32_t)READ32(ADD32((uint32_t)a0, 4)))));
                     {
-                        const bool c = (int64_t)v1 <= 0;
+                        const bool c = (int32_t)v1 <= 0;
                         (v0 = (uint64_t)((int64_t)(int32_t)((int32_t)READ32(ADD32((uint32_t)sp, 456)))));
                         if (!c) {
 L_112cbe0:
@@ -13016,7 +13016,7 @@ L_112cf1c:
                                                     do { const __m128i _v = (READ128(ADD32((uint32_t)sp, 144))); ctx->r[2] = _v; std::memcpy(&v0, &_v, 8); } while (0);
                                                     WRITE128(ADD32((uint32_t)sp, 192), Ps2GprVecWithLow(ctx->r[2], v0));
                                                     (v1 = (uint64_t)((int64_t)(int32_t)((int32_t)READ32(ADD32(s7, 16)))));
-                                                    if ((int64_t)v1 <= 0) {
+                                                    if ((int32_t)v1 <= 0) {
                                                         (s4 = (uint64_t)(((uint64_t)0ULL < (uint64_t)s4) ? 1 : 0));
                                                     } else {
                                                         (s2 = (uint64_t)((int64_t)(int32_t)((int32_t)ADD32((uint32_t)sp, 208))));
@@ -13307,7 +13307,7 @@ L_112d0b4:
                                                     WRITE128(ADD32((uint32_t)sp, 320), Ps2GprVecWithLow(ctx->r[3], v1));
                                                     (v1 = (uint64_t)((int64_t)(int32_t)((int32_t)READ32(ADD32((uint32_t)sp, 476)))));
                                                     {
-                                                        const bool c = (int64_t)v1 <= 0;
+                                                        const bool c = (int32_t)v1 <= 0;
                                                         WRITE32(ADD32((uint32_t)sp, 472), (uint32_t)v0);
                                                         if (!c) {
                                                             (at = (uint32_t)((int32_t)((int32_t)((uint32_t)16256 << 16)))); df_at = true;
@@ -14644,7 +14644,7 @@ void SequenceKickWind(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     { uint32_t addr = ADD32((uint32_t)sp, 0); uint32_t aligned_addr = addr & ~7u; uint32_t offset = addr & 7u; uint32_t shift = offset << 3; uint64_t mask = 0xFFFFFFFFFFFFFFFFull << shift; uint64_t old_data = READ64(aligned_addr); uint64_t val = v0; uint64_t new_data = (old_data & ~mask) | ((val << shift) & mask); WRITE64(aligned_addr, new_data); }
     (v0 = (uint64_t)((int64_t)(int32_t)((int32_t)READ32(ADD32((uint32_t)sp, 0)))));
     {
-        const bool c = (int64_t)v0 >= 0;
+        const bool c = (int32_t)v0 >= 0;
         (a3 = (uint64_t)((int64_t)(int32_t)((int32_t)ADD32(0u, 8))));
         if (!c) {
             {
