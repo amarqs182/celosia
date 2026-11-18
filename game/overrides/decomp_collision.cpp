@@ -5676,6 +5676,95 @@ namespace decomp_collision
         return _mm_cvtss_f32(vu::addN(acc, vu::mulN(one, vu::lane<2>(m))));
     }
 
+    // Round S2 water-probe pre-test: skip triangles whose xz bounds cannot contain p1.
+    // The final triangle is always evaluated because its intermediate f0 value survives the loop.
+    // Defaults off (SOTC_S2WATER=0); set SOTC_S2WATER=1 to enable.
+    namespace s2water
+    {
+        inline bool on()
+        {
+            static const bool enabled = [] {
+                const char *e = std::getenv("SOTC_S2WATER");
+                return e != nullptr && std::atoi(e) != 0;
+            }();
+            return enabled;
+        }
+
+        inline float mn(float a, float b) { return a < b ? a : b; }
+        inline float mx(float a, float b) { return a > b ? a : b; }
+
+        inline bool outside(const uint8_t *rdram, uint32_t triangle, float px, float pz)
+        {
+            if (!G::plain(triangle, 0x20u))
+                return false;
+            if (!(std::fabs(px) < 1e6f && std::fabs(pz) < 1e6f))
+                return false;
+
+            float v[6];
+            std::memcpy(v, rdram + triangle + 8u, sizeof(v));
+            float big = mx(std::fabs(px), std::fabs(pz));
+            for (float f : v)
+            {
+                if (!(std::fabs(f) < 1e6f))
+                    return false;
+                big = mx(big, std::fabs(f));
+            }
+
+            const float ax = v[2] - v[0], az = v[3] - v[1];
+            const float bx = v[4] - v[0], bz = v[5] - v[1];
+            const float area = std::fabs(ax * bz - az * bx);
+            if (!(area > 1e-3f * (std::fabs(ax) + std::fabs(az)) * (std::fabs(bx) + std::fabs(bz))))
+                return false;
+
+            const float minx = mn(v[0], mn(v[2], v[4]));
+            const float maxx = mx(v[0], mx(v[2], v[4]));
+            const float minz = mn(v[1], mn(v[3], v[5]));
+            const float maxz = mx(v[1], mx(v[3], v[5]));
+            // The guest barycentric test accepts u,v >= -2e-5 and u+v <= 1+2e-5.
+            // In exact arithmetic that extends the triangle AABB by at most 4e-5
+            // of an axis extent; this margin is larger, with extra absolute / coordinate
+            // allowance. Non-finite and ill-conditioned triangles fall back to the full test.
+            const float margin = 1e-3f * mx(maxx - minx, maxz - minz) + 1e-3f + 2e-6f * big;
+            return px < minx - margin || px > maxx + margin ||
+                   pz < minz - margin || pz > maxz + margin;
+        }
+
+        // A segment's crossing point stays inside the xz rectangle formed by its endpoints.
+        inline bool outsideBox(const uint8_t *rdram, uint32_t triangle, float x0, float x1, float z0, float z1)
+        {
+            if (!G::plain(triangle, 0x20u))
+                return false;
+
+            float v[6];
+            std::memcpy(v, rdram + triangle + 8u, sizeof(v));
+            float big = mx(mx(std::fabs(x0), std::fabs(x1)), mx(std::fabs(z0), std::fabs(z1)));
+            for (float f : v)
+            {
+                if (!(std::fabs(f) < 1e6f))
+                    return false;
+                big = mx(big, std::fabs(f));
+            }
+
+            const float ax = v[2] - v[0], az = v[3] - v[1];
+            const float bx = v[4] - v[0], bz = v[5] - v[1];
+            const float area = std::fabs(ax * bz - az * bx);
+            if (!(area > 1e-3f * (std::fabs(ax) + std::fabs(az)) * (std::fabs(bx) + std::fabs(bz))))
+                return false;
+
+            const float minx = mn(v[0], mn(v[2], v[4]));
+            const float maxx = mx(v[0], mx(v[2], v[4]));
+            const float minz = mn(v[1], mn(v[3], v[5]));
+            const float maxz = mx(v[1], mx(v[3], v[5]));
+            // The guest barycentric test accepts u,v >= -2e-5 and u+v <= 1+2e-5.
+            // In exact arithmetic that extends the triangle AABB by at most 4e-5
+            // of an axis extent; this margin is larger, with extra absolute / coordinate
+            // allowance. Non-finite and ill-conditioned triangles fall back to the full test.
+            const float margin = 1e-3f * mx(maxx - minx, maxz - minz) + 1e-3f + 2e-6f * big;
+            return x1 < minx - margin || x0 > maxx + margin ||
+                   z1 < minz - margin || z0 > maxz + margin;
+        }
+    }
+
     void waterProbe(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         if (!sotc_decomp::collProbeOn() || sotc_decomp::jalTarget(rdram, 0x01117EE8u) != kGetLayoutClass)
@@ -5695,8 +5784,11 @@ namespace decomp_collision
         const float lowLimit = bitsFloat(0xB7A7C5ACu), highLimit = bitsFloat(0x37A7C5ACu), one = bitsFloat(0x3F800000u);
         float f0 = ctx->f[0];
         uint32_t t = g.u32(rec + 0x3Cu);
+        const bool pretest = s2water::on();
         for (int32_t i = 0; i < count; ++i, t += 0x20u)
         {
+            if (pretest && i + 1 < count && s2water::outside(rdram, t, p1x, p1z))
+                continue;
             const float vx = g.f32(t + 8u), vz = g.f32(t + 0xCu);
             const __m128 a = vu::clamp(_mm_setr_ps(FPU_SUB_S(g.f32(t + 0x10u), vx), 0.0f, FPU_SUB_S(g.f32(t + 0x14u), vz), 0.0f));
             const __m128 b = vu::clamp(_mm_setr_ps(FPU_SUB_S(g.f32(t + 0x18u), vx), 0.0f, FPU_SUB_S(g.f32(t + 0x1Cu), vz), 0.0f));
@@ -5761,7 +5853,8 @@ namespace decomp_collision
         const __m128 rowsIn[4] = {g.q(m), g.q(m + 0x10u), g.q(m + 0x20u), g.q(m + 0x30u)};
         const vu::Rows rows = vu::clampRows(rowsIn);
         const __m128 p0 = vu::apply(rows, g.q(GPR_U32(ctx, 5))), p1 = vu::apply(rows, g.q(GPR_U32(ctx, 6)));
-        const float p0y = _mm_cvtss_f32(vu::lane<1>(p0)), p1y = _mm_cvtss_f32(vu::lane<1>(p1));
+        const float p0x = _mm_cvtss_f32(p0), p0y = _mm_cvtss_f32(vu::lane<1>(p0)), p0z = _mm_cvtss_f32(vu::lane<2>(p0));
+        const float p1x = _mm_cvtss_f32(p1), p1y = _mm_cvtss_f32(vu::lane<1>(p1)), p1z = _mm_cvtss_f32(vu::lane<2>(p1));
         // A triangle filter (IsWaterSurfaceExistAround's, the
         // ClipCollisionVariableXZSurfaceCB's) runs as a guest call for every
         // triangle, so a crossing (b under a, which needs the recompiled
@@ -5780,8 +5873,35 @@ namespace decomp_collision
         const __m128 vf0 = ctx->vu0_vf[0];
         float f0 = ctx->f[0];
         uint32_t t = g.u32(rec + 0x3Cu);
+        const bool pretest = s2water::on() && filter == 0u;
+        int32_t lastBetween = -1;
+        if (pretest && count > 0)
+        {
+            for (int32_t i = count - 1; i >= 0; --i)
+            {
+                const float h = g.f32(t + 0x20u * static_cast<uint32_t>(i) + 4u);
+                if (FPU_C_OLT_S(p1y, h) && FPU_C_OLT_S(h, p0y))
+                {
+                    lastBetween = i;
+                    break;
+                }
+            }
+        }
+        const bool boxes = std::fabs(p0x) < 1e6f && std::fabs(p0z) < 1e6f && std::fabs(p1x) < 1e6f && std::fabs(p1z) < 1e6f;
+        const float x0 = s2water::mn(p0x, p1x), x1 = s2water::mx(p0x, p1x);
+        const float z0 = s2water::mn(p0z, p1z), z1 = s2water::mx(p0z, p1z);
         for (int32_t i = 0; i < count; ++i, t += 0x20u)
         {
+            if (pretest && i + 1 < count)
+            {
+                if (i > lastBetween)
+                    continue;
+                const float h = g.f32(t + 4u);
+                if (!FPU_C_OLT_S(p1y, h) || !FPU_C_OLT_S(h, p0y))
+                    continue;
+                if (i != lastBetween && boxes && s2water::outsideBox(rdram, t, x0, x1, z0, z1))
+                    continue;
+            }
             const float vx = g.f32(t + 8u), vz = g.f32(t + 0xCu), h = g.f32(t + 4u);
             g.put32(work + 0x10u, floatBits(FPU_SUB_S(g.f32(t + 0x10u), vx)));
             g.put32(work + 0x18u, floatBits(FPU_SUB_S(g.f32(t + 0x14u), vz)));
