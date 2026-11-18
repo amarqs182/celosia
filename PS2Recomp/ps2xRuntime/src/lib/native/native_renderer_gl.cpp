@@ -463,14 +463,29 @@ namespace
 #if !defined(PS2X_NATIVE_VITA)
     // ---- GLSL (macOS) ----
     const char *kMainVertex = PS2X_GL_VERSION_VERT R"(#define NOSCREEN 0
+#define TEXARR 0
+#define UBO 0
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec4 aColor;
 layout(location = 3) in vec2 aUV;
+#if TEXARR
+layout(location = 4) in float aTexSlot;
+uniform vec4 uTexSlots[64];
+flat out highp vec4 vTexMeta;
+#endif
+#if UBO
+layout(std140) uniform FrameBlock {
+    highp vec4 uFrameFogA;
+    highp vec4 uFrameFogCol;
+    highp vec4 uFrameTarget;
+};
+#else
+uniform vec4 uFogB;  // size, vertex fog, base
+#endif
 uniform vec4 uClip[4], uDirections[4], uColours[4]; // matrix columns
 uniform vec4 uMisc;  // lit, opacity, uv offset
-uniform vec4 uFogB;  // size, vertex fog, base
-uniform vec4 uFogC;  // scale, lod K, lod scale, max lod
+uniform vec4 uFogC;  // scale (or flags when UBO), lod K, lod scale, max lod
 uniform vec4 uGuard; // x > 0: layer 1's near plane (see Renderer::guardFor): what lies nearer than w = y cut
 uniform vec4 uInstanceClips[64];
 uniform int uInstanceCount;
@@ -493,7 +508,12 @@ void main()
     }
     // Depth from w, near plane at w = 0.1: depth = 1 - 0.1 / w.
     gl_Position = vec4(c.x, c.y, c.w - 0.2, c.w);
+#if UBO
+    bool hasVFog = (abs(uFogC.x - 1.0) < 0.25 || abs(uFogC.x - 3.0) < 0.25);
+    float fog = hasVFog ? clamp(uFrameFogA.w + uFrameFogCol.w / max(c.w, 1e-3), 0.0, 255.0) / 255.0 : 1.0;
+#else
     float fog = uFogB.z > 0.5 ? clamp(uFogB.w + uFogC.x / max(c.w, 1e-3), 0.0, 255.0) / 255.0 : 1.0;
+#endif
     vUV = vec4(aUV + uMisc.zw, c.w, fog * c.w);
     vColor = aColor / 128.0;
     vColor.a *= uMisc.y;
@@ -515,6 +535,9 @@ void main()
     // the microcode's clipper cuts the triangle there.
 #if !NOSCREEN
     vScreen = vec4(c.x, c.y, c.w, uGuard.x > 0.0 ? c.w - uGuard.y : 1.0);
+#endif
+#if TEXARR
+    vTexMeta = uTexSlots[clamp(int(aTexSlot + 0.5), 0, 63)];
 #endif
 }
 )";
@@ -612,31 +635,60 @@ void main()
 #ifndef UNTEX
 #define UNTEX 0
 #endif
+#ifndef TEXARR
+#define TEXARR 0
+#endif
+#ifndef UBO
+#define UBO 0
+#endif
 in highp vec4 vUV;
 in mediump vec4 vColor;
 #if !NOSCREEN
 in highp vec4 vScreen;
 #endif
-#if !UNTEX
+#if TEXARR
+uniform highp sampler2DArray uTexArr;
+flat in highp vec4 vTexMeta; // layer, lodK, lodScale, maxLod
+#elif !UNTEX
 uniform sampler2D uTex;
 #endif
 #if BG
 uniform sampler2D uBackground;
+#endif
+#if UBO
+layout(std140) uniform FrameBlock {
+    highp vec4 uFrameFogA;
+    highp vec4 uFrameFogCol;
+    highp vec4 uFrameTarget;
+};
+#else
+#if BG
 uniform vec4 uFogA;      // start, width, steps, fogged
 #endif
-uniform vec4 uFogC;      // scale, lod K, lod scale, max lod
 uniform vec4 uFogColour; // rgb, textured mode
+#endif
+uniform vec4 uFogC;      // scale (or flags when UBO), lod K, lod scale, max lod
 #if CUT
 uniform vec4 uAlpha;     // alpha test: cut under x (at least 0.02), and at / over y when y > 0
 #endif
 out vec4 oColor;
 void main()
 {
+#if UBO
+    mediump float textured = uFogC.x >= 1.5 ? 1.0 : 0.0;
+#else
     mediump float textured = uFogColour.w;
+#endif
     highp float depth = vUV.z;
 #if UNTEX
     mediump vec4 t = vec4(vec3(128.0 / 255.0), 1.0);
     mediump float alpha = clamp(vColor.a, 0.0, 1.0);
+#elif TEXARR
+    highp float minLod = floor(vTexMeta.x * (1.0 / 256.0));
+    highp float layer = vTexMeta.x - minLod * 256.0;
+    mediump float lod = vTexMeta.w > minLod ? clamp(log2(max(depth, 1e-3)) * vTexMeta.z + vTexMeta.y, minLod, vTexMeta.w) : minLod;
+    mediump vec4 t = textured > 0.5 ? textureLod(uTexArr, vec3(vUV.xy, layer), lod) : vec4(vec3(128.0 / 255.0), 1.0);
+    mediump float alpha = clamp(t.a * (textured > 0.5 ? 2.0 : 1.0) * vColor.a, 0.0, 1.0);
 #elif NOLOD
     mediump vec4 t = texture(uTex, vUV.xy);
     mediump float alpha = clamp(t.a * 2.0 * vColor.a, 0.0, 1.0);
@@ -655,6 +707,18 @@ void main()
 #endif
     mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
     mediump vec3 rgb = raw / (vec3(1.0) + raw * 0.35);
+#if UBO
+    rgb = mix(uFrameFogCol.rgb, rgb, vUV.w / vUV.z);
+#if BG
+    {
+        highp vec2 screen = vScreen.xy / vScreen.z * 0.5 + 0.5;
+        mediump float f = clamp((depth - uFrameFogA.x) / uFrameFogA.y, 0.0, 1.0);
+        if (uFrameFogA.z > 0.0)
+            f = floor(f * uFrameFogA.z) / uFrameFogA.z;
+        rgb = mix(rgb, texture(uBackground, screen).rgb, f);
+    }
+#endif
+#else
     rgb = mix(uFogColour.rgb, rgb, vUV.w / vUV.z);
 #if BG
     if (uFogA.w > 0.5)
@@ -665,6 +729,7 @@ void main()
             f = floor(f * uFogA.z) / uFogA.z;
         rgb = mix(rgb, texture(uBackground, screen).rgb, f);
     }
+#endif
 #endif
 #if CUT && SOFT
     oColor = away ? vec4(0.0) : vec4(rgb, alpha);
@@ -1564,6 +1629,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         bool indexed = false; // `count` indices: dynamic from indexArena[firstIndex], else in indexBuffer
         uint32_t firstIndex = 0;
         GLuint indexBuffer = 0;
+#if !defined(PS2X_NATIVE_VITA)
+        GLuint vao = 0;
+#endif
         // Cached RAM source for static indexed meshes so glMergeDraws can pack
         // repeated multi-draw indexed runs into one VBO+IBO without expanding triangles.
         std::vector<native_renderer::Vertex> srcVerts;
@@ -1582,6 +1650,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     struct Texture
     {
         GLuint name = 0;
+        uint32_t width = 0, height = 0, levels = 0;
         uint32_t clamp = 0; // the wrap set on it (bit 0 s, bit 1 t clamp): new textures repeat
         uint32_t filter = 2; // the min / mag filter set on it (Tuning::textureFilter; 2 trilinear, as uploaded)
         bool mipped = false; // has mip levels
@@ -1600,6 +1669,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         // (the A/B's `swizzle73` picks one per frame).
         GLuint swz = 0;
         bool swizzled = false;
+#if !defined(PS2X_NATIVE_VITA)
+        uint64_t key = 0;
+        uint32_t texGen = 1;
+        std::vector<uint8_t> arrBytes;
+        int32_t arrBucket[4] = {-1, -1, -1, -1};
+        int16_t arrLayer[4] = {-1, -1, -1, -1};
+#endif
     };
 
     struct Draw
@@ -2267,8 +2343,15 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             uint32_t mergedCount = 0;  // run > 1: vertices (or indices when runIbo != 0)
             int runPool = -1;          // run > 1, meshes apart: its copy (runs), in this pool from runFirst
             uint32_t runFirst = 0;
+            uint32_t mergedVerts = 0;  // run > 1, indexed run vertex count (glDrawRangeElements)
             GLuint runVbo = 0;         // run > 1, indexed run copy VBO
             GLuint runIbo = 0;         // run > 1, indexed run copy IBO (0: non-indexed)
+            GLuint runVao = 0;         // run > 1, TexArray indexed run VAO
+            GLuint runArrTex = 0;      // run > 1, GL_TEXTURE_2D_ARRAY handle (0: plain GL_TEXTURE_2D)
+            uint32_t runArrSlotOffset = 0;
+            uint16_t runArrSlotCount = 0;
+            uint8_t runTexMinAlpha = 0;
+            uint8_t runTexMaxAlpha = 0xFF;
             uint8_t minAlpha = 0;      // the least vertex alpha of its mesh(es) (0: not known)
             uint8_t maxAlpha = 0xFF;   // round 45: the greatest (0xFF: not known)
             float minW = -1.0f;        // round 75: a background draw's least clip w over its mesh(es)' bounds (-1: not known)
@@ -2285,14 +2368,16 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         struct RunCopy
         {
             int pool = -1; // -1: seen, not copied yet
-            uint32_t first = 0, count = 0;
+            uint32_t first = 0, count = 0, vertCount = 0;
             bool indexed = false;
-            GLuint vbo = 0, ibo = 0;
+            bool texArray = false;
+            GLuint vbo = 0, ibo = 0, vao = 0;
             uint64_t bytes = 0;
             uint64_t used = 0;
             uint32_t frames = 0; // frames in a row it was drawn (copied from kRunFrames on)
             uint32_t made = 0;   // round 118: times copied (churn: made again after its copy went)
             uint64_t madeAt = 0; // round 118: the frame of its last copy
+            uint8_t texMinAlpha = 0, texMaxAlpha = 0xFF;
         };
         // Round 118 ([hitch118] / [hitch118s] with SOTC_HITCH112_LOG=1): where
         // run copies come from and why they are made again.
@@ -2325,6 +2410,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         bool copyRun(size_t from, size_t to, uint32_t total, RunCopy &copy);
         bool copyRunBody(size_t from, size_t to, uint32_t total, RunCopy &copy);
         bool copyIndexedRun(size_t from, size_t to, uint32_t totalIndices, uint32_t totalVerts, RunCopy &copy);
+#if !defined(PS2X_NATIVE_VITA)
+        bool ensureTexArrayLayer(Texture &t, uint32_t clamp, uint32_t filter, int &outBucket, uint16_t &outLayer);
+        bool copyTexArrayRun(size_t from, size_t to, uint32_t totalIndices, uint32_t totalVerts, RunCopy &copy, const std::vector<uint64_t> &slotKeys);
+#else
+        bool ensureTexArrayLayer(Texture &, uint32_t, uint32_t, int &, uint16_t &) { return false; }
+        bool copyTexArrayRun(size_t, size_t, uint32_t, uint32_t, RunCopy &, const std::vector<uint64_t> &) { return false; }
+#endif
         static constexpr uint64_t kMaxIndexedSrcBytes = 20ull * 1024ull * 1024ull;
         static constexpr uint64_t kMaxIndexedRunBytes = 8ull * 1024ull * 1024ull;
         static bool runSourceOn();
@@ -2363,7 +2455,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         void sortFree(); // round 87 (Tuning glSort87)
         struct SortKey87
         {
-            uint64_t tex, state, where, clip;
+            uint64_t group, tex, state, tieTex, where, clip;
             uint32_t k;
         };
         std::vector<SortKey87> sortKeys;
@@ -2385,6 +2477,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             bool on = false;
             uint64_t start = 0, plan = 0, passes = 0, calls = 0, count = 0, total = 0, frames = 0;
             uint64_t arenaUs = 0, arenaBytes = 0; // the frame's own vertices / indices sent
+            uint64_t drawLoopUs = 0, progCalls = 0, unifCalls = 0, unifSkips = 0, unifNonClip = 0;
+            uint64_t vaoAttribs = 0, vaoHits = 0, texBinds = 0, texParams = 0, blendChg = 0, dtChg = 0, dmChg = 0;
+            uint32_t pendingRsdMask = 7u;
+            bool pendingUnifDirty = false;
+            uint64_t rsdDraws = 0, rsdProg = 0, rsdDm = 0, rsdPipe = 0, fauOnlyDraws = 0, cleanDraws = 0;
         } phases;
         void phaseEnd()
         {
@@ -2404,6 +2501,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         {
             uint64_t idxLeaderTotal = 0, idxIneligibleNoSrc = 0, idxIneligibleOther = 0, idxEligible = 0;
             uint64_t brkNotIdxMesh = 0, brkNoSrc = 0, brkIdxCap = 0, brkVertCap = 0, brkTex = 0, brkState = 0, brkClip = 0, brkEnd = 0;
+            uint64_t texBrkMergeable = 0, texBrkDiffState = 0, texBrkDiffClip = 0;
+            uint64_t texDiffBlend = 0, texDiffOrder = 0, texDiffAlpha = 0, texDiffClamp = 0, texDiffOpacity = 0;
+            uint64_t texDiffUvOff = 0, texDiffLod = 0, texDiffDepth = 0, texDiffSkin = 0, texDiffLit = 0, texDiffFog = 0, texDiffOther = 0;
+            uint64_t texDiffDepthDead = 0, texDiffLodMax0 = 0, texBrkRelaxed = 0, texBrkRelaxedSame = 0;
+            uint64_t texArrRuns = 0, texArrMembers = 0, texArrCopies = 0;
+            uint64_t texBrkSameSize = 0, texBrkSameMips = 0, texBrkRepeat = 0, texBrkClamp = 0, texBrkOpaque = 0;
+            uint64_t texBucket[9] = {}; // 32x32, 64x64, 128x128, 256x256, 64x128, 128x64, 128x256, 256x128, other
             uint64_t candSingle = 0, candRuns = 0, candMembers = 0;
             uint64_t runsFirstSeen = 0, runsWaitingRepeat = 0, runsReady = 0, runsReadyMerged = 0, copyCountMismatch = 0;
             uint64_t copyAttempts = 0, copySucceeded = 0, copyFailedBudget = 0, copyFailedNoSrc = 0;
@@ -2445,6 +2549,28 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         // newlib heap), kept as they change: the eviction budget and [gl:mem].
         uint64_t textureBytes = 0, textureHeapBytes = 0, meshBytes = 0, skinnedBytes = 0;
         uint64_t indexedSrcBytes = 0, indexedRunBytes = 0;
+        uint64_t arrCpuBytes = 0, arrVramBytes = 0;
+        struct TexArrayBucket
+        {
+            GLuint tex = 0;
+            uint32_t width = 0, height = 0, levels = 0;
+            uint32_t clamp = 0, filter = 1;
+            uint32_t capacity = 64, nextLayer = 0;
+            std::vector<uint16_t> freeLayers;
+        };
+        std::vector<TexArrayBucket> texArrayBuckets;
+        std::vector<float> texArrSlotData;
+        int32_t maxArrayLayers = 64;
+        bool texArrReady = false;
+        static inline bool texArrayEnabled()
+        {
+#if !defined(PS2X_NATIVE_VITA)
+            static const bool on = std::getenv("SOTC_GL_TEXARRAY") && std::atoi(std::getenv("SOTC_GL_TEXARRAY")) != 0;
+            return on;
+#else
+            return false;
+#endif
+        }
         void forget(const Mesh &m)
         {
             meshBytes -= m.bytes;
@@ -2452,11 +2578,26 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 skinnedBytes -= m.bytes;
             indexedSrcBytes -= m.srcBytes;
         }
-        void forget(const Texture &t)
+        void forget(Texture &t)
         {
             textureBytes -= t.bytes;
             if (t.inHeap)
                 textureHeapBytes -= t.bytes;
+#if !defined(PS2X_NATIVE_VITA)
+            if (!t.arrBytes.empty())
+            {
+                arrCpuBytes -= t.arrBytes.size();
+                std::vector<uint8_t>().swap(t.arrBytes);
+            }
+            for (int c = 0; c < 4; ++c)
+            {
+                if (t.arrBucket[c] >= 0 && t.arrLayer[c] >= 0 && static_cast<size_t>(t.arrBucket[c]) < texArrayBuckets.size())
+                    texArrayBuckets[static_cast<size_t>(t.arrBucket[c])].freeLayers.push_back(static_cast<uint16_t>(t.arrLayer[c]));
+                t.arrBucket[c] = -1;
+                t.arrLayer[c] = -1;
+            }
+            ++t.texGen;
+#endif
         }
         // Round 73: the GL texture a draw binds (the swizzled copy when there is one and the switch is on).
         static GLuint drawName(const Texture &t) { return t.swz && native_renderer::tuning().glSwizzle ? t.swz : t.name; }
@@ -2526,7 +2667,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         struct DrawCache
         {
             int blend = -1, depthTest = -1, depthMask = -1;
-            GLuint vao = ~0u, buffer = ~0u, texture = ~0u;
+            GLuint vao = ~0u, buffer = ~0u, texture = ~0u, arrTex = ~0u;
         } cache;
         // The main program's per-draw uniforms: locations looked up once, the
         // last values sent (kept across frames: nothing else sets them).
@@ -2549,6 +2690,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             GLint locInstanceClips = -1;
             GLint locInstanceCount = -1;
             int lastInstanceCount = 1;
+            GLint locTexSlots = -1;
         };
         // Round 45: slot 10 the shadow volumes' program (kVolumeFragment).
         // Round 73: 11-18 the lean ones reading a one-level texture without a
@@ -2562,7 +2704,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         // glUntex98) at 25 + 4 x skinned + 2 x BG + CUT, 33-34 their SOFT
         // ones, 35-36 their no-screen ones (at + skinned).
         // 37-38 the plain (NOLOD) SOFT ones (Tuning glPlainSoft98).
-        static constexpr int kMainSlots = 39;
+        // 39-44 the GL_TEXTURE_2D_ARRAY variants (SOTC_GL_TEXARRAY=1): 39..42 bg*2+cut, 43 soft, 44 noscreen.
+        static constexpr int kMainSlots = 45;
+        static constexpr int kTexArrSlot = 39;
+        static constexpr int kTexArrSoftSlot = 43;
+        static constexpr int kTexArrNoScreenSlot = 44;
         static constexpr int kPlainSoftSlot = 37;
         static constexpr int kUntexSlot = 25;
         static constexpr int kUntexSoftSlot = 33;
@@ -2601,10 +2747,21 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                         break;
                 }
                 if (i == qwords)
+                {
+                    if (phases.on)
+                        ++phases.unifSkips;
                     return;
+                }
             }
             std::memcpy(last, v, bytes);
             m.lastCount[slot] = count;
+            if (phases.on)
+            {
+                ++phases.unifCalls;
+                phases.pendingUnifDirty = true;
+                if (slot != uClip && slot != uDirections && slot != uColours)
+                    ++phases.unifNonClip;
+            }
             glUniform4fv(m.location[slot], count, v);
         }
         // This frame's dynamic vertices (and the indices of the indexed ones).
@@ -2706,7 +2863,165 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         };
         std::vector<Upload> uploads;
         std::vector<FrameMesh> frameMeshes;
-        std::vector<GLuint> deadBuffers, deadTextures; // evicted (GlBackend::evictKept): deleted before the next frame
+        std::vector<GLuint> deadBuffers, deadTextures, deadVaos; // evicted (GlBackend::evictKept): deleted before the next frame
+        GLuint frameUbo = 0;
+        bool uboReady = false;
+        static inline bool uboEnabled()
+        {
+#if !defined(PS2X_NATIVE_VITA)
+            static const bool on = std::getenv("SOTC_GL_UBO") && std::atoi(std::getenv("SOTC_GL_UBO")) != 0;
+            return on;
+#else
+            return false;
+#endif
+        }
+        static inline bool promote128Enabled()
+        {
+#if !defined(PS2X_NATIVE_VITA)
+            static const bool on = std::getenv("SOTC_GL_PROMOTE_128") && std::atoi(std::getenv("SOTC_GL_PROMOTE_128")) != 0;
+            return on;
+#else
+            return false;
+#endif
+        }
+        static inline bool drawRangeEnabled()
+        {
+#if !defined(PS2X_NATIVE_VITA)
+            static const bool on = std::getenv("SOTC_GL_DRAW_RANGE") && std::atoi(std::getenv("SOTC_GL_DRAW_RANGE")) != 0;
+            return on;
+#else
+            return false;
+#endif
+        }
+        static inline bool isPow2Dim(uint32_t v) noexcept { return v != 0u && (v & (v - 1u)) == 0u; }
+        static inline bool shouldPromoteToArray128(const Texture &t) noexcept
+        {
+            if (!promote128Enabled())
+                return false;
+            if (!isPow2Dim(t.width) || !isPow2Dim(t.height))
+                return false;
+            if (t.width < 32u || t.height < 32u || t.width > 128u || t.height > 128u)
+                return false;
+            return t.width < 128u || t.height < 128u;
+        }
+        static inline void texArrayBucketDims(const Texture *t, uint32_t &bw, uint32_t &bh, uint32_t &blevels, float &lodShift, uint32_t &mipOffset) noexcept
+        {
+            if (t && shouldPromoteToArray128(*t))
+            {
+                bw = 128u;
+                bh = 128u;
+                blevels = t->levels > 1u ? 8u : 1u;
+                const uint32_t maxDim = std::max(t->width, t->height);
+                mipOffset = (blevels > 1u) ? ((maxDim == 32u) ? 2u : (maxDim == 64u) ? 1u : 0u) : 0u;
+                lodShift = static_cast<float>(mipOffset);
+                return;
+            }
+            bw = t ? t->width : 0u;
+            bh = t ? t->height : 0u;
+            blevels = t ? t->levels : 0u;
+            mipOffset = 0u;
+            lodShift = 0.0f;
+        }
+        static inline uint16_t wrapTexelCoord(int idx, int size, GLenum wrapMode) noexcept
+        {
+            if (wrapMode == GL_REPEAT)
+                return static_cast<uint16_t>(idx & (size - 1));
+            return static_cast<uint16_t>(std::clamp(idx, 0, size - 1));
+        }
+        struct AxisSampleLut
+        {
+            uint16_t i0, i1, w0, w1;
+        };
+        static inline void buildAxisUpsampleLut(AxisSampleLut *outLut, uint32_t srcN, uint32_t dstN, GLenum wrapMode, bool useNearest) noexcept
+        {
+            if (useNearest || srcN == dstN)
+            {
+                for (uint32_t d = 0; d < dstN; ++d)
+                {
+                    const uint16_t idx = static_cast<uint16_t>((d * srcN) / dstN);
+                    outLut[d] = {idx, idx, 256u, 0u};
+                }
+                return;
+            }
+            const float scale = static_cast<float>(srcN) / static_cast<float>(dstN);
+            const int iSrcN = static_cast<int>(srcN);
+            for (uint32_t d = 0; d < dstN; ++d)
+            {
+                const float s = (static_cast<float>(d) + 0.5f) * scale - 0.5f;
+                const int idx0 = static_cast<int>(std::floor(s));
+                const int idx1 = idx0 + 1;
+                const int frac = std::clamp(static_cast<int>(std::lround((s - static_cast<float>(idx0)) * 256.0f)), 0, 256);
+                outLut[d] = {wrapTexelCoord(idx0, iSrcN, wrapMode), wrapTexelCoord(idx1, iSrcN, wrapMode),
+                             static_cast<uint16_t>(256 - frac), static_cast<uint16_t>(frac)};
+            }
+        }
+        static void resampleRgbaToTarget(const uint8_t *src, uint32_t srcW, uint32_t srcH,
+                                         uint8_t *dst, uint32_t dstW, uint32_t dstH,
+                                         GLenum wrapS, GLenum wrapT, bool useNearest) noexcept
+        {
+            AxisSampleLut lutX[128], lutY[128];
+            buildAxisUpsampleLut(lutX, srcW, dstW, wrapS, useNearest);
+            buildAxisUpsampleLut(lutY, srcH, dstH, wrapT, useNearest);
+            if (useNearest)
+            {
+                const auto *srcPx = reinterpret_cast<const uint32_t *>(src);
+                auto *dstPx = reinterpret_cast<uint32_t *>(dst);
+                for (uint32_t y = 0; y < dstH; ++y)
+                {
+                    const uint32_t *row = srcPx + static_cast<size_t>(lutY[y].i0) * srcW;
+                    uint32_t *outRow = dstPx + static_cast<size_t>(y) * dstW;
+                    for (uint32_t x = 0; x < dstW; ++x)
+                        outRow[x] = row[lutX[x].i0];
+                }
+                return;
+            }
+            for (uint32_t y = 0; y < dstH; ++y)
+            {
+                const AxisSampleLut sy = lutY[y];
+                const uint8_t *row0 = src + (static_cast<size_t>(sy.i0) * srcW) * 4u;
+                const uint8_t *row1 = src + (static_cast<size_t>(sy.i1) * srcW) * 4u;
+                uint8_t *out = dst + (static_cast<size_t>(y) * dstW) * 4u;
+                for (uint32_t x = 0; x < dstW; ++x)
+                {
+                    const AxisSampleLut sx = lutX[x];
+                    const uint8_t *p00 = row0 + static_cast<size_t>(sx.i0) * 4u;
+                    const uint8_t *p10 = row0 + static_cast<size_t>(sx.i1) * 4u;
+                    const uint8_t *p01 = row1 + static_cast<size_t>(sx.i0) * 4u;
+                    const uint8_t *p11 = row1 + static_cast<size_t>(sx.i1) * 4u;
+                    const uint32_t b00 = (static_cast<uint32_t>(sx.w0) * sy.w0) >> 4;
+                    const uint32_t b10 = (static_cast<uint32_t>(sx.w1) * sy.w0) >> 4;
+                    const uint32_t b01 = (static_cast<uint32_t>(sx.w0) * sy.w1) >> 4;
+                    const uint32_t b11 = 4096u - (b00 + b10 + b01);
+                    const uint32_t a00 = p00[3], a10 = p10[3], a01 = p01[3], a11 = p11[3];
+                    const uint32_t outA = (b00 * a00 + b10 * a10 + b01 * a01 + b11 * a11 + 2048u) >> 12;
+                    const uint32_t aw00 = b00 * a00, aw10 = b10 * a10, aw01 = b01 * a01, aw11 = b11 * a11;
+                    const uint32_t awSum = aw00 + aw10 + aw01 + aw11;
+                    if (awSum > 0u)
+                    {
+                        const uint32_t half = awSum >> 1;
+                        out[0] = static_cast<uint8_t>((aw00 * p00[0] + aw10 * p10[0] + aw01 * p01[0] + aw11 * p11[0] + half) / awSum);
+                        out[1] = static_cast<uint8_t>((aw00 * p00[1] + aw10 * p10[1] + aw01 * p01[1] + aw11 * p11[1] + half) / awSum);
+                        out[2] = static_cast<uint8_t>((aw00 * p00[2] + aw10 * p10[2] + aw01 * p01[2] + aw11 * p11[2] + half) / awSum);
+                    }
+                    else
+                    {
+                        out[0] = static_cast<uint8_t>((b00 * p00[0] + b10 * p10[0] + b01 * p01[0] + b11 * p11[0] + 2048u) >> 12);
+                        out[1] = static_cast<uint8_t>((b00 * p00[1] + b10 * p10[1] + b01 * p01[1] + b11 * p11[1] + 2048u) >> 12);
+                        out[2] = static_cast<uint8_t>((b00 * p00[2] + b10 * p10[2] + b01 * p01[2] + b11 * p11[2] + 2048u) >> 12);
+                    }
+                    out[3] = static_cast<uint8_t>(outA);
+                }
+            }
+        }
+        static inline bool staticVaoEnabled()
+        {
+#if !defined(PS2X_NATIVE_VITA)
+            static const bool on = std::getenv("SOTC_GL_STATIC_VAO") && std::atoi(std::getenv("SOTC_GL_STATIC_VAO")) != 0;
+            return on;
+#else
+            return false;
+#endif
+        }
         void applyUploads();
         void applyUploadList(std::vector<Upload> &list); // and empties it
         std::vector<uint8_t> texChain118; // round 118: uploadTexture's swizzled chain (kept between uploads)
@@ -2983,6 +3298,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         {
             if (p == boundProgram)
                 return;
+            if (phases.on)
+            {
+                ++phases.progCalls;
+                phases.pendingRsdMask |= 1u;
+            }
             glUseProgram(p);
             boundProgram = p;
             for (int i = 0; i < kMainSlots; ++i)
@@ -3041,11 +3361,25 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             return head + pose + body;
         }
 
-        static std::string worldFragment(bool bg, bool cut, bool nolod = false, bool soft = false, bool untex = false, bool noscreen = false)
+        static std::string worldVertexSrc(bool noscreen, bool texarr, bool ubo)
+        {
+            std::string s = kMainVertex;
+            if (noscreen)
+                if (const size_t at = s.find("#define NOSCREEN 0\n"); at != std::string::npos)
+                    s.replace(at, 19, "#define NOSCREEN 1\n");
+            if (texarr)
+                if (const size_t at = s.find("#define TEXARR 0\n"); at != std::string::npos)
+                    s.replace(at, 17, "#define TEXARR 1\n");
+            if (ubo)
+                if (const size_t at = s.find("#define UBO 0\n"); at != std::string::npos)
+                    s.replace(at, 14, "#define UBO 1\n");
+            return s;
+        }
+        static std::string worldFragment(bool bg, bool cut, bool nolod = false, bool soft = false, bool untex = false, bool noscreen = false, bool texarr = false, bool ubo = false)
         {
             const std::string defines = std::string("#define BG ") + (bg ? "1" : "0") + "\n#define CUT " + (cut ? "1" : "0") + "\n#define NOLOD " + (nolod ? "1" : "0") +
                                         "\n#define SOFT " + (soft ? "1" : "0") + "\n#define UNTEX " + (untex ? "1" : "0") +
-                                        (noscreen ? "\n#define NOSCREEN 1\n" : "\n");
+                                        (noscreen ? "\n#define NOSCREEN 1" : "") + (texarr ? "\n#define TEXARR 1" : "") + (ubo ? "\n#define UBO 1\n" : "\n");
 #if defined(PS2X_NATIVE_VITA)
             return defines + kWorldFragment;
 #else
@@ -3069,6 +3403,57 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_FALSE, stride, reinterpret_cast<const void *>(offsetof(native_renderer::Vertex, r)));
             glEnableVertexAttribArray(3);
             glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(offsetof(native_renderer::Vertex, u)));
+            return v;
+        }
+        struct TexArrVertex
+        {
+            native_renderer::Vertex v;
+            float slot;
+        };
+        static_assert(sizeof(TexArrVertex) == 40, "TexArrVertex layout");
+        static GLuint makeStaticVao(GLuint vbo, GLuint ibo, bool skinned)
+        {
+            GLuint v = 0;
+            glGenVertexArrays(1, &v);
+            glBindVertexArray(v);
+            glBindBuffer(GL_ARRAY_BUFFER, vbo);
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
+            const GLsizei stride = static_cast<GLsizei>(skinned ? sizeof(native_renderer::SkinVertex) : sizeof(native_renderer::Vertex));
+            glEnableVertexAttribArray(0);
+            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(offsetof(native_renderer::Vertex, x)));
+            glEnableVertexAttribArray(1);
+            glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(offsetof(native_renderer::Vertex, nx)));
+            glEnableVertexAttribArray(2);
+            glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_FALSE, stride, reinterpret_cast<const void *>(offsetof(native_renderer::Vertex, r)));
+            glEnableVertexAttribArray(3);
+            glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(offsetof(native_renderer::Vertex, u)));
+            if (skinned)
+            {
+                glEnableVertexAttribArray(4);
+                glVertexAttribPointer(4, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(offsetof(native_renderer::SkinVertex, bone)));
+                glEnableVertexAttribArray(5);
+                glVertexAttribPointer(5, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(offsetof(native_renderer::SkinVertex, weight)));
+            }
+            return v;
+        }
+        static GLuint makeTexArrVao(GLuint vbo, GLuint ibo)
+        {
+            GLuint v = 0;
+            glGenVertexArrays(1, &v);
+            glBindVertexArray(v);
+            glBindBuffer(GL_ARRAY_BUFFER, vbo);
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
+            const GLsizei stride = static_cast<GLsizei>(sizeof(TexArrVertex));
+            glEnableVertexAttribArray(0);
+            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(offsetof(native_renderer::Vertex, x)));
+            glEnableVertexAttribArray(1);
+            glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(offsetof(native_renderer::Vertex, nx)));
+            glEnableVertexAttribArray(2);
+            glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_FALSE, stride, reinterpret_cast<const void *>(offsetof(native_renderer::Vertex, r)));
+            glEnableVertexAttribArray(3);
+            glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(offsetof(native_renderer::Vertex, u)));
+            glEnableVertexAttribArray(4);
+            glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(offsetof(TexArrVertex, slot)));
             return v;
         }
 #endif
@@ -3198,53 +3583,58 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #else
             const int plainKinds = 1;
 #endif
+            const bool useUbo = uboEnabled();
+            const std::string leanVertSrc = useUbo ? worldVertexSrc(false, false, true) : std::string(kMainVertex);
+            const GLuint leanVertex = useUbo ? compile(GL_VERTEX_SHADER, leanVertSrc.c_str()) : mainVertex;
+            const std::string leanSkinSrc = (useUbo && skinProgram) ? skinnedVertex(leanVertSrc.c_str()) : std::string();
+            const GLuint leanSkinVertex = useUbo ? (leanSkinSrc.empty() ? 0 : compile(GL_VERTEX_SHADER, leanSkinSrc.c_str())) : skinVertex;
             for (int plain = 0; plain < plainKinds; ++plain)
                 for (int skinned = 0; skinned < 2; ++skinned)
                     for (int bg = 0; bg < 2; ++bg)
                         for (int cut = 0; cut < 2; ++cut)
                         {
-                            if (skinned && !skinProgram)
+                            if (skinned && !leanSkinVertex)
                                 continue;
-                            const std::string fragment = worldFragment(bg != 0, cut != 0, plain != 0);
+                            const std::string fragment = worldFragment(bg != 0, cut != 0, plain != 0, false, false, false, false, useUbo);
                             mains[(plain ? kPlainSlot : 2) + skinned * 4 + bg * 2 + cut].program =
-                                skinned ? program(skinVertex, fragment.c_str(), {"aPos", "aNormal", "aColor", "aUV", "aBones", "aWeights"})
-                                        : program(mainVertex, fragment.c_str(), {"aPos", "aNormal", "aColor", "aUV"});
+                                skinned ? program(leanSkinVertex, fragment.c_str(), {"aPos", "aNormal", "aColor", "aUV", "aBones", "aWeights"})
+                                        : program(leanVertex, fragment.c_str(), {"aPos", "aNormal", "aColor", "aUV"});
                         }
 #if defined(PS2X_NATIVE_VITA) || defined(PS2X_NATIVE_GLES)
             for (int skinned = 0; skinned < 2; ++skinned) // round 75: the cut-out without discard (not BG: see kWorldFragment)
             {
-                if (skinned && !skinProgram)
+                if (skinned && !leanSkinVertex)
                     continue;
-                const std::string fragment = worldFragment(false, true, false, true);
-                mains[kSoftSlot + skinned].program = skinned ? program(skinVertex, fragment.c_str(), {"aPos", "aNormal", "aColor", "aUV", "aBones", "aWeights"})
-                                                             : program(mainVertex, fragment.c_str(), {"aPos", "aNormal", "aColor", "aUV"});
+                const std::string fragment = worldFragment(false, true, false, true, false, false, false, useUbo);
+                mains[kSoftSlot + skinned].program = skinned ? program(leanSkinVertex, fragment.c_str(), {"aPos", "aNormal", "aColor", "aUV", "aBones", "aWeights"})
+                                                             : program(leanVertex, fragment.c_str(), {"aPos", "aNormal", "aColor", "aUV"});
             }
             // Round 98 (Tuning glUntex98): the untextured lean / SOFT programs.
             for (int skinned = 0; skinned < 2; ++skinned)
             {
-                if (skinned && !skinProgram)
+                if (skinned && !leanSkinVertex)
                     continue;
                 for (int bg = 0; bg < 2; ++bg)
                     for (int cut = 0; cut < 2; ++cut)
                     {
-                        const std::string fragment = worldFragment(bg != 0, cut != 0, false, false, true);
+                        const std::string fragment = worldFragment(bg != 0, cut != 0, false, false, true, false, false, useUbo);
                         mains[kUntexSlot + skinned * 4 + bg * 2 + cut].program =
-                            skinned ? program(skinVertex, fragment.c_str(), {"aPos", "aNormal", "aColor", "aUV", "aBones", "aWeights"})
-                                    : program(mainVertex, fragment.c_str(), {"aPos", "aNormal", "aColor", "aUV"});
+                            skinned ? program(leanSkinVertex, fragment.c_str(), {"aPos", "aNormal", "aColor", "aUV", "aBones", "aWeights"})
+                                    : program(leanVertex, fragment.c_str(), {"aPos", "aNormal", "aColor", "aUV"});
                     }
-                const std::string soft = worldFragment(false, true, false, true, true);
-                mains[kUntexSoftSlot + skinned].program = skinned ? program(skinVertex, soft.c_str(), {"aPos", "aNormal", "aColor", "aUV", "aBones", "aWeights"})
-                                                                  : program(mainVertex, soft.c_str(), {"aPos", "aNormal", "aColor", "aUV"});
-                const std::string plainSoft = worldFragment(false, true, true, true);
-                mains[kPlainSoftSlot + skinned].program = skinned ? program(skinVertex, plainSoft.c_str(), {"aPos", "aNormal", "aColor", "aUV", "aBones", "aWeights"})
-                                                                  : program(mainVertex, plainSoft.c_str(), {"aPos", "aNormal", "aColor", "aUV"});
+                const std::string soft = worldFragment(false, true, false, true, true, false, false, useUbo);
+                mains[kUntexSoftSlot + skinned].program = skinned ? program(leanSkinVertex, soft.c_str(), {"aPos", "aNormal", "aColor", "aUV", "aBones", "aWeights"})
+                                                                  : program(leanVertex, soft.c_str(), {"aPos", "aNormal", "aColor", "aUV"});
+                const std::string plainSoft = worldFragment(false, true, true, true, false, false, false, useUbo);
+                mains[kPlainSoftSlot + skinned].program = skinned ? program(leanSkinVertex, plainSoft.c_str(), {"aPos", "aNormal", "aColor", "aUV", "aBones", "aWeights"})
+                                                                  : program(leanVertex, plainSoft.c_str(), {"aPos", "aNormal", "aColor", "aUV"});
             }
             // Round 92 (Tuning glNoScreen92): the main vertex program without
             // its screen varying (TEXCOORD2 / vScreen), for the lean programs
             // without BG and CUT, whose fragment program reads no screen position.
             {
-                std::string ns = kMainVertex;
 #if defined(PS2X_NATIVE_VITA)
+                std::string ns = kMainVertex;
                 const std::string param = ",\n          float4 out vScreen : TEXCOORD2)";
                 const size_t at = ns.find(param);
                 const size_t line = ns.find("    vScreen = float4(");
@@ -3256,23 +3646,20 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     ns.replace(at, param.size(), ")");
                 }
 #else
-                const std::string def0 = "#define NOSCREEN 0\n";
-                const size_t at = ns.find(def0);
-                const bool patched = at != std::string::npos;
-                if (patched)
-                    ns.replace(at, def0.size(), "#define NOSCREEN 1\n");
+                const std::string ns = worldVertexSrc(true, false, useUbo);
+                const bool patched = !ns.empty();
 #endif
                 if (patched)
                 {
                     const GLuint nsVertex = compile(GL_VERTEX_SHADER, ns.c_str());
-                    const std::string nsSkin = skinProgram ? skinnedVertex(ns.c_str()) : std::string();
+                    const std::string nsSkin = leanSkinVertex ? skinnedVertex(ns.c_str()) : std::string();
                     const GLuint nsSkinVertex = nsSkin.empty() ? 0 : compile(GL_VERTEX_SHADER, nsSkin.c_str());
                     for (int plain = 0; plain < 3; ++plain) // (2: round 98's untextured)
                         for (int skinned = 0; skinned < 2; ++skinned)
                         {
                             if (skinned && !nsSkinVertex)
                                 continue;
-                            const std::string fragment = worldFragment(false, false, plain == 1, false, plain == 2, true);
+                            const std::string fragment = worldFragment(false, false, plain == 1, false, plain == 2, true, false, useUbo);
                             mains[(plain == 2 ? kUntexNoScreenSlot : kNoScreenSlot + plain * 2) + skinned].program =
                                 skinned ? program(nsSkinVertex, fragment.c_str(), {"aPos", "aNormal", "aColor", "aUV", "aBones", "aWeights"})
                                         : program(nsVertex, fragment.c_str(), {"aPos", "aNormal", "aColor", "aUV"});
@@ -3285,6 +3672,34 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             mains[kVolumeSlot].program = program(mainVertex, kVolumeFragment, {"aPos", "aNormal", "aColor", "aUV"});
             if (!mains[kVolumeSlot].program)
                 std::cerr << "[native:gl] no shadow volume program: the volumes drawn with the main one" << std::endl;
+#if !defined(PS2X_NATIVE_VITA)
+            {
+                GLint maxLayers = 0;
+                glGetIntegerv(GL_MAX_ARRAY_TEXTURE_LAYERS, &maxLayers);
+                maxArrayLayers = std::max<int32_t>(1, std::min<int32_t>(maxLayers > 0 ? maxLayers : 64, 256));
+            }
+            if (texArrayEnabled())
+            {
+                const std::string vsSrc = worldVertexSrc(false, true, useUbo);
+                const GLuint arrVert = compile(GL_VERTEX_SHADER, vsSrc.c_str());
+                for (int bg = 0; bg < 2; ++bg)
+                    for (int cut = 0; cut < 2; ++cut)
+                    {
+                        const std::string fragment = worldFragment(bg != 0, cut != 0, false, false, false, false, true, useUbo);
+                        mains[kTexArrSlot + bg * 2 + cut].program = program(arrVert, fragment.c_str(), {"aPos", "aNormal", "aColor", "aUV", "aTexSlot"});
+                    }
+                {
+                    const std::string softFrag = worldFragment(false, true, false, true, false, false, true, useUbo);
+                    mains[kTexArrSoftSlot].program = program(arrVert, softFrag.c_str(), {"aPos", "aNormal", "aColor", "aUV", "aTexSlot"});
+                }
+                const std::string nsSrc = worldVertexSrc(true, true, useUbo);
+                const GLuint arrNsVert = compile(GL_VERTEX_SHADER, nsSrc.c_str());
+                const std::string nsFrag = worldFragment(false, false, false, false, false, true, true, useUbo);
+                mains[kTexArrNoScreenSlot].program = program(arrNsVert, nsFrag.c_str(), {"aPos", "aNormal", "aColor", "aUV", "aTexSlot"});
+            }
+            if (useUbo)
+                glGenBuffers(1, &frameUbo);
+#endif
             for (MainSlot &m : mains)
             {
                 const GLuint p = m.program;
@@ -3294,7 +3709,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 const char *names[kMainUniforms] = {"uClip", "uDirections", "uColours", "uMisc", "uFogA", "uFogB", "uFogC", "uFogColour", "uDebug", "uAlpha", "uGuard"};
                 for (int i = 0; i < kMainUniforms; ++i)
                     m.location[i] = glGetUniformLocation(p, names[i]);
-                for (const auto &[name, unit] : {std::pair<const char *, int>{"uTex", 0}, {"uBackground", 1}, {"uReflection", 2}, {"uRefraction", 3}})
+                for (const auto &[name, unit] : {std::pair<const char *, int>{"uTex", 0}, {"uTexArr", 0}, {"uBackground", 1}, {"uReflection", 2}, {"uRefraction", 3}})
                 {
                     const GLint at = glGetUniformLocation(p, name);
                     if (at >= 0)
@@ -3303,10 +3718,36 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 m.palette = glGetUniformLocation(p, "uPalette");
                 m.locInstanceClips = glGetUniformLocation(p, "uInstanceClips");
                 m.locInstanceCount = glGetUniformLocation(p, "uInstanceCount");
+                m.locTexSlots = glGetUniformLocation(p, "uTexSlots");
                 m.lastInstanceCount = 1;
                 if (m.locInstanceCount >= 0)
                     glUniform1i(m.locInstanceCount, 1);
+#if !defined(PS2X_NATIVE_VITA)
+                if (useUbo)
+                {
+                    const GLuint bi = glGetUniformBlockIndex(p, "FrameBlock");
+                    if (bi != GL_INVALID_INDEX)
+                        glUniformBlockBinding(p, bi, 0);
+                }
+#endif
             }
+#if !defined(PS2X_NATIVE_VITA)
+            if (useUbo)
+            {
+                uboReady = frameUbo != 0 && mains[2].program != 0;
+                std::cerr << "[native:gl] FrameBlock UBO: " << (uboReady ? "on" : "init failed") << std::endl;
+            }
+#endif
+#if !defined(PS2X_NATIVE_VITA)
+            if (texArrayEnabled())
+            {
+                texArrReady = mains[kTexArrSlot].program && mains[kTexArrSlot + 1].program &&
+                              mains[kTexArrSlot + 2].program && mains[kTexArrSlot + 3].program &&
+                              mains[kTexArrSlot].locTexSlots >= 0;
+                std::cerr << "[native:gl] GL_TEXTURE_2D_ARRAY batching: " << (texArrReady ? "on" : "shader init failed")
+                          << " (maxLayers=" << maxArrayLayers << ")" << std::endl;
+            }
+#endif
             if (skinProgram && mains[1].palette < 0)
             {
                 std::cerr << "[native:gl] the skinning program has no palette: skinned meshes posed on the CPU" << std::endl;
@@ -4276,9 +4717,16 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 glDrawArrays(GL_TRIANGLES, firstVertex, static_cast<GLsizei>(count));
                 return;
             }
-            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.dynamic ? indexBuffers[arenaIndex] : mesh.indexBuffer);
+#if !defined(PS2X_NATIVE_VITA)
+            if (mesh.dynamic || !mesh.vao || !staticVaoEnabled())
+#endif
+                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.dynamic ? indexBuffers[arenaIndex] : mesh.indexBuffer);
             const uintptr_t first = mesh.dynamic ? mesh.firstIndex : 0u;
-            glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(count), GL_UNSIGNED_INT, reinterpret_cast<const void *>(first * sizeof(uint32_t)));
+            const void *idxOff = reinterpret_cast<const void *>(first * sizeof(uint32_t));
+            if (drawRangeEnabled() && !mesh.dynamic && mesh.pool < 0 && mesh.vertexCount > 0u)
+                glDrawRangeElements(GL_TRIANGLES, 0u, mesh.vertexCount - 1u, static_cast<GLsizei>(count), GL_UNSIGNED_INT, idxOff);
+            else
+                glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(count), GL_UNSIGNED_INT, idxOff);
         }
         // Round 92 diagnostic (Tuning glDiag92Half, picture wrong): a mesh
         // draw's first half of its triangles (at least one).
@@ -4412,6 +4860,14 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     glDeleteBuffers(1, &r.vbo);
                 if (r.ibo)
                     glDeleteBuffers(1, &r.ibo);
+#if !defined(PS2X_NATIVE_VITA)
+                if (r.vao)
+                {
+                    if (cache.vao == r.vao)
+                        cache.vao = cache.buffer = ~0u;
+                    glDeleteVertexArrays(1, &r.vao);
+                }
+#endif
                 indexedRunBytes -= r.bytes;
                 return true;
             }
@@ -4431,6 +4887,14 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 glDeleteBuffers(1, &m.buffer);
             if (m.indexBuffer)
                 glDeleteBuffers(1, &m.indexBuffer);
+#if !defined(PS2X_NATIVE_VITA)
+            if (m.vao)
+            {
+                if (cache.vao == m.vao)
+                    cache.vao = cache.buffer = ~0u;
+                glDeleteVertexArrays(1, &m.vao);
+            }
+#endif
             if (m.pool >= 0)
                 poolFree(m.pool, m.first, m.count);
             forget(m);
@@ -4448,6 +4912,15 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             std::vector<uint32_t>().swap(mesh.srcIndices);
             mesh.srcBytes = 0;
         }
+#if !defined(PS2X_NATIVE_VITA)
+        if (mesh.vao)
+        {
+            if (cache.vao == mesh.vao)
+                cache.vao = cache.buffer = ~0u;
+            glDeleteVertexArrays(1, &mesh.vao);
+            mesh.vao = 0;
+        }
+#endif
         mesh.used = arenaFrame;
         mesh.dynamic = mesh.indexed = mesh.skinned = false;
         mesh.vertexCount = count;
@@ -4532,6 +5005,15 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             std::vector<uint32_t>().swap(mesh.srcIndices);
             mesh.srcBytes = 0;
         }
+#if !defined(PS2X_NATIVE_VITA)
+        if (mesh.vao)
+        {
+            if (cache.vao == mesh.vao)
+                cache.vao = cache.buffer = ~0u;
+            glDeleteVertexArrays(1, &mesh.vao);
+            mesh.vao = 0;
+        }
+#endif
         mesh.used = arenaFrame;
         mesh.dynamic = false;
         mesh.skinned = false;
@@ -4845,6 +5327,21 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             std::vector<uint32_t>().swap(mesh.srcIndices);
             mesh.srcBytes = 0;
         }
+#if !defined(PS2X_NATIVE_VITA)
+        if (mesh.vao)
+        {
+            if (cache.vao == mesh.vao)
+                cache.vao = cache.buffer = ~0u;
+            glDeleteVertexArrays(1, &mesh.vao);
+            mesh.vao = 0;
+        }
+        if (vao && cache.vao != vao)
+        {
+            glBindVertexArray(vao);
+            cache.vao = vao;
+            cache.buffer = ~0u;
+        }
+#endif
         mesh.used = arenaFrame;
         mesh.dynamic = false;
         mesh.skinned = true;
@@ -5181,6 +5678,12 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         forget(t);
         ++texStats.uploads;
         t.used = arenaFrame;
+        t.width = width;
+        t.height = height;
+        t.levels = levels;
+#if !defined(PS2X_NATIVE_VITA)
+        t.key = key;
+#endif
         t.bytes = static_cast<uint64_t>(width) * height * 4u * (levels > 1u ? 4u : 3u) / 3u;
         if (!t.name)
             glGenTextures(1, &t.name);
@@ -5273,6 +5776,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         }
 #endif
         t.swizzled = swizzledDone;
+        const uint8_t *rgbaStart = rgba;
         if (!swizzledDone)
             for (uint32_t level = 0, w = width, h = height; level < levels; ++level)
             {
@@ -5287,6 +5791,17 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 w = std::max(1u, w / 2u);
                 h = std::max(1u, h / 2u);
             }
+#if !defined(PS2X_NATIVE_VITA)
+        if (texArrayEnabled() && !swizzledDone && width >= 8u && height >= 8u && width <= 256u && height <= 256u)
+        {
+            const size_t chainBytes = static_cast<size_t>(rgba - rgbaStart);
+            if (arrCpuBytes + chainBytes <= (32ull << 20))
+            {
+                t.arrBytes.assign(rgbaStart, rgbaStart + chainBytes);
+                arrCpuBytes += chainBytes;
+            }
+        }
+#endif
         textureBytes += t.bytes;
 #if !defined(PS2X_NATIVE_VITA)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(levels - 1u));
@@ -5387,6 +5902,16 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             glDeleteBuffers(static_cast<GLsizei>(deadBuffers.size()), deadBuffers.data());
         if (!deadTextures.empty())
             glDeleteTextures(static_cast<GLsizei>(deadTextures.size()), deadTextures.data());
+#if !defined(PS2X_NATIVE_VITA)
+        if (!deadVaos.empty())
+        {
+            for (GLuint v : deadVaos)
+                if (cache.vao == v)
+                    cache.vao = cache.buffer = ~0u;
+            glDeleteVertexArrays(static_cast<GLsizei>(deadVaos.size()), deadVaos.data());
+            deadVaos.clear();
+        }
+#endif
         deadBuffers.clear();
         deadTextures.clear();
         const uint64_t t1 = h112.log ? native_renderer::nowUs() : 0u;
@@ -5446,7 +5971,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         return diff == 0;
     }
 
-    static bool sameState(const Draw &a, const Draw &b);
+    static bool sameState(const Draw &a, const Draw &b, bool ignoreTex = false);
     static bool sameDraw(const Draw &a, const Draw &b)
     {
         return sameState(a, b) && sameBits<sizeof(a.clip)>(a.clip, b.clip);
@@ -5465,10 +5990,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         return x.opacity == y.opacity && x.uvOffset[0] == y.uvOffset[0] && x.uvOffset[1] == y.uvOffset[1] && x.lodK == y.lodK && x.lodScale == y.lodScale &&
                x.maxLod == y.maxLod;
     }
-    static bool sameState(const Draw &a, const Draw &b)
+    static bool sameState(const Draw &a, const Draw &b, bool ignoreTex)
     {
         const native_renderer::DrawState &x = a.state, &y = b.state;
-        if (x.texture != y.texture || x.clamp != y.clamp || x.blend != y.blend || x.order != y.order || x.alphaTest != y.alphaTest || !sameFloats(x, y) ||
+        if ((!ignoreTex && x.texture != y.texture) || x.clamp != y.clamp || x.blend != y.blend || x.order != y.order || x.alphaTest != y.alphaTest || !sameFloats(x, y) ||
             x.background != y.background || x.backgroundFge != y.backgroundFge || x.fogged != y.fogged || x.writeDepth != y.writeDepth || x.noDepthWrite != y.noDepthWrite ||
             x.overlay != y.overlay || x.screen != y.screen || x.screenDepthTest != y.screenDepthTest || x.shadowVolume || y.shadowVolume ||
             x.reflectionSource != y.reflectionSource || x.reflectionSample != y.reflectionSample || x.refractionSample != y.refractionSample ||
@@ -5480,6 +6005,40 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         if ((x.lit || x.fresnel) && !sameBits<sizeof(x.light)>(x.light, y.light))
             return false;
         return true;
+    }
+    static bool sameTexArrayState(const Draw &a, const Draw &b)
+    {
+        const native_renderer::DrawState &x = a.state, &y = b.state;
+        const bool dDepth = (x.blend == native_renderer::Blend::Additive ? (x.writeDepth != y.writeDepth) : false) || (x.noDepthWrite != y.noDepthWrite);
+        if (x.clamp != y.clamp || x.blend != y.blend || x.order != y.order || x.alphaTest != y.alphaTest ||
+            x.opacity != y.opacity || x.uvOffset[0] != y.uvOffset[0] || x.uvOffset[1] != y.uvOffset[1] || dDepth ||
+            x.background != y.background || x.backgroundFge != y.backgroundFge || x.fogged != y.fogged ||
+            x.overlay != y.overlay || x.screen != y.screen || x.screenDepthTest != y.screenDepthTest || x.shadowVolume || y.shadowVolume ||
+            x.reflectionSource != y.reflectionSource || x.reflectionSample != y.reflectionSample || x.refractionSample != y.refractionSample ||
+            x.fresnel != y.fresnel || x.screenCopy != y.screenCopy || x.previousFrame != y.previousFrame || x.debugColour != y.debugColour ||
+            x.lit != y.lit || x.skinPalette || y.skinPalette)
+            return false;
+        if (!sameBits<sizeof(x.reflectionTint)>(x.reflectionTint, y.reflectionTint) || !sameBits<sizeof(x.mirrorRipple)>(x.mirrorRipple, y.mirrorRipple))
+            return false;
+        if ((x.lit || x.fresnel) && !sameBits<sizeof(x.light)>(x.light, y.light))
+            return false;
+        return true;
+    }
+    static inline bool eligibleTexArrayDraw(const Draw &d, const Texture *tex)
+    {
+#if !defined(PS2X_NATIVE_VITA)
+        if (!tex || tex->arrBytes.empty())
+            return false;
+        const native_renderer::DrawState &st = d.state;
+        if (!st.texture || st.shadowVolume || st.reflectionSample || st.refractionSample || st.screenCopy || st.previousFrame ||
+            st.debugColour || st.screen || st.fresnel || st.skinPalette)
+            return false;
+        return true;
+#else
+        (void)d;
+        (void)tex;
+        return false;
+#endif
     }
 
     static inline bool sortOpaqueEnabled()
@@ -5554,6 +6113,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     {
         const size_t n = drawOrder.size();
         plan.assign(n, Planned{});
+        texArrSlotData.clear();
         // Round 98 (Tuning glNoFog98): the fog's start, when the draws' greatest depths are wanted.
         const float fogFar98 = native_renderer::tuning().glNoFog98 && fog.enabled && fog.width > 0.0f ? fog.start : 0.0f;
         const bool ahead = native_renderer::tuning().glLeanPass; // round 74: the next draws' records and lookups asked for ahead
@@ -5822,6 +6382,12 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     ++idxMergeStats.idxIneligibleOther;
             }
             uint32_t totalVerts = isIndexed ? m->vertexCount : 0u;
+            struct SlotInfo { uint64_t key; float lodK, lodScale, maxLod, lodShift; uint16_t layer; uint32_t texGen; };
+            std::vector<SlotInfo> runArrSlots;
+            int runArrBucket = -1;
+            bool usedTexArr = false;
+            uint32_t leadBw = 0, leadBh = 0, leadBLevels = 0, leadMipOff = 0;
+            float leadLodShift = 0.0f;
             if (isPlain)
                 while (end < n)
                 {
@@ -5842,12 +6408,86 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 }
             else if (isIndexed)
             {
+                const uint32_t arrFilter = static_cast<uint32_t>(std::clamp(native_renderer::tuning().textureFilter + 0.5f, 0.0f, 2.0f));
+                const bool canTexArr = native_renderer::tuning().glLeanPrograms && texArrReady && eligibleTexArrayDraw(lead, plan[k].tex);
+                auto lodMatch = [](const Draw &d, const SlotInfo &si)
+                {
+                    return d.state.lodK == si.lodK && d.state.lodScale == si.lodScale && d.state.maxLod == si.maxLod;
+                };
+                if (canTexArr)
+                {
+                    texArrayBucketDims(plan[k].tex, leadBw, leadBh, leadBLevels, leadLodShift, leadMipOff);
+                    runArrSlots.reserve(16);
+#if !defined(PS2X_NATIVE_VITA)
+                    const uint32_t tg = plan[k].tex->texGen;
+#else
+                    const uint32_t tg = 0;
+#endif
+                    runArrSlots.push_back({lead.state.texture, lead.state.lodK, lead.state.lodScale, lead.state.maxLod, leadLodShift, 0, tg});
+                }
                 while (end < n)
                 {
                     const Mesh *o = plan[end].mesh;
-                    if (!indexedStaticMesh(o) || total + o->count > 0xC000u || totalVerts + o->vertexCount > 0xFFFFu || plan[end].tex != plan[k].tex ||
-                        !((!shareOff && end - 1u > k && recAt(end) == recAt(end - 1u)) || sameDraw(lead, drawAt(end))))
+                    if (!indexedStaticMesh(o) || total + o->count > 0xC000u || totalVerts + o->vertexCount > 0xFFFFu)
                         break;
+                    const Draw &nxt = drawAt(end);
+                    const bool sameTexExact = (plan[end].tex == plan[k].tex) &&
+                                              ((!shareOff && end - 1u > k && recAt(end) == recAt(end - 1u)) || sameDraw(lead, nxt));
+                    if (sameTexExact)
+                    {
+                        if (usedTexArr)
+                        {
+                            if (!lodMatch(nxt, runArrSlots[0]))
+                                break;
+                        }
+                        total += o->count;
+                        totalVerts += o->vertexCount;
+                        ++end;
+                        continue;
+                    }
+                    if (!canTexArr || !eligibleTexArrayDraw(nxt, plan[end].tex))
+                        break;
+                    uint32_t nxtBw = 0, nxtBh = 0, nxtBLevels = 0, nxtMipOff = 0;
+                    float nxtLodShift = 0.0f;
+                    texArrayBucketDims(plan[end].tex, nxtBw, nxtBh, nxtBLevels, nxtLodShift, nxtMipOff);
+                    if (nxtBw != leadBw || nxtBh != leadBh || nxtBLevels != leadBLevels ||
+                        !sameTexArrayState(lead, nxt) || !sameBits<sizeof(lead.clip)>(lead.clip, nxt.clip))
+                        break;
+                    size_t foundSlot = runArrSlots.size();
+                    for (size_t si = 0; si < runArrSlots.size(); ++si)
+                        if (runArrSlots[si].key == nxt.state.texture)
+                        {
+                            foundSlot = si;
+                            break;
+                        }
+                    if (foundSlot < runArrSlots.size())
+                    {
+                        if (!lodMatch(nxt, runArrSlots[foundSlot]))
+                            break;
+                    }
+                    else
+                    {
+                        if (runArrSlots.size() >= 64u)
+                            break;
+                        if (runArrBucket < 0)
+                        {
+                            uint16_t l0 = 0;
+                            if (!ensureTexArrayLayer(*plan[k].tex, lead.state.clamp, arrFilter, runArrBucket, l0))
+                                break;
+                            runArrSlots[0].layer = l0;
+                        }
+                        int bNext = -1;
+                        uint16_t lNext = 0;
+                        if (!ensureTexArrayLayer(*plan[end].tex, lead.state.clamp, arrFilter, bNext, lNext) || bNext != runArrBucket)
+                            break;
+#if !defined(PS2X_NATIVE_VITA)
+                        const uint32_t tg = plan[end].tex->texGen;
+#else
+                        const uint32_t tg = 0;
+#endif
+                        runArrSlots.push_back({nxt.state.texture, nxt.state.lodK, nxt.state.lodScale, nxt.state.maxLod, nxtLodShift, lNext, tg});
+                    }
+                    usedTexArr = true;
                     total += o->count;
                     totalVerts += o->vertexCount;
                     ++end;
@@ -5868,7 +6508,86 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                         else if (totalVerts + o->vertexCount > 0xFFFFu)
                             ++idxMergeStats.brkVertCap;
                         else if (plan[end].tex != plan[k].tex)
+                        {
                             ++idxMergeStats.brkTex;
+                            const Draw &nxt = drawAt(end);
+                            if (!sameState(lead, nxt, true))
+                            {
+                                ++idxMergeStats.texBrkDiffState;
+                                const auto &sx = lead.state, &sy = nxt.state;
+                                bool anyKnown = false;
+                                if (sx.blend != sy.blend) { ++idxMergeStats.texDiffBlend; anyKnown = true; }
+                                if (sx.order != sy.order) { ++idxMergeStats.texDiffOrder; anyKnown = true; }
+                                if (sx.alphaTest != sy.alphaTest) { ++idxMergeStats.texDiffAlpha; anyKnown = true; }
+                                if (sx.clamp != sy.clamp) { ++idxMergeStats.texDiffClamp; anyKnown = true; }
+                                if (sx.opacity != sy.opacity) { ++idxMergeStats.texDiffOpacity; anyKnown = true; }
+                                if (sx.uvOffset[0] != sy.uvOffset[0] || sx.uvOffset[1] != sy.uvOffset[1]) { ++idxMergeStats.texDiffUvOff; anyKnown = true; }
+                                const bool dLod = sx.lodK != sy.lodK || sx.lodScale != sy.lodScale || sx.maxLod != sy.maxLod;
+                                if (dLod) {
+                                    ++idxMergeStats.texDiffLod; anyKnown = true;
+                                    if (!(sx.maxLod > 0.0f) && !(sy.maxLod > 0.0f)) ++idxMergeStats.texDiffLodMax0;
+                                }
+                                const bool dDepth = sx.writeDepth != sy.writeDepth || sx.noDepthWrite != sy.noDepthWrite;
+                                const bool deadWriteDepth = dDepth && sx.blend == sy.blend && sx.blend != native_renderer::Blend::Additive && sx.noDepthWrite == sy.noDepthWrite;
+                                if (dDepth) {
+                                    ++idxMergeStats.texDiffDepth; anyKnown = true;
+                                    if (deadWriteDepth) ++idxMergeStats.texDiffDepthDead;
+                                }
+                                if (sx.skinPalette || sy.skinPalette) { ++idxMergeStats.texDiffSkin; anyKnown = true; }
+                                const bool dLit = sx.lit != sy.lit || ((sx.lit || sx.fresnel) && !sameBits<sizeof(sx.light)>(sx.light, sy.light));
+                                if (dLit) { ++idxMergeStats.texDiffLit; anyKnown = true; }
+                                if (sx.fogged != sy.fogged) { ++idxMergeStats.texDiffFog; anyKnown = true; }
+                                if (!anyKnown) { ++idxMergeStats.texDiffOther; }
+                                if (sx.blend == sy.blend && sx.order == sy.order && sx.alphaTest == sy.alphaTest &&
+                                    sx.clamp == sy.clamp && sx.opacity == sy.opacity &&
+                                    sx.uvOffset[0] == sy.uvOffset[0] && sx.uvOffset[1] == sy.uvOffset[1] &&
+                                    (!dDepth || deadWriteDepth) && !(sx.skinPalette || sy.skinPalette) && !dLit && sx.fogged == sy.fogged &&
+                                    sx.background == sy.background && sx.backgroundFge == sy.backgroundFge && sx.overlay == sy.overlay &&
+                                    sx.screen == sy.screen && sx.screenDepthTest == sy.screenDepthTest && !sx.shadowVolume && !sy.shadowVolume &&
+                                    sx.reflectionSource == sy.reflectionSource && sx.reflectionSample == sy.reflectionSample &&
+                                    sx.refractionSample == sy.refractionSample && sx.fresnel == sy.fresnel &&
+                                    sx.screenCopy == sy.screenCopy && sx.previousFrame == sy.previousFrame && sx.debugColour == sy.debugColour &&
+                                    sameBits<sizeof(lead.clip)>(lead.clip, nxt.clip))
+                                {
+                                    ++idxMergeStats.texBrkRelaxed;
+                                    const Texture *ta = plan[k].tex, *tb = plan[end].tex;
+                                    if (ta && tb && ta->width == tb->width && ta->height == tb->height && ta->levels == tb->levels)
+                                        ++idxMergeStats.texBrkRelaxedSame;
+                                }
+                            }
+                            else if (!sameBits<sizeof(lead.clip)>(lead.clip, nxt.clip))
+                                ++idxMergeStats.texBrkDiffClip;
+                            else
+                            {
+                                ++idxMergeStats.texBrkMergeable;
+                                const Texture *ta = plan[k].tex, *tb = plan[end].tex;
+                                if (ta && tb)
+                                {
+                                    if (ta->width == tb->width && ta->height == tb->height)
+                                        ++idxMergeStats.texBrkSameSize;
+                                    if (ta->levels == tb->levels)
+                                        ++idxMergeStats.texBrkSameMips;
+                                    const uint32_t w = ta->width, h = ta->height;
+                                    const int bi = (w == 32 && h == 32) ? 0
+                                                 : (w == 64 && h == 64) ? 1
+                                                 : (w == 128 && h == 128) ? 2
+                                                 : (w == 256 && h == 256) ? 3
+                                                 : (w == 64 && h == 128) ? 4
+                                                 : (w == 128 && h == 64) ? 5
+                                                 : (w == 128 && h == 256) ? 6
+                                                 : (w == 256 && h == 128) ? 7
+                                                 : 8;
+                                    ++idxMergeStats.texBucket[bi];
+                                }
+                                const uint32_t cl = lead.state.clamp & 3u;
+                                if (cl == 0u)
+                                    ++idxMergeStats.texBrkRepeat;
+                                else if (cl == 3u)
+                                    ++idxMergeStats.texBrkClamp;
+                                if (isSafeOpaqueDraw(plan[k], lead) && isSafeOpaqueDraw(plan[end], nxt))
+                                    ++idxMergeStats.texBrkOpaque;
+                            }
+                        }
                         else if (!sameState(lead, drawAt(end)))
                             ++idxMergeStats.brkState;
                         else
@@ -5906,6 +6625,15 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 }
                 if (isIndexed)
                 {
+                    if (usedTexArr)
+                    {
+                        key ^= 0x5445584152524159ull;
+                        for (const auto &si : runArrSlots)
+                        {
+                            key = (key ^ si.key ^ (static_cast<uint64_t>(si.texGen) << 32)) * 0xff51afd7ed558ccdull;
+                            key ^= key >> 29;
+                        }
+                    }
                     RunCopy *copy = &runs[key];
                     if (copy->used != arenaFrame)
                         copy->frames = copy->used + 1u == arenaFrame ? copy->frames + 1u : 1u;
@@ -5921,10 +6649,23 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     {
                         if (collectIdxDiag)
                             ++idxMergeStats.copyAttempts;
-                        if (!copyIndexedRun(k, end, total, totalVerts, *copy))
+                        bool okCopy = false;
+                        if (usedTexArr)
+                        {
+                            std::vector<uint64_t> slotKeys;
+                            slotKeys.reserve(runArrSlots.size());
+                            for (const auto &si : runArrSlots)
+                                slotKeys.push_back(si.key);
+                            okCopy = copyTexArrayRun(k, end, total, totalVerts, *copy, slotKeys);
+                            if (okCopy && collectIdxDiag)
+                                ++idxMergeStats.texArrCopies;
+                        }
+                        else
+                            okCopy = copyIndexedRun(k, end, total, totalVerts, *copy);
+                        if (!okCopy)
                             copy->frames = 0;
                     }
-                    if (!copy->vbo || !copy->ibo || copy->count != total)
+                    if (!copy->vbo || !copy->ibo || copy->count != total || (usedTexArr && (!copy->texArray || !copy->vao)))
                     {
                         if (collectIdxDiag && copy->vbo && copy->count != total)
                             ++idxMergeStats.copyCountMismatch;
@@ -5935,9 +6676,36 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     {
                         ++idxMergeStats.runsReady;
                         idxMergeStats.runsReadyMerged += (end - k - 1u);
+                        if (usedTexArr)
+                        {
+                            ++idxMergeStats.texArrRuns;
+                            idxMergeStats.texArrMembers += (end - k - 1u);
+                        }
                     }
+                    p.mergedVerts = copy->vertCount ? copy->vertCount : totalVerts;
                     p.runVbo = copy->vbo;
                     p.runIbo = copy->ibo;
+                    if (copy->vao && (usedTexArr || staticVaoEnabled()))
+                        p.runVao = copy->vao;
+                    if (usedTexArr && runArrBucket >= 0)
+                    {
+                        p.runVao = copy->vao;
+                        p.runArrTex = texArrayBuckets[static_cast<size_t>(runArrBucket)].tex;
+                        p.runTexMinAlpha = copy->texMinAlpha;
+                        p.runTexMaxAlpha = copy->texMaxAlpha;
+                        p.runArrSlotOffset = static_cast<uint32_t>(texArrSlotData.size());
+                        p.runArrSlotCount = static_cast<uint16_t>(runArrSlots.size());
+                        for (const auto &si : runArrSlots)
+                        {
+                            const float minLod = si.lodShift;
+                            const float outMaxLod = si.maxLod > 0.0f ? si.maxLod + minLod : minLod;
+                            const float outLodK = si.maxLod > 0.0f ? si.lodK + minLod : minLod;
+                            texArrSlotData.push_back(static_cast<float>(si.layer) + minLod * 256.0f);
+                            texArrSlotData.push_back(outLodK);
+                            texArrSlotData.push_back(si.lodScale);
+                            texArrSlotData.push_back(outMaxLod);
+                        }
+                    }
                 }
                 else if (!contiguous)
                 {
@@ -6132,6 +6900,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     {
         if (!sortOpaqueEnabled())
             return;
+        static const bool sortProg = std::getenv("SOTC_GL_SORT_PROG") && std::atoi(std::getenv("SOTC_GL_SORT_PROG")) != 0;
         const size_t n = drawOrder.size();
         if (n < 3)
             return;
@@ -6141,7 +6910,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         {
             return isSafeOpaqueDraw(plan[k], drawAt(k));
         };
-        auto hashState = [&](const Draw &d) -> uint64_t
+        auto hashState = [&](const Draw &d, bool skipLod) -> uint64_t
         {
             const native_renderer::DrawState &x = d.state;
             uint64_t h = static_cast<uint64_t>(static_cast<uint32_t>(x.clamp) |
@@ -6154,6 +6923,12 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                                                (x.fresnel ? (1u << 28) : 0u));
             uint32_t fb[6];
             std::memcpy(fb, &x.opacity, sizeof(fb));
+            if (skipLod)
+            {
+                fb[3] = 0u;
+                fb[4] = 0u;
+                fb[5] = 0u;
+            }
             for (int i = 0; i < 6; ++i)
                 h = (h ^ (fb[i] == 0x80000000u ? 0u : fb[i])) * 0x9E3779B97F4A7C15ull;
             if (x.lit || x.fresnel)
@@ -6191,24 +6966,95 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             if (end - k >= 3)
             {
                 sortKeys.clear();
+                struct ClipSlot { uint64_t h; uint32_t firstJ; };
+                ClipSlot clipSlots[64] = {};
                 for (size_t j = k; j < end; ++j)
                 {
                     const Draw &d = drawAt(j);
                     const Mesh *m = plan[j].mesh;
-                    const uint64_t where = (m->skinned ? 1ull << 63 : 0ull) | (m->indexed ? 1ull << 62 : 0ull) | (m->dynamic ? 1ull << 61 : 0ull) |
-                                           (static_cast<uint64_t>(static_cast<uint32_t>(m->pool + 1) & 0xFFFFu) << 32) | (static_cast<uint64_t>(m->first) << 16) | (m->count & 0xFFFFu);
-                    sortKeys.push_back({d.state.texture, hashState(d), where, hashClip(d), static_cast<uint32_t>(j)});
+                    const bool isStaticIdx = m && m->indexed && !m->skinned && !m->dynamic;
+                    const uint64_t where = isStaticIdx
+                        ? (1ull << 62)
+                        : ((m->skinned ? 1ull << 63 : 0ull) | (m->indexed ? 1ull << 62 : 0ull) | (m->dynamic ? 1ull << 61 : 0ull) |
+                           (static_cast<uint64_t>(static_cast<uint32_t>(m->pool + 1) & 0xFFFFu) << 32) | (static_cast<uint64_t>(m->first) << 16) | (m->count & 0xFFFFu));
+                    const uint64_t ch = hashClip(d) | 1ull;
+                    uint32_t slot = static_cast<uint32_t>((ch ^ (ch >> 32)) & 63u);
+                    uint64_t clipOrd = static_cast<uint64_t>(j);
+                    for (uint32_t probe = 0; probe < 8u; ++probe)
+                    {
+                        ClipSlot &cs = clipSlots[(slot + probe) & 63u];
+                        if (cs.h == 0ull)
+                        {
+                            cs.h = ch;
+                            cs.firstJ = static_cast<uint32_t>(j);
+                            break;
+                        }
+                        if (cs.h == ch && std::memcmp(d.clip, drawAt(cs.firstJ).clip, sizeof(d.clip)) == 0)
+                        {
+                            clipOrd = cs.firstJ;
+                            break;
+                        }
+                    }
+                    uint64_t group = 0ull, texKey = d.state.texture, stateHash = 0ull, tieTex = 0ull;
+                    if (sortProg)
+                    {
+                        const Texture *texPtr = plan[j].tex;
+                        const bool texArr = texArrayEnabled() && eligibleTexArrayDraw(d, texPtr);
+                        const bool noDisc = native_renderer::tuning().glNoDiscard;
+                        float leastA = -1.0f;
+                        if (plan[j].minAlpha)
+                        {
+                            leastA = static_cast<float>(plan[j].minAlpha) / 128.0f * d.state.opacity;
+                            if (d.state.texture && texPtr)
+                                leastA *= static_cast<float>(texPtr->minAlpha) / 255.0f * 2.0f;
+                        }
+                        const uint64_t cut = (noDisc && ((d.state.blend == native_renderer::Blend::Opaque && !(d.state.alphaTest & 1u)) || leastA >= 0.03f)) ? 0ull : 1ull;
+                        const uint64_t fogBit = (d.state.fogged && fog.enabled && !(native_renderer::tuning().glNoFog98 && plan[j].maxW > 0.0f && plan[j].maxW < fog.start * 0.999f)) ? 1ull : 0ull;
+                        const uint64_t skinned = (m && m->skinned) ? 1ull : 0ull;
+                        const uint64_t untex = (!d.state.texture && native_renderer::tuning().glUntex98) ? 1ull : 0ull;
+                        const bool lod0 = (d.state.texture && texPtr && texPtr->mipped && !(d.state.maxLod > 0.0f) && native_renderer::tuning().glLod0_98 && native_renderer::tuning().glPlainReads);
+                        const uint64_t plain = (d.state.texture && texPtr && (!texPtr->mipped || lod0) && native_renderer::tuning().glPlainReads) ? 1ull : 0ull;
+                        const uint64_t progBits = (texArr ? 8ull : (untex ? 4ull : (plain ? 2ull : 1ull))) | (cut << 4) | (fogBit << 5) | (skinned << 6);
+                        if (texArr)
+                        {
+                            uint32_t bw = 0, bh = 0, blevels = 0, mipOff = 0;
+                            float lodShift = 0.0f;
+                            texArrayBucketDims(texPtr, bw, bh, blevels, lodShift, mipOff);
+                            const uint64_t bucket = (static_cast<uint64_t>(static_cast<uint32_t>(d.state.clamp) & 3u) << 32) |
+                                                    (static_cast<uint64_t>(blevels & 0xFFu) << 24) |
+                                                    (static_cast<uint64_t>(bw & 0xFFFu) << 12) |
+                                                    static_cast<uint64_t>(bh & 0xFFFu);
+                            group = (progBits << 40) | (1ull << 39) | bucket;
+                            texKey = 0ull;
+                            stateHash = hashState(d, true);
+                            tieTex = d.state.texture;
+                        }
+                        else
+                        {
+                            group = (progBits << 40);
+                            stateHash = hashState(d, false);
+                        }
+                    }
+                    else
+                    {
+                        stateHash = hashState(d, false);
+                    }
+                    sortKeys.push_back({group, texKey, stateHash, tieTex, where, clipOrd, static_cast<uint32_t>(j)});
                 }
                 std::sort(sortKeys.begin(), sortKeys.end(), [](const auto &a, const auto &b)
                 {
+                    if (a.group != b.group)
+                        return a.group < b.group;
                     if (a.tex != b.tex)
                         return a.tex < b.tex;
                     if (a.state != b.state)
                         return a.state < b.state;
-                    if (a.clip != b.clip)
-                        return a.clip < b.clip;
+                    if (a.tieTex != b.tieTex)
+                        return a.tieTex < b.tieTex;
                     if (a.where != b.where)
                         return a.where < b.where;
+                    if (a.clip != b.clip)
+                        return a.clip < b.clip;
                     return a.k < b.k;
                 });
                 sortOrder.clear();
@@ -6387,6 +7233,34 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                      idxMergeStats.copyBytes / 300.0 / 1024.0, idxMergeStats.copyUs / 300.0 / 1000.0,
                      indexedSrcBytes / 1048576.0, kMaxIndexedSrcBytes / 1048576.0, indexedRunBytes / 1048576.0, kMaxIndexedRunBytes / 1048576.0,
                      static_cast<unsigned>(runs.size()));
+        std::fprintf(stderr,
+                     "[gl:texbrk] per frame: brkTex %.1f | mergeable %.1f (diffState %.1f diffClip %.1f) | prop: sameSize %.1f sameMips %.1f repeat %.1f clamp %.1f opaque %.1f | sz 32:%.1f 64:%.1f 128:%.1f 256:%.1f 64x128:%.1f 128x64:%.1f 128x256:%.1f 256x128:%.1f oth:%.1f\n",
+                     idxMergeStats.brkTex / 300.0, idxMergeStats.texBrkMergeable / 300.0,
+                     idxMergeStats.texBrkDiffState / 300.0, idxMergeStats.texBrkDiffClip / 300.0,
+                     idxMergeStats.texBrkSameSize / 300.0, idxMergeStats.texBrkSameMips / 300.0,
+                     idxMergeStats.texBrkRepeat / 300.0, idxMergeStats.texBrkClamp / 300.0, idxMergeStats.texBrkOpaque / 300.0,
+                     idxMergeStats.texBucket[0] / 300.0, idxMergeStats.texBucket[1] / 300.0, idxMergeStats.texBucket[2] / 300.0,
+                     idxMergeStats.texBucket[3] / 300.0, idxMergeStats.texBucket[4] / 300.0, idxMergeStats.texBucket[5] / 300.0,
+                     idxMergeStats.texBucket[6] / 300.0, idxMergeStats.texBucket[7] / 300.0, idxMergeStats.texBucket[8] / 300.0);
+        std::fprintf(stderr,
+                     "[gl:texstate] per frame: diffState %.1f | blend %.1f order %.1f alpha %.1f clamp %.1f opac %.1f uvOff %.1f lod %.1f(max0 %.1f) depth %.1f(deadWD %.1f) skin %.1f lit %.1f fog %.1f oth %.1f | relaxed %.1f(sameSzMips %.1f)\n",
+                     idxMergeStats.texBrkDiffState / 300.0,
+                     idxMergeStats.texDiffBlend / 300.0, idxMergeStats.texDiffOrder / 300.0, idxMergeStats.texDiffAlpha / 300.0,
+                     idxMergeStats.texDiffClamp / 300.0, idxMergeStats.texDiffOpacity / 300.0, idxMergeStats.texDiffUvOff / 300.0,
+                     idxMergeStats.texDiffLod / 300.0, idxMergeStats.texDiffLodMax0 / 300.0,
+                     idxMergeStats.texDiffDepth / 300.0, idxMergeStats.texDiffDepthDead / 300.0,
+                     idxMergeStats.texDiffSkin / 300.0, idxMergeStats.texDiffLit / 300.0,
+                     idxMergeStats.texDiffFog / 300.0, idxMergeStats.texDiffOther / 300.0,
+                     idxMergeStats.texBrkRelaxed / 300.0, idxMergeStats.texBrkRelaxedSame / 300.0);
+        if (texArrayEnabled())
+        {
+            uint32_t layersUsed = 0;
+            for (const auto &b : texArrayBuckets)
+                layersUsed += b.nextLayer - static_cast<uint32_t>(b.freeLayers.size());
+            std::fprintf(stderr, "[gl:texarray] per frame: arrRuns %.1f arrMembers %.1f copies %.2f | buckets %zu layers %u | cpu %.2f MB vram %.2f MB\n",
+                         idxMergeStats.texArrRuns / 300.0, idxMergeStats.texArrMembers / 300.0, idxMergeStats.texArrCopies / 300.0,
+                         texArrayBuckets.size(), layersUsed, arrCpuBytes / 1048576.0, arrVramBytes / 1048576.0);
+        }
         idxMergeStats = {};
     }
 
@@ -6541,9 +7415,16 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     glDeleteBuffers(1, &r->vbo);
                 if (r->ibo)
                     glDeleteBuffers(1, &r->ibo);
+                if (r->vao)
+                {
+                    if (cache.vao == r->vao)
+                        cache.vao = cache.buffer = ~0u;
+                    glDeleteVertexArrays(1, &r->vao);
+                }
                 indexedRunBytes -= r->bytes;
-                r->vbo = r->ibo = 0;
-                r->bytes = r->count = r->frames = 0;
+                r->vbo = r->ibo = r->vao = 0;
+                r->texArray = false;
+                r->bytes = r->count = r->vertCount = r->frames = 0;
             }
             if (indexedRunBytes + bytes > kMaxIndexedRunBytes)
             {
@@ -6583,7 +7464,15 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         if (!copy.ibo)
             glGenBuffers(1, &copy.ibo);
 #if !defined(PS2X_NATIVE_VITA)
-        if (vao && cache.vao != vao)
+        if (staticVaoEnabled())
+        {
+            if (!copy.vao)
+                copy.vao = makeStaticVao(copy.vbo, copy.ibo, false);
+            glBindVertexArray(copy.vao);
+            cache.vao = copy.vao;
+            cache.buffer = copy.vbo;
+        }
+        else if (vao && cache.vao != vao)
         {
             glBindVertexArray(vao);
             cache.vao = vao;
@@ -6594,11 +7483,14 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         uploadStream(GL_ARRAY_BUFFER, packedVerts.data(), packedVerts.size() * sizeof(native_renderer::Vertex), GL_STATIC_DRAW);
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, copy.ibo);
         uploadStream(GL_ELEMENT_ARRAY_BUFFER, packedIndices.data(), packedIndices.size() * sizeof(uint32_t), GL_STATIC_DRAW);
-        cache.buffer = ~0u;
+        if (!staticVaoEnabled())
+            cache.buffer = ~0u;
         copy.indexed = true;
+        copy.texArray = false;
         copy.pool = -1;
         copy.first = 0;
         copy.count = totalIndices;
+        copy.vertCount = totalVerts;
         copy.bytes = bytes;
         indexedRunBytes += bytes;
         if (mergeDiag)
@@ -6609,6 +7501,246 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         }
         return true;
     }
+
+#if !defined(PS2X_NATIVE_VITA)
+    bool Renderer::ensureTexArrayLayer(Texture &t, uint32_t clamp, uint32_t filter, int &outBucket, uint16_t &outLayer)
+    {
+        if (t.arrBytes.empty())
+            return false;
+        const uint32_t c = clamp & 3u;
+        if (t.arrBucket[c] >= 0 && t.arrLayer[c] >= 0 && static_cast<size_t>(t.arrBucket[c]) < texArrayBuckets.size() &&
+            texArrayBuckets[static_cast<size_t>(t.arrBucket[c])].filter == filter)
+        {
+            outBucket = t.arrBucket[c];
+            outLayer = static_cast<uint16_t>(t.arrLayer[c]);
+            return true;
+        }
+        uint32_t bw = 0, bh = 0, blevels = 0, mipOffset = 0;
+        float lodShift = 0.0f;
+        texArrayBucketDims(&t, bw, bh, blevels, lodShift, mipOffset);
+        int bIdx = -1;
+        for (size_t i = 0; i < texArrayBuckets.size(); ++i)
+        {
+            const TexArrayBucket &b = texArrayBuckets[i];
+            if (b.width == bw && b.height == bh && b.levels == blevels && b.clamp == c && b.filter == filter &&
+                (!b.freeLayers.empty() || b.nextLayer < b.capacity))
+            {
+                bIdx = static_cast<int>(i);
+                break;
+            }
+        }
+        if (bIdx < 0)
+        {
+            TexArrayBucket b;
+            b.width = bw;
+            b.height = bh;
+            b.levels = blevels;
+            b.clamp = c;
+            b.filter = filter;
+            const uint32_t targetCap = (bw <= 64u && bh <= 64u) ? 64u
+                                     : (bw <= 128u && bh <= 128u) ? (promote128Enabled() ? 64u : 16u)
+                                                                  : 8u;
+            b.capacity = std::min<uint32_t>(static_cast<uint32_t>(maxArrayLayers), targetCap);
+            glGenTextures(1, &b.tex);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D_ARRAY, b.tex);
+            cache.arrTex = b.tex;
+            glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(b.levels - 1u));
+            const bool mipped = b.levels > 1u;
+            glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER,
+                            filter == 0u ? (mipped ? GL_NEAREST_MIPMAP_NEAREST : GL_NEAREST)
+                                         : (filter == 1u ? (mipped ? GL_LINEAR_MIPMAP_NEAREST : GL_LINEAR) : (mipped ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR)));
+            glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, filter == 0u ? GL_NEAREST : GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, (c & 1u) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
+            glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, (c & 2u) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
+            for (uint32_t level = 0, lw = b.width, lh = b.height; level < b.levels; ++level)
+            {
+                glTexImage3D(GL_TEXTURE_2D_ARRAY, static_cast<GLint>(level), GL_RGBA, static_cast<GLsizei>(lw), static_cast<GLsizei>(lh),
+                             static_cast<GLsizei>(b.capacity), 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+                arrVramBytes += static_cast<uint64_t>(lw) * lh * 4u * b.capacity;
+                lw = std::max(1u, lw / 2u);
+                lh = std::max(1u, lh / 2u);
+            }
+            bIdx = static_cast<int>(texArrayBuckets.size());
+            texArrayBuckets.push_back(std::move(b));
+        }
+        TexArrayBucket &b = texArrayBuckets[static_cast<size_t>(bIdx)];
+        uint16_t layer = 0;
+        if (!b.freeLayers.empty())
+        {
+            layer = b.freeLayers.back();
+            b.freeLayers.pop_back();
+        }
+        else
+            layer = static_cast<uint16_t>(b.nextLayer++);
+        glActiveTexture(GL_TEXTURE0);
+        if (cache.arrTex != b.tex)
+        {
+            glBindTexture(GL_TEXTURE_2D_ARRAY, b.tex);
+            cache.arrTex = b.tex;
+        }
+        if (bw == t.width && bh == t.height && blevels == t.levels)
+        {
+            const uint8_t *src = t.arrBytes.data();
+            for (uint32_t level = 0, lw = b.width, lh = b.height; level < b.levels; ++level)
+            {
+                glTexSubImage3D(GL_TEXTURE_2D_ARRAY, static_cast<GLint>(level), 0, 0, static_cast<GLint>(layer),
+                                static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 1, GL_RGBA, GL_UNSIGNED_BYTE, src);
+                src += static_cast<size_t>(lw) * lh * 4u;
+                lw = std::max(1u, lw / 2u);
+                lh = std::max(1u, lh / 2u);
+            }
+        }
+        else
+        {
+            static std::vector<uint8_t> upBuf(128u * 128u * 4u);
+            const GLenum wrapS = (c & 1u) ? GL_CLAMP_TO_EDGE : GL_REPEAT;
+            const GLenum wrapT = (c & 2u) ? GL_CLAMP_TO_EDGE : GL_REPEAT;
+            const bool useNearest = (filter == 0u);
+            for (uint32_t level = 0, lw = b.width, lh = b.height; level < b.levels; ++level)
+            {
+                const uint32_t srcIdx = std::min<uint32_t>(t.levels > 0u ? t.levels - 1u : 0u,
+                                                           level > mipOffset ? (level - mipOffset) : 0u);
+                const uint8_t *srcPtr = t.arrBytes.data();
+                uint32_t sw = t.width, sh = t.height;
+                for (uint32_t si = 0; si < srcIdx; ++si)
+                {
+                    srcPtr += static_cast<size_t>(sw) * sh * 4u;
+                    sw = std::max(1u, sw / 2u);
+                    sh = std::max(1u, sh / 2u);
+                }
+                const uint8_t *uploadPtr = srcPtr;
+                if (sw < lw || sh < lh)
+                {
+                    resampleRgbaToTarget(srcPtr, sw, sh, upBuf.data(), lw, lh, wrapS, wrapT, useNearest);
+                    uploadPtr = upBuf.data();
+                }
+                glTexSubImage3D(GL_TEXTURE_2D_ARRAY, static_cast<GLint>(level), 0, 0, static_cast<GLint>(layer),
+                                static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 1, GL_RGBA, GL_UNSIGNED_BYTE, uploadPtr);
+                lw = std::max(1u, lw / 2u);
+                lh = std::max(1u, lh / 2u);
+            }
+        }
+        t.arrBucket[c] = bIdx;
+        t.arrLayer[c] = static_cast<int16_t>(layer);
+        outBucket = bIdx;
+        outLayer = layer;
+        return true;
+    }
+
+    bool Renderer::copyTexArrayRun(size_t from, size_t to, uint32_t totalIndices, uint32_t totalVerts, RunCopy &copy, const std::vector<uint64_t> &slotKeys)
+    {
+        static const bool mergeDiag = ps2_diag::env("SOTC_GL_MERGE_STATS") && std::atoi(ps2_diag::env("SOTC_GL_MERGE_STATS")) != 0;
+        const uint64_t diagStart = mergeDiag ? native_renderer::nowUs() : 0u;
+        const uint64_t bytes = static_cast<uint64_t>(totalVerts) * sizeof(TexArrVertex) +
+                               static_cast<uint64_t>(totalIndices) * sizeof(uint32_t);
+        if (indexedRunBytes + bytes > kMaxIndexedRunBytes)
+        {
+            std::vector<std::pair<uint64_t, uint64_t>> old;
+            runs.forEach([&](uint64_t key, const RunCopy &r)
+            {
+                if (r.indexed && r.vbo && r.used + 2u < arenaFrame)
+                    old.push_back({r.used, key});
+            });
+            std::sort(old.begin(), old.end());
+            for (const auto &[used, key] : old)
+            {
+                if (indexedRunBytes + bytes <= kMaxIndexedRunBytes)
+                    break;
+                RunCopy *r = runs.find(key);
+                if (r->vbo)
+                    glDeleteBuffers(1, &r->vbo);
+                if (r->ibo)
+                    glDeleteBuffers(1, &r->ibo);
+                if (r->vao)
+                {
+                    if (cache.vao == r->vao)
+                        cache.vao = cache.buffer = ~0u;
+                    glDeleteVertexArrays(1, &r->vao);
+                }
+                indexedRunBytes -= r->bytes;
+                r->vbo = r->ibo = r->vao = 0;
+                r->texArray = false;
+                r->bytes = r->count = r->vertCount = r->frames = 0;
+            }
+            if (indexedRunBytes + bytes > kMaxIndexedRunBytes)
+            {
+                if (mergeDiag)
+                {
+                    ++idxMergeStats.copyFailedBudget;
+                    idxMergeStats.copyUs += native_renderer::nowUs() - diagStart;
+                }
+                return false;
+            }
+        }
+        static std::vector<TexArrVertex> packedVerts;
+        static std::vector<uint32_t> packedIndices;
+        packedVerts.clear();
+        packedIndices.clear();
+        packedVerts.reserve(totalVerts);
+        packedIndices.reserve(totalIndices);
+        uint8_t minA = 0xFFu, maxA = 0u;
+        for (size_t j = from; j < to; ++j)
+        {
+            const Mesh *m = plan[j].mesh;
+            const Texture *tx = plan[j].tex;
+            if (!m || m->srcVerts.empty() || m->srcIndices.empty() || !tx)
+            {
+                if (mergeDiag)
+                {
+                    ++idxMergeStats.copyFailedNoSrc;
+                    idxMergeStats.copyUs += native_renderer::nowUs() - diagStart;
+                }
+                return false;
+            }
+            minA = std::min(minA, tx->minAlpha);
+            maxA = std::max(maxA, tx->maxAlpha);
+            const uint64_t tkey = drawAt(j).state.texture;
+            float slot = 0.0f;
+            for (size_t si = 0; si < slotKeys.size(); ++si)
+                if (slotKeys[si] == tkey)
+                {
+                    slot = static_cast<float>(si);
+                    break;
+                }
+            const uint32_t baseVert = static_cast<uint32_t>(packedVerts.size());
+            for (const native_renderer::Vertex &v : m->srcVerts)
+                packedVerts.push_back({v, slot});
+            for (uint32_t idx : m->srcIndices)
+                packedIndices.push_back(baseVert + idx);
+        }
+        if (!copy.vbo)
+            glGenBuffers(1, &copy.vbo);
+        if (!copy.ibo)
+            glGenBuffers(1, &copy.ibo);
+        if (!copy.vao)
+            copy.vao = makeTexArrVao(copy.vbo, copy.ibo);
+        glBindVertexArray(copy.vao);
+        glBindBuffer(GL_ARRAY_BUFFER, copy.vbo);
+        uploadStream(GL_ARRAY_BUFFER, packedVerts.data(), packedVerts.size() * sizeof(TexArrVertex), GL_STATIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, copy.ibo);
+        uploadStream(GL_ELEMENT_ARRAY_BUFFER, packedIndices.data(), packedIndices.size() * sizeof(uint32_t), GL_STATIC_DRAW);
+        cache.vao = copy.vao;
+        cache.buffer = copy.vbo;
+        copy.indexed = true;
+        copy.texArray = true;
+        copy.texMinAlpha = minA;
+        copy.texMaxAlpha = maxA;
+        copy.pool = -1;
+        copy.first = 0;
+        copy.count = totalIndices;
+        copy.vertCount = totalVerts;
+        copy.bytes = bytes;
+        indexedRunBytes += bytes;
+        if (mergeDiag)
+        {
+            ++idxMergeStats.copySucceeded;
+            idxMergeStats.copyBytes += bytes;
+            idxMergeStats.copyUs += native_renderer::nowUs() - diagStart;
+        }
+        return true;
+    }
+#endif
 
     bool Renderer::copyRun(size_t from, size_t to, uint32_t total, RunCopy &copy)
     {
@@ -6922,7 +8054,17 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                          phases.count / f, phases.count ? static_cast<double>(phases.calls) / phases.count : 0.0, (phases.total - phases.plan - phases.passes) / f / 1000.0,
                          phases.arenaUs / f / 1000.0, phases.arenaBytes / f / 1024.0,
                          native_renderer::tuning().glLeanPass ? 1 : 0, native_renderer::tuning().glKeepLayout ? 1 : 0, native_renderer::tuning().renderPrio ? 1 : 0);
+            std::fprintf(stderr, "[gl:passprof] per frame: drawLoop %.2f ms (setup %.2f, calls %.2f), passOther %.2f | prog %.1f unif %.1f (nonClip %.1f skip %.1f) vaoAttr %.1f vaoHit %.1f texBind %.1f texPar %.1f blend %.1f dt %.1f dm %.1f | rsd %.1f (p %.1f d %.1f s %.1f) fau %.1f cln %.1f\n",
+                         phases.drawLoopUs / f / 1000.0, (phases.drawLoopUs - phases.calls) / f / 1000.0, phases.calls / f / 1000.0,
+                         (phases.passes - phases.drawLoopUs) / f / 1000.0,
+                         phases.progCalls / f, phases.unifCalls / f, phases.unifNonClip / f, phases.unifSkips / f,
+                         phases.vaoAttribs / f, phases.vaoHits / f, phases.texBinds / f, phases.texParams / f,
+                         phases.blendChg / f, phases.dtChg / f, phases.dmChg / f,
+                         phases.rsdDraws / f, phases.rsdProg / f, phases.rsdDm / f, phases.rsdPipe / f, phases.fauOnlyDraws / f, phases.cleanDraws / f);
             phases.plan = phases.passes = phases.calls = phases.count = phases.total = phases.frames = phases.arenaUs = phases.arenaBytes = 0;
+            phases.drawLoopUs = phases.progCalls = phases.unifCalls = phases.unifSkips = phases.unifNonClip = 0;
+            phases.vaoAttribs = phases.vaoHits = phases.texBinds = phases.texParams = phases.blendChg = phases.dtChg = phases.dmChg = 0;
+            phases.rsdDraws = phases.rsdProg = phases.rsdDm = phases.rsdPipe = phases.fauOnlyDraws = phases.cleanDraws = 0;
         }
         stats.depthKB = loadKB + storeKB;
         sceneStats.scenes += scenes;
@@ -7021,6 +8163,14 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #if !defined(PS2X_NATIVE_VITA)
         if (vao)
             glBindVertexArray(vao);
+        if (uboReady && frameUbo)
+        {
+            const float fb[12] = {fog.start, fog.width, static_cast<float>(fog.steps), fog.base,
+                                  fog.colour[0], fog.colour[1], fog.colour[2], fog.scale,
+                                  static_cast<float>(w), static_cast<float>(h), 0.0f, 0.0f};
+            glBindBufferBase(GL_UNIFORM_BUFFER, 0, frameUbo);
+            glBufferData(GL_UNIFORM_BUFFER, sizeof(fb), fb, GL_DYNAMIC_DRAW);
+        }
 #endif
         // (a frame that drew its screen blur on the second picture: the
         // targets back in their places for the next one, whichever way it ends)
@@ -7303,10 +8453,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 glDepthMask(GL_TRUE);
                 shadowAmount = 0.0f;
                 cache.blend = cache.depthTest = cache.depthMask = -1;
-                cache.vao = cache.buffer = cache.texture = ~0u;
+                cache.vao = cache.buffer = cache.texture = cache.arrTex = ~0u;
             };
             cache.blend = cache.depthTest = cache.depthMask = -1;
-            cache.vao = cache.buffer = cache.texture = ~0u;
+            cache.vao = cache.buffer = cache.texture = cache.arrTex = ~0u;
             const bool leanOn = native_renderer::tuning().glLeanPrograms, noDiscard = native_renderer::tuning().glNoDiscard;
             const bool untex98 = native_renderer::tuning().glUntex98; // round 98
             const bool opaque88 = native_renderer::tuning().glOpaque88; // round 88
@@ -7361,6 +8511,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             const Mesh *prevFurMesh = nullptr;
             int furShellCount = 0;
             const int maxFurShells = native_renderer::tuning().furShells;
+            const uint64_t drawLoopStart = phases.on ? native_renderer::nowUs() : 0u;
             for (size_t li = firstAt; li < endAt; ++li)
             {
                 const size_t k = byLeaders ? leaders[li] : li;
@@ -7527,6 +8678,39 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                         cache.buffer = vertexBuffer;
                         ++drawStats.bufferSwitches;
                     }
+                    if (phases.on)
+                        ++phases.vaoHits;
+                }
+                else if (indexedRun && planned.runVao)
+                {
+                    if (cache.vao != planned.runVao)
+                    {
+                        glBindVertexArray(planned.runVao);
+                        cache.vao = planned.runVao;
+                        cache.buffer = planned.runVbo;
+                        ++drawStats.bufferSwitches;
+                    }
+                    if (phases.on)
+                        ++phases.vaoHits;
+                }
+                else if (staticVaoEnabled() && !mesh.dynamic && mesh.indexed && !indexedRun && mesh.buffer && mesh.indexBuffer)
+                {
+                    if (!mesh.vao)
+                    {
+                        mesh.vao = makeStaticVao(mesh.buffer, mesh.indexBuffer, skinned);
+                        cache.vao = mesh.vao;
+                        cache.buffer = mesh.buffer;
+                        ++drawStats.bufferSwitches;
+                    }
+                    else if (cache.vao != mesh.vao)
+                    {
+                        glBindVertexArray(mesh.vao);
+                        cache.vao = mesh.vao;
+                        cache.buffer = mesh.buffer;
+                        ++drawStats.bufferSwitches;
+                    }
+                    if (phases.on)
+                        ++phases.vaoHits;
                 }
                 else
                 {
@@ -7539,6 +8723,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #endif
                     if (vertexBuffer != cache.buffer) // the frame's dynamic meshes share one buffer, the kept ones a few: set once
                     {
+                        if (phases.on)
+                            ++phases.vaoAttribs;
                         cache.buffer = vertexBuffer;
                         ++drawStats.bufferSwitches;
                         glBindBuffer(GL_ARRAY_BUFFER, vertexBuffer);
@@ -7598,7 +8784,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 {
                     leastAlpha = static_cast<float>(planned.minAlpha) / 128.0f * d.state.opacity;
                     if (textured == 1)
-                        leastAlpha *= static_cast<float>(tex->minAlpha) / 255.0f * 2.0f;
+                        leastAlpha *= static_cast<float>(planned.runArrTex ? planned.runTexMinAlpha : tex->minAlpha) / 255.0f * 2.0f;
                 }
                 // The GS alpha test (DrawState::alphaTest, round 38; GEQUAL / GREATER
                 // with AFAIL FB_ONLY / RGB_ONLY, SotC's models): the pixels at AREF
@@ -7620,7 +8806,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 {
                     float greatest = static_cast<float>(planned.maxAlpha) / 128.0f * d.state.opacity;
                     if (textured == 1)
-                        greatest *= static_cast<float>(tex->maxAlpha) / 255.0f * 2.0f;
+                        greatest *= static_cast<float>(planned.runArrTex ? planned.runTexMaxAlpha : tex->maxAlpha) / 255.0f * 2.0f;
                     atAllUnder = greatest < aref - 1.0f / 256.0f;
                 }
                 const bool atSecond = atOn && !atAllUnder && !(leastAlpha >= aref);
@@ -7670,57 +8856,86 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     // Round 98 (Tuning glLod0_98): a mipped texture drawn at level 0
                     // (the draw's maxLod <= 0: the LOD program's lod is 0) read as a
                     // one-level one, the texture's sampling held to level 0 (below).
-                    const bool lod0 = textured == 1 && tex->mipped && !(d.state.maxLod > 0.0f) && native_renderer::tuning().glLod0_98 &&
-                                      native_renderer::tuning().glPlainReads;
-                    const bool plain = textured == 1 && (!tex->mipped || lod0) && native_renderer::tuning().glPlainReads;
-                    lod0Draw = lod0;
-                    GLuint lean = leanProgram(skinned, fogA[3] > 0.5f, cut, plain);
-                    if (plain && !lean)
-                        lean = leanProgram(skinned, fogA[3] > 0.5f, cut);
-                    else if (plain)
-                        ++plainReadDraws;
-                    // Round 98 (Tuning glUntex98): an untextured draw through the
-                    // programs without the texel read and its LOD.
-                    bool untex = false;
-                    if (textured == 0 && untex98)
-                        if (const GLuint u = mains[kUntexSlot + (skinned ? 4 : 0) + (fogA[3] > 0.5f ? 2 : 0) + (cut ? 1 : 0)].program)
+                    if (planned.runArrTex)
+                    {
+                        const bool bg = fogA[3] > 0.5f;
+                        GLuint lean = mains[kTexArrSlot + (bg ? 2 : 0) + (cut ? 1 : 0)].program;
+                        if (cut && softHere && !bg && mains[kTexArrSoftSlot].program)
                         {
-                            lean = u;
-                            untex = true;
-                            ++r98Stats.untex;
+                            const GLuint soft = mains[kTexArrSoftSlot].program;
+                            if (writesNoDepth)
+                                lean = soft, softUsed = true;
+                            else if (atSecond)
+                                softSecond = soft;
                         }
-                    // Round 98 (Tuning glPlainSoft98): the plain (NOLOD) draws get the
-                    // cut-out without discard too (round 75 made only the LOD one).
-                    const bool plainSoft = plain && lean == leanProgram(skinned, fogA[3] > 0.5f, cut, true) && native_renderer::tuning().glPlainSoft98 &&
-                                           mains[kPlainSoftSlot + (skinned ? 1 : 0)].program;
-                    if (cut && softHere && (!plain || plainSoft) && !(fogA[3] > 0.5f)) // (not BG: see kWorldFragment's SOFT)
-                    {
-                        const GLuint softU = untex ? mains[kUntexSoftSlot + (skinned ? 1 : 0)].program : plainSoft ? mains[kPlainSoftSlot + (skinned ? 1 : 0)].program : 0;
-                        const GLuint soft = softU ? softU : softProgram(skinned);
-                        r98Stats.plainSoft += plainSoft ? 1u : 0u;
-                        if (soft && writesNoDepth)
-                            lean = soft, softUsed = true;
-                        else if (soft && atSecond)
-                            softSecond = soft;
-                    }
-                    if (lean)
-                    {
-                        program = lean;
-                        drawStats.noDiscard += cut ? 0u : 1u;
-                        cutUsed = cut && !softUsed;
-                        leanNoCut = !cut;
-                        // Round 92 (glNoScreen92): without BG and CUT the fragment
-                        // program reads no screen position: the vertex program
-                        // that does not write it.
-                        if (!cut && !softUsed && !(fogA[3] > 0.5f) && native_renderer::tuning().glNoScreen92)
+                        if (lean)
                         {
-                            const bool plainUsed = plain && lean == leanProgram(skinned, false, false, true);
-                            const GLuint ns = untex ? mains[kUntexNoScreenSlot + (skinned ? 1 : 0)].program : mains[kNoScreenSlot + (plainUsed ? 2 : 0) + (skinned ? 1 : 0)].program;
-                            if (ns)
+                            program = lean;
+                            drawStats.noDiscard += cut ? 0u : 1u;
+                            cutUsed = cut && !softUsed;
+                            leanNoCut = !cut;
+                            if (!cut && !softUsed && !bg && native_renderer::tuning().glNoScreen92 && mains[kTexArrNoScreenSlot].program)
                             {
-                                program = ns;
+                                program = mains[kTexArrNoScreenSlot].program;
                                 ++r92Stats.noScreen;
-                                r92Stats.noScreenVerts += planned.run > 1 ? planned.mergedCount : mesh.count;
+                                r92Stats.noScreenVerts += planned.mergedCount;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        const bool lod0 = textured == 1 && tex->mipped && !(d.state.maxLod > 0.0f) && native_renderer::tuning().glLod0_98 &&
+                                          native_renderer::tuning().glPlainReads;
+                        const bool plain = textured == 1 && (!tex->mipped || lod0) && native_renderer::tuning().glPlainReads;
+                        lod0Draw = lod0;
+                        GLuint lean = leanProgram(skinned, fogA[3] > 0.5f, cut, plain);
+                        if (plain && !lean)
+                            lean = leanProgram(skinned, fogA[3] > 0.5f, cut);
+                        else if (plain)
+                            ++plainReadDraws;
+                        // Round 98 (Tuning glUntex98): an untextured draw through the
+                        // programs without the texel read and its LOD.
+                        bool untex = false;
+                        if (textured == 0 && untex98)
+                            if (const GLuint u = mains[kUntexSlot + (skinned ? 4 : 0) + (fogA[3] > 0.5f ? 2 : 0) + (cut ? 1 : 0)].program)
+                            {
+                                lean = u;
+                                untex = true;
+                                ++r98Stats.untex;
+                            }
+                        // Round 98 (Tuning glPlainSoft98): the plain (NOLOD) draws get the
+                        // cut-out without discard too (round 75 made only the LOD one).
+                        const bool plainSoft = plain && lean == leanProgram(skinned, fogA[3] > 0.5f, cut, true) && native_renderer::tuning().glPlainSoft98 &&
+                                               mains[kPlainSoftSlot + (skinned ? 1 : 0)].program;
+                        if (cut && softHere && (!plain || plainSoft) && !(fogA[3] > 0.5f)) // (not BG: see kWorldFragment's SOFT)
+                        {
+                            const GLuint softU = untex ? mains[kUntexSoftSlot + (skinned ? 1 : 0)].program : plainSoft ? mains[kPlainSoftSlot + (skinned ? 1 : 0)].program : 0;
+                            const GLuint soft = softU ? softU : softProgram(skinned);
+                            r98Stats.plainSoft += plainSoft ? 1u : 0u;
+                            if (soft && writesNoDepth)
+                                lean = soft, softUsed = true;
+                            else if (soft && atSecond)
+                                softSecond = soft;
+                        }
+                        if (lean)
+                        {
+                            program = lean;
+                            drawStats.noDiscard += cut ? 0u : 1u;
+                            cutUsed = cut && !softUsed;
+                            leanNoCut = !cut;
+                            // Round 92 (glNoScreen92): without BG and CUT the fragment
+                            // program reads no screen position: the vertex program
+                            // that does not write it.
+                            if (!cut && !softUsed && !(fogA[3] > 0.5f) && native_renderer::tuning().glNoScreen92)
+                            {
+                                const bool plainUsed = plain && lean == leanProgram(skinned, false, false, true);
+                                const GLuint ns = untex ? mains[kUntexNoScreenSlot + (skinned ? 1 : 0)].program : mains[kNoScreenSlot + (plainUsed ? 2 : 0) + (skinned ? 1 : 0)].program;
+                                if (ns)
+                                {
+                                    program = ns;
+                                    ++r92Stats.noScreen;
+                                    r92Stats.noScreenVerts += planned.run > 1 ? planned.mergedCount : mesh.count;
+                                }
                             }
                         }
                     }
@@ -7739,6 +8954,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     {
                         glUniform4fv(m.palette, static_cast<GLsizei>(count), palettes.data() + from);
                         m.paletteSent = key;
+                        if (phases.on)
+                            phases.pendingUnifDirty = true;
                     }
                 };
                 auto sendInstances = [&]
@@ -7751,13 +8968,30 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                         {
                             glUniform1i(m.locInstanceCount, count);
                             m.lastInstanceCount = count;
+                            if (phases.on)
+                                phases.pendingUnifDirty = true;
                         }
                         if (count > 1 && m.locInstanceClips >= 0)
+                        {
                             glUniform4fv(m.locInstanceClips, count * 4, instanceClips.data() + planned.instanceOffset);
+                            if (phases.on)
+                                phases.pendingUnifDirty = true;
+                        }
+                    }
+                };
+                auto sendTexSlots = [&]
+                {
+                    MainSlot &m = mains[mainSlot];
+                    if (planned.runArrTex && m.locTexSlots >= 0 && planned.runArrSlotCount > 0)
+                    {
+                        glUniform4fv(m.locTexSlots, static_cast<GLsizei>(planned.runArrSlotCount), texArrSlotData.data() + planned.runArrSlotOffset);
+                        if (phases.on)
+                            phases.pendingUnifDirty = true;
                     }
                 };
                 sendPalette();
                 sendInstances();
+                sendTexSlots();
                 uniform4(uClip, d.clip, 4);
                 if (d.state.lit || d.state.fresnel) // read by the vertex program only then
                 {
@@ -7893,6 +9127,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     ++r93Stats.atBlended, r93Stats.atBlendedVerts += planned.run > 1 ? planned.mergedCount : mesh.count;
                 if (static_cast<int>(drawBlend) != cache.blend)
                 {
+                    if (phases.on)
+                    {
+                        ++phases.blendChg;
+                        phases.pendingRsdMask |= 4u;
+                    }
                     setBlend(drawBlend, keepAlpha);
                     cache.blend = static_cast<int>(drawBlend);
                 }
@@ -7910,6 +9149,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                                                : (d.state.overlay || (d.state.blend == native_renderer::Blend::Additive && !d.state.writeDepth) || d.state.noDepthWrite ? 0 : 1);
                 if (depthTest != cache.depthTest)
                 {
+                    if (phases.on)
+                    {
+                        ++phases.dtChg;
+                        phases.pendingRsdMask |= 4u;
+                    }
                     if (depthTest)
                     {
                         glEnable(GL_DEPTH_TEST);
@@ -7922,6 +9166,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 const int depthMaskDrawn = atAllUnder ? 0 : depthMask; // all under AREF: FB_ONLY, no depth written
                 if (depthMaskDrawn != cache.depthMask)
                 {
+                    if (phases.on)
+                    {
+                        ++phases.dmChg;
+                        phases.pendingRsdMask |= 2u;
+                    }
                     glDepthMask(depthMaskDrawn ? GL_TRUE : GL_FALSE);
                     cache.depthMask = depthMaskDrawn;
                 }
@@ -7939,7 +9188,19 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     const GLuint redrawn = textured == 4 ? hazeSourceTexture : waterSource;
                     bindTexture(3, redrawn && source != 2 ? redrawn : (source == 2 ? (previousTexture ? previousTexture : previous.texture) : (source == 1 ? snapshot.texture : refraction.texture)));
                 }
-                if (textured == 1)
+                if (textured == 1 && planned.runArrTex)
+                {
+                    tex->used = arenaFrame;
+                    if (cache.arrTex != planned.runArrTex)
+                    {
+                        if (phases.on)
+                            ++phases.texBinds;
+                        glActiveTexture(GL_TEXTURE0);
+                        glBindTexture(GL_TEXTURE_2D_ARRAY, planned.runArrTex);
+                        cache.arrTex = planned.runArrTex;
+                    }
+                }
+                else if (textured == 1)
                 {
                     tex->used = arenaFrame;
                     GLuint texName = drawName(*tex);
@@ -7957,11 +9218,15 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     }
                     if (cache.texture != texName)
                     {
+                        if (phases.on)
+                            ++phases.texBinds;
                         bindTexture(0, texName);
                         cache.texture = texName;
                     }
                     if (tex->clamp != (d.state.clamp & 3u)) // a texture's wrap is its own state: set when it changes
                     {
+                        if (phases.on)
+                            ++phases.texParams;
                         tex->clamp = d.state.clamp & 3u;
                         for (const GLuint n : {tex->swz, tex->name}) // (both copies: round 73)
                             if (n)
@@ -7983,6 +9248,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     }
                     if (tex->filter != filter)
                     {
+                        if (phases.on)
+                            ++phases.texParams;
                         tex->filter = filter;
                         const bool mipped = tex->mipped;
                         for (const GLuint n : {tex->swz, tex->name}) // (both copies: round 73)
@@ -7998,10 +9265,12 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                         bindTexture(0, texName);
                     }
                 }
+                const bool leanUbo = uboReady && program != mainProgram && program != skinProgram;
                 const float misc[4] = {d.state.fresnel ? -1.0f : (d.state.lit ? 1.0f : 0.0f), d.state.opacity, d.state.uvOffset[0], d.state.uvOffset[1]};
                 const float fogB[4] = {static_cast<float>(w), static_cast<float>(h), vertexFog ? 1.0f : 0.0f, fog.base};
                 // The mirror's ripple (t, H) where a reflection reads no mip level.
-                const float fogC[4] = {fog.scale, d.state.reflectionSample ? d.state.mirrorRipple[0] : d.state.lodK,
+                const float fogC[4] = {leanUbo ? ((vertexFog ? 1.0f : 0.0f) + (textured == 1 ? 2.0f : 0.0f)) : fog.scale,
+                                       d.state.reflectionSample ? d.state.mirrorRipple[0] : d.state.lodK,
                                        d.state.reflectionSample ? d.state.mirrorRipple[1] : d.state.lodScale, d.state.reflectionSample ? 0.0f : d.state.maxLod};
                 const float fogColour[4] = {fog.colour[0], fog.colour[1], fog.colour[2], static_cast<float>(textured)};
                 float debug[4] = {static_cast<float>(d.state.debugColour & 0xFFu) / 255.0f, static_cast<float>((d.state.debugColour >> 8) & 0xFFu) / 255.0f,
@@ -8035,18 +9304,23 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     ++tintIndex;
                 }
                 uniform4(uMisc, misc, 1);
-                uniform4(uFogA, fogA, 1);
-                uniform4(uFogB, fogB, 1);
                 uniform4(uFogC, fogC, 1);
-                uniform4(uFogColour, fogColour, 1);
-                uniform4(uDebug, debug, 1);
-                uniform4(uGuard, guard, 1);
+                if (!leanUbo)
+                {
+                    uniform4(uFogA, fogA, 1);
+                    uniform4(uFogB, fogB, 1);
+                    uniform4(uFogColour, fogColour, 1);
+                    uniform4(uDebug, debug, 1);
+                }
+                if (!leanNoCut || cutUsed || softUsed || !leanOn)
+                    uniform4(uGuard, guard, 1);
                 const float alphaCut[4] = {atSecond ? aref : 0.0f, atAllUnder ? aref : 0.0f, 0.0f, 0.0f};
                 if (atAllUnder)
                     ++alphaStats.merged;
                 if (atSecond && !planned.minAlpha)
                     ++alphaStats.secondUnknown;
-                uniform4(uAlphaTest, alphaCut, 1);
+                if (cutUsed || softUsed || program == mainProgram || program == skinProgram)
+                    uniform4(uAlphaTest, alphaCut, 1);
                 {
                     // SOTC_GL_LAYER_LOG=<layer> (debugging, round 55): every 120
                     // frames, the first draws of that layer as the GPU gets them.
@@ -8179,7 +9453,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #if !defined(PS2X_NATIVE_VITA)
                     if (mesh.indexed)
                     {
-                        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.indexBuffer);
+                        if (mesh.dynamic || !mesh.vao || !staticVaoEnabled())
+                            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.indexBuffer);
                         glDrawElementsInstanced(GL_TRIANGLES, static_cast<GLsizei>(diagHalf(mesh.count)), GL_UNSIGNED_INT, nullptr, static_cast<GLsizei>(planned.instances));
                     }
                     else
@@ -8195,8 +9470,12 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     ++(planned.runPool >= 0 || planned.runIbo ? drawStats.indexed : drawStats.ranges);
                     if (planned.runIbo)
                     {
-                        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, planned.runIbo);
-                        glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(diagHalf(planned.mergedCount)), GL_UNSIGNED_INT, nullptr);
+                        if (!planned.runVao)
+                            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, planned.runIbo);
+                        if (drawRangeEnabled() && planned.mergedVerts > 0u)
+                            glDrawRangeElements(GL_TRIANGLES, 0u, planned.mergedVerts - 1u, static_cast<GLsizei>(diagHalf(planned.mergedCount)), GL_UNSIGNED_INT, nullptr);
+                        else
+                            glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(diagHalf(planned.mergedCount)), GL_UNSIGNED_INT, nullptr);
                     }
                     else
                         glDrawArrays(GL_TRIANGLES, firstVertex, static_cast<GLsizei>(diagHalf(planned.mergedCount)));
@@ -8216,6 +9495,16 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     const uint64_t took = native_renderer::nowUs() - callStart;
                     phases.calls += took, ++phases.count;
                     stats.callUs += took, ++stats.calls;
+                    const uint32_t rm = phases.pendingRsdMask;
+                    const bool rsd = rm != 0u;
+                    phases.rsdDraws += rsd ? 1u : 0u;
+                    phases.rsdProg += (rm & 1u) ? 1u : 0u;
+                    phases.rsdDm += (rm & 2u) ? 1u : 0u;
+                    phases.rsdPipe += (rm & 4u) ? 1u : 0u;
+                    phases.fauOnlyDraws += (!rsd && phases.pendingUnifDirty) ? 1u : 0u;
+                    phases.cleanDraws += (!rsd && !phases.pendingUnifDirty) ? 1u : 0u;
+                    phases.pendingRsdMask = 0u;
+                    phases.pendingUnifDirty = false;
                 }
                 if (spike.on)
                 {
@@ -8233,6 +9522,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                         useProgram(softSecond);
                         sendPalette();
                         sendInstances();
+                        sendTexSlots();
                         uniform4(uClip, d.clip, 4);
                         if (d.state.lit || d.state.fresnel)
                         {
@@ -8240,11 +9530,14 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                             uniform4(uColours, d.state.light + 16, 4);
                         }
                         uniform4(uMisc, misc, 1);
-                        uniform4(uFogA, fogA, 1);
-                        uniform4(uFogB, fogB, 1);
                         uniform4(uFogC, fogC, 1);
-                        uniform4(uFogColour, fogColour, 1);
-                        uniform4(uDebug, debug, 1);
+                        if (!uboReady)
+                        {
+                            uniform4(uFogA, fogA, 1);
+                            uniform4(uFogB, fogB, 1);
+                            uniform4(uFogColour, fogColour, 1);
+                            uniform4(uDebug, debug, 1);
+                        }
                         uniform4(uGuard, guard, 1);
                         ++drawStats.soft;
                     }
@@ -8282,7 +9575,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #if !defined(PS2X_NATIVE_VITA)
                         if (mesh.indexed)
                         {
-                            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.indexBuffer);
+                            if (mesh.dynamic || !mesh.vao || !staticVaoEnabled())
+                                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.indexBuffer);
                             glDrawElementsInstanced(GL_TRIANGLES, static_cast<GLsizei>(diagHalf(mesh.count)), GL_UNSIGNED_INT, nullptr, static_cast<GLsizei>(planned.instances));
                         }
                         else
@@ -8296,8 +9590,12 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     {
                         if (planned.runIbo)
                         {
-                            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, planned.runIbo);
-                            glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(diagHalf(planned.mergedCount)), GL_UNSIGNED_INT, nullptr);
+                            if (!planned.runVao)
+                                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, planned.runIbo);
+                            if (drawRangeEnabled() && planned.mergedVerts > 0u)
+                                glDrawRangeElements(GL_TRIANGLES, 0u, planned.mergedVerts - 1u, static_cast<GLsizei>(diagHalf(planned.mergedCount)), GL_UNSIGNED_INT, nullptr);
+                            else
+                                glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(diagHalf(planned.mergedCount)), GL_UNSIGNED_INT, nullptr);
                         }
                         else
                             glDrawArrays(GL_TRIANGLES, firstVertex, static_cast<GLsizei>(diagHalf(planned.mergedCount)));
@@ -8311,6 +9609,16 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                         const uint64_t took = native_renderer::nowUs() - secondStart;
                         phases.calls += took, ++phases.count;
                         stats.callUs += took, ++stats.calls;
+                        const uint32_t rm = phases.pendingRsdMask | (less98 ? 4u : 0u);
+                        const bool rsd = rm != 0u;
+                        phases.rsdDraws += rsd ? 1u : 0u;
+                        phases.rsdProg += (rm & 1u) ? 1u : 0u;
+                        phases.rsdDm += (rm & 2u) ? 1u : 0u;
+                        phases.rsdPipe += (rm & 4u) ? 1u : 0u;
+                        phases.fauOnlyDraws += (!rsd && phases.pendingUnifDirty) ? 1u : 0u;
+                        phases.cleanDraws += (!rsd && !phases.pendingUnifDirty) ? 1u : 0u;
+                        phases.pendingRsdMask = less98 ? 4u : 0u;
+                        phases.pendingUnifDirty = false;
                     }
                     stats.vertices += planned.instances > 1 ? (mesh.count * planned.instances) : (planned.run > 1 ? planned.mergedCount : mesh.count);
                     ++drawStats.alphaSecond;
@@ -8339,6 +9647,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     }
                 }
             }
+            if (phases.on)
+                phases.drawLoopUs += native_renderer::nowUs() - drawLoopStart;
 #if !defined(PS2X_NATIVE_VITA)
             if (vao && cache.vao != vao)
             {
@@ -10899,6 +12209,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                         r->deadBuffers.push_back(m->buffer);
                     if (m->indexBuffer)
                         r->deadBuffers.push_back(m->indexBuffer);
+#if !defined(PS2X_NATIVE_VITA)
+                    if (m->vao)
+                        r->deadVaos.push_back(m->vao);
+#endif
                     if (m->pool >= 0)
                         r->deadRanges.push_back({m->pool, m->first, m->count, 0});
                     r->forget(*m);
