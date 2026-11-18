@@ -281,6 +281,14 @@ class Gen:
                 self.chunks.setdefault(cur, [])
                 # the control block that follows a branch / jump's comment: lines up to the matching brace
                 self.blocks[cur] = lines[k + 1:k + 60]
+                # Decomp D9: a jump table longer than the window (manager_sub_010C7B28's 125 cases) lost its later cases,
+                # which then jumped out to the generated function: the block runs to the table's PS2_JUMP_GUEST.
+                blk = self.blocks[cur]
+                if any('switch (jumpTarget)' in x for x in blk) and not any('PS2_JUMP_GUEST' in x for x in blk):
+                    e = k + 60
+                    while e < len(lines) and 'PS2_JUMP_GUEST' not in lines[e]:
+                        e += 1
+                    self.blocks[cur] = lines[k + 1:e + 1]
                 continue
             if cur is not None:
                 self.chunks[cur].append(ln)
@@ -435,7 +443,9 @@ class Lifter:
                 if rs == 31:
                     self.kind[a] = ('ret',)
                 else:
-                    cases = [int(x, 16) for x in re.findall(r'case 0x([0-9A-Fa-f]+)u: goto label_', g.block_text(a).split('PS2_JUMP_GUEST')[0])]
+                    # D7: a case may write registers back first (`case 0x..u: { Ps2SetGpr64(...); goto label_..; }`): the
+                    # lifted code writes every dirty register back before the jump anyway (a jump table's targets read back)
+                    cases = [int(x, 16) for x in re.findall(r'case 0x([0-9A-Fa-f]+)u: (?:\{[^{}]*?)?goto label_', g.block_text(a).split('PS2_JUMP_GUEST')[0])]
                     if not cases:
                         self.kind[a] = ('jr', rs, [])
                     else:
@@ -1265,7 +1275,10 @@ class Lifter:
             return f'{v(rs)} == {v(rt)}' if rt else f'{v(rs)} == 0'
         if kind == 'ne':
             return f'{v(rs)} != {v(rt)}' if rt else f'{v(rs)} != 0'
-        sv = v(rs) if wide else f'(int32_t){N(rs)}'
+        # D7: the recompiler's bltz / bgez / blez / bgtz (and the -al / -l forms) test the low 32 bits (RC_S32), even of a
+        # register holding a 64-bit value (a `ld`): so does the lifted code (a 64-bit compare differed when bit 31 and
+        # bit 63 disagree, gamecore_sub_013454B8's 64-bit counter, found by the D7 trace check)
+        sv = f'(int32_t){N(rs)}'
         return {'lez': f'{sv} <= 0', 'gtz': f'{sv} > 0', 'ltz': f'{sv} < 0', 'gez': f'{sv} >= 0'}[kind]
 
     def sync(self, slots):
@@ -1402,7 +1415,10 @@ class Lifter:
                     din = self.dirty_in[a]
                     L.append(f'{I}{self.sync(din)} // {g.mnem[a]}: the runtime reads the context')
                     L.append(f'{I}{n["code"]}')
-                    L.append(f'{I}{self.sync(n["defs"])} {self.reload_all()}')
+                    # D7: a register the op's own code writes in the context (SET_GPR_VEC(ctx, r, ...): a 128-bit result)
+                    # is not written back from its stale local after it (iosMulMvec's pmfhl.lw, found by the trace check)
+                    vec = set(('g', int(x)) for x in re.findall(r'SET_GPR_VEC\(ctx, (\d+),', n['code']))
+                    L.append(f'{I}{self.sync(set(n["defs"]) - vec)} {self.reload_all()}')
                 elif n['code']:
                     L.append(I + n['code'])
                 continue
