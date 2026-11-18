@@ -179,8 +179,7 @@ Example (replace the placeholders with local values):
 ssh <user>@<device-ip> 'uname -m'
 ```
 
-Device rules — read `tools/r36s_smoke.sh` on the `r36s` branch before
-touching the hardware:
+Device rules (must be followed before touching the hardware):
 
 - Write only under `/roms/ports/SotC_Celosia/` and `/tmp` (`/tmp` is tmpfs,
   448 MiB).
