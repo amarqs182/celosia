@@ -292,3 +292,29 @@ Executed after Pass 9 + PGO showed `game` (`33.80 ms` med) still gating 3D Shrin
 - **B5 Architectural Takeaway & Deployment:**
   - Inlining 9 `g.callNative` guards inside `DispDispObjGroupModel` / `DispLayoutObjModel` bloated hot loop code size past Cortex-A35's 32 KB L1I and lost `-0.98 FPS` even with fresh `.gcda` PGO (`pgo_phase_b5`), so `decomp_walk.cpp` was reverted cleanly.
   - Defaulting `kPf141` / `kPfc141` OFF on Linux `aarch64` ([`game/overrides/sotc_decomp.h`](game/overrides/sotc_decomp.h#L705-L718)) + updating `/roms/ports/.SotC_Celosia/SotC.sh` (`SOTC_PF141=0`, `SOTC_PFC141=0`) eliminated both mutex/condvar overhead at `0x013cfc68` and speculative L2 thrashing on the RK3326's 256 KB shared L2, delivering **`33.89` mean / `34.72` med FPS** (`f>=4500`, `n=1577`: `33.70 / 34.48 FPS`, `max_frame 6076`, `RSS 336.7 MiB`).
+
+---
+
+## Phase C (2.2 / 2.3) & Runtime Selective LTO / 4 GiB Fastmem (PR #42–#43, `2026-11-18`)
+
+Full raw logs, `[gl:texbrk]` / `[gl:texstate]` / `[gl:passprof]` breakdowns, and screenshot checks are archived in [`docs/r36s_render_merge_audit.md`](docs/r36s_render_merge_audit.md).
+
+- **GLES 3.2 Texture-Array Batching, VAOs, Range Draws, & Program-First Sorting ([`PS2Recomp/ps2xRuntime/src/lib/native/native_renderer_gl.cpp`](PS2Recomp/ps2xRuntime/src/lib/native/native_renderer_gl.cpp)):**
+  - `SOTC_GL_TEXARRAY=1` (`GL_TEXTURE_2D_ARRAY` buckets preserving `GL_REPEAT` and mipmaps, `TexArrVertex` + `uTexSlots[64]`) + `SOTC_GL_STATIC_VAO=1` (persistent `Mesh::vao` / `RunCopy::vao`) on PGO (`build/linux-aarch64`) reduced GL draw calls `-40.0%` to `-42.6%` (`140 -> 84` medium, `230 -> 132` heavy) and CPU `render` `-35.7%` to `-39.6%` (`11.47 -> 6.93 ms`, `18.62 -> 11.97 ms` heavy peak).
+  - `SOTC_GL_PROMOTE_128=1` promoted `32..128` PoT textures into the `128x128` bucket (Q8 alpha-weighted resampler, `blevels`/`<128`-axis guards, exact `mipOffset`, and `[minLod, maxLod]` floor clamping in `#elif TEXARR`, cutting `6–8` GL calls/frame in Shrine 3D). `SOTC_GL_DRAW_RANGE=1` enabled `glDrawRangeElements` for `mesh.pool < 0` and run copies (`35.3–37.5 -> 30.9–34.1 µs/call`, peak `render 18.97 -> 18.06 ms` combined with `PROMOTE_128=1`).
+  - `SOTC_GL_SORT_PROG=1` (`SOTC_GL_SORT87=1` + `SOTC_SORT_OPAQUE=1`) sorted safe opaque draws by `(progBits, texArrayBucket, hashTexArrayState)` ahead of raw `d.state.texture`: Shrine GL calls dropped `183 -> 124`, `rsd 117.4 -> 81.2`, `prog 92.4 -> 62.2`, `texBind 146.3 -> 92.5` (`ALL render p50 10.40 -> 9.50 ms`).
+  - Rejected as defaults after R36S A/B tests: `SOTC_GL_UBO=1` (`+15 µs/call` on `libmali r13p0`) and `SOTC_GL_NODISCARD=1` (`+3.20..+4.08 ms` / `+1.21 ms` CPU `render` regression vs `-1.86 ms` GPU `present` gain).
+- **Game-Thread Audit, `PS2X_LINUX_SELECTIVE_LTO=ON`, `PS2X_LINUX_FASTMEM=ON`, & `GS_CSR` Overrides ([`PS2Recomp/ps2xRuntime/CMakeLists.txt`](PS2Recomp/ps2xRuntime/CMakeLists.txt), [`PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp`](PS2Recomp/ps2xRuntime/src/lib/ps2_memory.cpp), [`PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp`](PS2Recomp/ps2xRuntime/src/lib/ps2_runtime.cpp), [`game/overrides/decomp_hot44g.cpp`](game/overrides/decomp_hot44g.cpp)):**
+  - `[mem:slow]` + `[prof129]` identified flat native costs plus `GS_CSR` MMIO reads (`0x120000e0`/`0x12001000`). Opt-in `PS2X_LINUX_SELECTIVE_LTO=ON` applies `-flto -ffat-lto-objects -fno-plt` to `ps2_runtime`, `ps2_iop`, and `/overrides/*.cpp` while preserving non-LTO `lean_part*` and `linux_hot_order.ld`. Opt-in `PS2X_LINUX_FASTMEM=ON` maps a `4 GiB` `PROT_NONE` window via `memfd_create` mirrors + 64 KiB circular overhang guard pages, restores the ARM64 `SA_SIGINFO` trap handler after `SDL_Init()`, and natively overrides `kernel_sub_001C1538`, `kernel_sub_001C37F0` (`0x001C37F0`), and `iosSyncV` (`0x001C2858`), eliminating runtime `GS_CSR` traps (`>14,000` in `final_v2` -> `16` one-time boot traps / `0` traps across ~`7,000` gameplay frames in `final_v3` & `final_v3_uncap`).
+
+| Build (`SOTC_GL_TEXARRAY=1 STATIC_VAO=1 PROMOTE_128=1 DRAW_RANGE=1`) | Stripped Size | Capped/3D `HEAVY render` (mean / p50 / max) | Uncapped `SOTC_NO_SYNC=1` `game` (mean / p50) | Uncapped FPS mean |
+| --- | --- | --- | --- | --- |
+| PGO (`RELEASE=OFF`) | `64.09 MB` | `14.79 / 15.40 / 17.20 ms` | `116.05 / 107.60 ms` | `8.86 fps` |
+| + `PS2X_LINUX_RELEASE=ON` | `63.50 MB` | `13.94 / 14.40 / 17.30 ms` | `106.23 / 98.20 ms` (`-8.5%`) | `9.72 fps` |
+| + `PS2X_LINUX_SELECTIVE_LTO=ON` | `64.51 MB` | `13.56 / 13.70 / 16.60 ms` | `104.24 / 96.05 ms` (`-10.2%`) | `9.91 fps` |
+| `RELEASE=ON + FASTMEM=ON` (no LTO) | **`48.49 MB`** (`-23.6%`) | `14.77 / 15.70 / 17.20 ms` *(w/ `SHOTS=100`)* | `94.82 / 87.00 ms` (`-18.3%`) | `10.92 fps` |
+| Combined v1 (`RELEASE + PGO + LTO + FASTMEM + SORT_PROG`) | `50.03 MB` (`-21.2%`) | `13.35 / 13.80 / 16.80 ms` (`[load] game=73–84%`) | `91.41 / 83.90 ms` (`-21.2%`) | `11.37 fps` (`+28.3%`) |
+| **Combined v2 (`+ minLod floor + traps<=31`) (`final_v3`)** | **`47.65 MB`** (`-25.7%`) | `13.51 / 13.90` (`final_v2`, >14k traps) · `14.70 / 15.90` (`final_v3`, **16–31 total / 0 gameplay traps**) | `93.69 / 85.80 ms` (`final_v3_uncap`, `1,368` frames to menu, **16–31 total traps**) | `11.07 fps` (`p50 11.60`) |
+
+- **PR #43 Branch-Cleanup Ports ([`game/overrides/decomp_collision.cpp`](game/overrides/decomp_collision.cpp), [`tools/gamecore_base_check.py`](tools/gamecore_base_check.py)):**
+  - Ported opt-in `SOTC_S2WATER=0/1` conservative XZ AABB pre-tests for `waterProbe` and un-filtered `waterSurface` (hardened with `G::plain` bounds checks and `std::getenv` so release builds remain toggleable), plus `tools/gamecore_base_check.py`. Cross-compile verified via `build/linux-aarch64` (`ps2EntryRunner`); `SOTC_DIFFTEST=waterProbe`/`waterSurface` and R36S benchmarks are not yet run, so `SOTC_S2WATER` remains **`0` by default**.

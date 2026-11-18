@@ -1,7 +1,7 @@
 # tools/ — catalog
 
 Every tracked file under `tools/`, one entry each, grouped by purpose. The list
-below was taken from `git ls-files tools` (54 files: 38 `.py`, 7 `.sh`,
+below was taken from `git ls-files tools` (57 files: 41 `.py`, 7 `.sh`,
 1 `.swift`, 8 `tools/ghidra/*.java`) and contains no invented entries — if a file
 is not here, it is not in the repo.
 
@@ -79,6 +79,10 @@ Entry tags:
 - `tools/gen_lean.py` — generates `game/overrides/lean_hot.cpp`'s include
   fragments (decls, renames, table, partN) from the hot set; `--from` first
   rewrites `game/lean_hot.txt` from call-count dumps. CLI (argv), internal.
+- `tools/gamecore_base_check.py` — checks whether a loaded module (default
+  GAMECORE at `0x1344780`) in a 32 MB EE RAM device dump sits at the same base
+  address as the setup capture dump, reporting alignment score and `j`/`jal`
+  target shift. CLI (argparse): `capture device [--base 0x1344780] [--words 256] [--span 0x2000]`.
 
 ## d. Measurement and comparison
 
@@ -105,6 +109,10 @@ Entry tags:
   `profile [--top|--elf|--thread|--busiest|--minus ...]`.
 - `tools/vita_hot_order.py` — writes the Vita build's hot-code `.ld` ordering
   from Vita3K profiles. CLI (argv): `out.ld profile:elf ... [--size-elf ELF]`.
+- `tools/linux_hot_order.py` — generates `game/overrides/linux_hot_order.ld`
+  (`--section-ordering-file`) for Linux/R36S aarch64 builds, packing hot runtime,
+  native overrides, top `leant_*`, and active `lift_d1` ahead of cold Unity code.
+  CLI (argparse): `--elf ELF -o game/overrides/linux_hot_order.ld`.
 - `tools/replay_compare.py` — the input replay report: one HTML page with the
   determinism check and one row per recording MARK. CLI (argv):
   `<recording> <out dir> <label>=<run dir> ...`.
@@ -118,6 +126,11 @@ Entry tags:
 - `tools/lift126.py` — lifts the camera's / characters' guest functions to plain
   host C++ (`*_lift` files) from the recompiler's listings; refuses anything it
   cannot express. CLI (argv): `out.cpp switch-name addr|@file ...`.
+- `tools/lift_d1.py` — lifts guest functions from `build/runner/*.cpp` into host
+  C++ (`SOTC_LIFTD1`..`D5`) keeping recompiler instruction semantics while
+  promoting GPR/FPU/VU0 state to host locals with CFG data-flow writeback.
+  CLI (argparse): supports `--d2`/`--d3`/`--d4`/`--d5`, `--summary`,
+  `--fallback`, `--inline`, `--alt`, `--chunk`, and `--refused`.
 - `tools/model_view.py` — draws a SotC model's vertices straight from a guest RAM
   dump (`SOTC_MODEL_DUMP`), to check the model format. CLI (argv):
   `logs/model_dump [--dump N] [--out file.png]`.
