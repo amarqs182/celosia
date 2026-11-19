@@ -84,10 +84,12 @@ extern "C" void ps2x_vita_pace_tag(uint32_t seq);        // raylib_vita.cpp (rou
 #if defined(PS2X_NATIVE_GLES)
 #define PS2X_GL_VERSION_VERT "#version 310 es\nprecision highp float;\nprecision highp int;\n"
 #define PS2X_GL_VERSION_FRAG "#version 310 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\n"
+#define PS2X_GL_VERSION_FRAG_MED "#version 310 es\nprecision mediump float;\nprecision highp int;\nprecision mediump sampler2D;\n"
 #define PS2X_GL_VERSION PS2X_GL_VERSION_VERT
 #else
 #define PS2X_GL_VERSION_VERT "#version 330 core\n"
 #define PS2X_GL_VERSION_FRAG "#version 330 core\n"
+#define PS2X_GL_VERSION_FRAG_MED "#version 330 core\n"
 #define PS2X_GL_VERSION PS2X_GL_VERSION_VERT
 #endif
 
@@ -474,6 +476,7 @@ namespace
     const char *kMainVertex = PS2X_GL_VERSION_VERT R"(#define NOSCREEN 0
 #define TEXARR 0
 #define UBO 0
+#define FAST_LOD 0
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec4 aColor;
@@ -481,7 +484,11 @@ layout(location = 3) in vec2 aUV;
 #if TEXARR
 layout(location = 4) in float aTexSlot;
 uniform vec4 uTexSlots[64];
-flat out highp vec4 vTexMeta;
+flat out mediump vec4 vTexMeta; // layer, lodK, lodScale, maxLod
+flat out mediump float vMinLod;
+#endif
+#if FAST_LOD
+out mediump float vLogW;
 #endif
 #if UBO
 layout(std140) uniform FrameBlock {
@@ -546,7 +553,13 @@ void main()
     vScreen = vec4(c.x, c.y, c.w, uGuard.x > 0.0 ? c.w - uGuard.y : 1.0);
 #endif
 #if TEXARR
-    vTexMeta = uTexSlots[clamp(int(aTexSlot + 0.5), 0, 63)];
+    vec4 meta = uTexSlots[clamp(int(aTexSlot + 0.5), 0, 63)];
+    float ml = floor(meta.x * (1.0 / 256.0));
+    vTexMeta = vec4(meta.x - ml * 256.0, meta.y, meta.z, meta.w);
+    vMinLod = ml;
+#endif
+#if FAST_LOD
+    vLogW = log2(max(c.w, 1e-3));
 #endif
 }
 )";
@@ -650,14 +663,21 @@ void main()
 #ifndef UBO
 #define UBO 0
 #endif
+#ifndef FAST_LOD
+#define FAST_LOD 0
+#endif
 in highp vec4 vUV;
 in mediump vec4 vColor;
 #if !NOSCREEN
 in highp vec4 vScreen;
 #endif
+#if FAST_LOD
+in mediump float vLogW;
+#endif
 #if TEXARR
-uniform highp sampler2DArray uTexArr;
-flat in highp vec4 vTexMeta; // layer, lodK, lodScale, maxLod
+uniform mediump sampler2DArray uTexArr;
+flat in mediump vec4 vTexMeta; // layer, lodK, lodScale, maxLod
+flat in mediump float vMinLod;
 #elif !UNTEX
 uniform sampler2D uTex;
 #endif
@@ -672,37 +692,45 @@ layout(std140) uniform FrameBlock {
 };
 #else
 #if BG
-uniform vec4 uFogA;      // start, width, steps, fogged
+uniform highp vec4 uFogA; // start, width, steps, fogged
 #endif
-uniform vec4 uFogColour; // rgb, textured mode
+uniform vec4 uFogColour;  // rgb, textured mode
 #endif
-uniform vec4 uFogC;      // scale (or flags when UBO), lod K, lod scale, max lod
+uniform highp vec4 uFogC; // scale (or flags when UBO), lod K, lod scale, max lod (matches VS highp)
 #if CUT
-uniform vec4 uAlpha;     // alpha test: cut under x (at least 0.02), and at / over y when y > 0
+uniform vec4 uAlpha;      // alpha test: cut under x (at least 0.02), and at / over y when y > 0
 #endif
-out vec4 oColor;
+out mediump vec4 oColor;
 void main()
 {
+#if !TEXARR && !UNTEX && !NOLOD
 #if UBO
     mediump float textured = uFogC.x >= 1.5 ? 1.0 : 0.0;
 #else
     mediump float textured = uFogColour.w;
+#endif
 #endif
     highp float depth = vUV.z;
 #if UNTEX
     mediump vec4 t = vec4(vec3(128.0 / 255.0), 1.0);
     mediump float alpha = clamp(vColor.a, 0.0, 1.0);
 #elif TEXARR
-    highp float minLod = floor(vTexMeta.x * (1.0 / 256.0));
-    highp float layer = vTexMeta.x - minLod * 256.0;
-    mediump float lod = vTexMeta.w > minLod ? clamp(log2(max(depth, 1e-3)) * vTexMeta.z + vTexMeta.y, minLod, vTexMeta.w) : minLod;
-    mediump vec4 t = textured > 0.5 ? textureLod(uTexArr, vec3(vUV.xy, layer), lod) : vec4(vec3(128.0 / 255.0), 1.0);
-    mediump float alpha = clamp(t.a * (textured > 0.5 ? 2.0 : 1.0) * vColor.a, 0.0, 1.0);
+#if FAST_LOD
+    mediump float lod = vTexMeta.w > vMinLod ? clamp(vLogW * vTexMeta.z + vTexMeta.y, vMinLod, vTexMeta.w) : vMinLod;
+#else
+    mediump float lod = vTexMeta.w > vMinLod ? clamp(log2(max(depth, 1e-3)) * vTexMeta.z + vTexMeta.y, vMinLod, vTexMeta.w) : vMinLod;
+#endif
+    mediump vec4 t = textureLod(uTexArr, vec3(vUV.xy, vTexMeta.x), lod);
+    mediump float alpha = clamp(t.a * 2.0 * vColor.a, 0.0, 1.0);
 #elif NOLOD
     mediump vec4 t = texture(uTex, vUV.xy);
     mediump float alpha = clamp(t.a * 2.0 * vColor.a, 0.0, 1.0);
 #else
+#if FAST_LOD
+    mediump float lod = uFogC.w > 0.0 ? clamp(vLogW * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
+#else
     mediump float lod = uFogC.w > 0.0 ? clamp(log2(max(depth, 1e-3)) * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
+#endif
     mediump vec4 t = textured > 0.5 ? textureLod(uTex, vUV.xy, lod) : vec4(vec3(128.0 / 255.0), 1.0); // untextured: the GS takes the vertex colour as is (255 = white)
     mediump float alpha = clamp(t.a * (textured > 0.5 ? 2.0 : 1.0) * vColor.a, 0.0, 1.0);
 #endif
@@ -976,6 +1004,234 @@ void main()
     }
 }
 )";
+#if defined(PS2X_NATIVE_GLES)
+    const char *kQuadVertexPlainGles = PS2X_GL_VERSION_VERT R"(layout(location = 0) in vec2 aPos;
+out highp vec2 vUV;
+void main()
+{
+    gl_Position = vec4(aPos, 0.0, 1.0);
+    vUV = aPos * 0.5 + 0.5;
+}
+)";
+    const char *kQuadVertexAffineGles = PS2X_GL_VERSION_VERT R"(layout(location = 0) in vec2 aPos;
+uniform vec4 uQuad;
+out highp vec2 vUV;
+void main()
+{
+    gl_Position = vec4(aPos, 0.0, 1.0);
+    vUV = (aPos * 0.5 + 0.5) * uQuad.xy + uQuad.zw;
+}
+)";
+    const char *kQuadVertexRegionGles = PS2X_GL_VERSION_VERT R"(layout(location = 0) in vec2 aPos;
+uniform vec4 uQuad;
+uniform vec4 uRect;
+out highp vec2 vUV;
+void main()
+{
+    vec2 u = aPos * 0.5 + 0.5;
+    gl_Position = vec4(u * uRect.xy + uRect.zw, 0.0, 1.0);
+    vUV = u * uQuad.xy + uQuad.zw;
+}
+)";
+    const char *kQuadFragmentGlesSpec = R"(
+precision mediump float;
+precision highp int;
+precision mediump sampler2D;
+in highp vec2 vUV;
+uniform sampler2D uSrc;
+uniform sampler2D uSrc2;
+uniform highp sampler2D uDepth;
+uniform highp vec4 uA, uB, uC, uSize;
+#if MODE == 20
+uniform mediump vec4 uW[4];
+#elif MODE == 21
+uniform mediump vec4 uW[5];
+#endif
+#if defined(CLAMPED)
+uniform highp vec4 uClamp;
+#define QSRC(P) texture(uSrc, clamp((P), uClamp.xy, uClamp.zw))
+#else
+#define QSRC(P) texture(uSrc, (P))
+#endif
+out mediump vec4 oColor;
+#if MODE == 8 || MODE == 11 || MODE == 15
+highp float gsZ(highp float d, highp float zA, highp float zB) { return d >= 1.0 ? 0.0 : zA + zB * (1.0 - d) / 0.1; }
+#endif
+void main()
+{
+#if MODE == 0
+    oColor = vec4(QSRC(vUV).rgb, 1.0);
+#elif MODE == 1
+    mediump vec4 c = QSRC(vUV) * 0.30;
+    c += (QSRC(vUV + uA.xy) + QSRC(vUV - uA.xy)) * 0.235;
+    c += (QSRC(vUV + uA.xy * 2.0) + QSRC(vUV - uA.xy * 2.0)) * 0.12;
+    c += (QSRC(vUV + uA.xy * 3.0) + QSRC(vUV - uA.xy * 3.0)) * 0.05;
+    oColor = c;
+#elif MODE == 2
+    oColor = mix(texture(uSrc2, vUV), texture(uSrc, vUV), uA.x);
+#elif MODE == 3
+    oColor = vec4(texture(uSrc, vUV).rgb, uA.x);
+#elif MODE == 4
+    oColor = vec4(clamp(texture(uSrc, vUV).rgb * uA.rgb, 0.0, 1.0), uA.a);
+#elif MODE == 5
+    oColor = vec4(0.0, 0.0, 0.0, uA.x);
+#elif MODE == 6
+    oColor = vec4(1.0);
+#elif MODE == 7
+    highp vec2 size = vec2(textureSize(uSrc, 0));
+    ivec2 base = ivec2(vUV * size) & ~3;
+    mediump float sum = 0.0;
+    for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x)
+            sum += texelFetch(uSrc, min(base + ivec2(x, y), ivec2(size) - 1), 0).r;
+    oColor = vec4(vec3(sum * 0.0625), 1.0);
+#elif MODE == 8
+    highp vec2 size = vec2(textureSize(uDepth, 0));
+    ivec2 base = ivec2(vUV * size) & ~3;
+    mediump float sum = 0.0;
+    for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x)
+        {
+            ivec2 at = min(base + ivec2(x, y), ivec2(size) - 1);
+            sum += gsZ(texelFetch(uDepth, at, 0).r, uA.y, uA.z) <= uA.x + 1.0 ? 1.0 : 0.0;
+        }
+    oColor = vec4(uB.rgb * (sum * 0.0625), 1.0);
+#elif MODE == 9
+    oColor = vec4(0.0, 0.0, 0.0, clamp(QSRC(vUV).r * uA.x, 0.0, 1.0));
+#elif MODE == 10
+    mediump vec3 b = texture(uSrc, vUV).rgb * uB.rgb * uB.a;
+    b = b / (1.0 + b * 0.4);
+    oColor = vec4(b, 1.0);
+#elif MODE == 11
+    highp float d = texelFetch(uDepth, ivec2(vUV * vec2(textureSize(uDepth, 0))), 0).r;
+    highp float z = gsZ(d, uA.x, uA.y);
+    mediump float keep = 1.0;
+    int slices = int(uA.w);
+    for (int i = 0; i < slices; ++i)
+        if (z <= float(uint(uA.z) >> uint(i)))
+            keep *= 1.0 - float(i + 1) / float(slices);
+    oColor = vec4(texture(uSrc, vUV).rgb, 1.0 - keep);
+#elif MODE == 12
+    highp float d = texelFetch(uDepth, ivec2(vUV * vec2(textureSize(uDepth, 0))), 0).r;
+    highp float w = d >= 1.0 ? 1e30 : 0.1 / (1.0 - d);
+    int steps = int(uA.z);
+    mediump float a = 0.0;
+    for (int i = 0; i <= steps; ++i)
+        if (w >= uA.x + uA.y * float(i) / float(steps))
+            a = float((i * 128) / steps) / 128.0;
+    oColor = vec4(texture(uSrc, vUV).rgb, a);
+#elif MODE == 13
+    oColor = QSRC(vUV + uA.xy);
+#elif MODE == 14
+    mediump vec4 c = texture(uSrc, vUV);
+    oColor = clamp(vec4(c.rgb * uA.rgb, c.a * uA.a), 0.0, 1.0);
+#elif MODE == 15
+    highp vec2 size = vec2(textureSize(uDepth, 0));
+    highp vec2 p = vec2(floor(gl_FragCoord.x), 255.0 - floor(gl_FragCoord.y));
+    highp vec2 t = (p + 0.5) * vec2(2.0, 1.75) - 0.5;
+    highp vec2 i0 = floor(t), f = t - i0;
+    mediump float m[4];
+    for (int k = 0; k < 4; ++k)
+    {
+        highp vec2 at = clamp(i0 + vec2(k & 1, k >> 1), vec2(0.0), vec2(511.0, 447.0));
+        highp vec2 px = (at + 0.5) * size / vec2(512.0, 448.0);
+        ivec2 ip = ivec2(min(px.x, size.x - 1.0), min(size.y - 1.0 - px.y, size.y - 1.0));
+        m[k] = gsZ(texelFetch(uDepth, max(ip, ivec2(0)), 0).r, uA.y, uA.z) <= uA.x + 1.0 ? 1.0 : 0.0;
+    }
+    oColor = vec4(uB.rgb * mix(mix(m[0], m[1], f.x), mix(m[2], m[3], f.x), f.y), 1.0);
+#elif MODE == 16
+    highp float r = uA.x, k = 64.0 / r;
+    highp vec2 p = vec2(floor(vUV.x * r), r - 1.0 - floor(vUV.y * r));
+    highp vec2 t0 = (p + 0.5) * k;
+    mediump vec3 acc = floor(texture(uSrc, vec2(t0.x, 64.0 - t0.y) / 64.0).rgb * 255.0 + 0.001);
+    const vec2 d[12] = vec2[12](vec2(-1, 0), vec2(1, 0), vec2(0, -1), vec2(0, 1), vec2(-2, 0), vec2(2, 0),
+                                vec2(0, -2), vec2(0, 2), vec2(-3, 0), vec2(3, 0), vec2(0, -3), vec2(0, 3));
+    mediump vec3 w = floor(vec3(64.0, 32.0, 16.0) * uA.y / 128.0) / 128.0;
+    for (int i = 0; i < 12; ++i)
+    {
+        mediump float a = i < 4 ? w.x : (i < 8 ? w.y : w.z);
+        highp vec2 q = p - d[i];
+        if (any(lessThan(q, vec2(0.0))) || any(greaterThanEqual(q, vec2(r))))
+            continue;
+        highp vec2 t = 0.5 + q * k;
+        mediump vec3 c = floor(texture(uSrc, vec2(t.x, 64.0 - t.y) / 64.0).rgb * 255.0 + 0.001);
+        acc += floor((c - acc) * a);
+    }
+    oColor = vec4(acc / 255.0, 1.0);
+#elif MODE == 17
+    mediump vec3 cd = floor(texture(uSrc, vUV).rgb * 255.0 + 0.001);
+    mediump vec3 cs = floor(texture(uSrc2, vUV).rgb * 255.0 + 0.001);
+    oColor = vec4((cd + floor((cs - cd) * uA.x)) / 255.0, 1.0);
+#elif MODE == 18
+    highp vec2 size = vec2(textureSize(uDepth, 0));
+    highp vec2 x = vec2(gl_FragCoord.x, size.y - gl_FragCoord.y) / uA.xy - 0.5;
+    highp vec2 uv = (0.5 + x * vec2(256.0 / 512.0, 256.0 / 448.0)) / 256.0;
+    mediump vec3 b = texture(uSrc, vec2(uv.x, 1.0 - uv.y)).rgb * uB.rgb * uB.a;
+    b = b / (1.0 + b * 0.4);
+    oColor = vec4(b, 1.0);
+#elif MODE == 19
+    mediump vec3 b = QSRC(vUV).rgb * uB.rgb * uB.a;
+    b = b / (1.0 + b * 0.4);
+    oColor = vec4(b, 1.0);
+#elif MODE == 20
+    highp vec2 b = vUV + uA.xy;
+    highp float s = uA.z;
+    mediump vec3 acc = texture(uSrc, vUV).rgb * uW[3].x;
+    acc += texture(uSrc, b + vec2(s, 0.0)).rgb * uW[0].x;
+    acc += texture(uSrc, b + vec2(-s, 0.0)).rgb * uW[0].y;
+    acc += texture(uSrc, b + vec2(0.0, -s)).rgb * uW[0].z;
+    acc += texture(uSrc, b + vec2(0.0, s)).rgb * uW[0].w;
+    acc += texture(uSrc, b + vec2(2.0 * s, 0.0)).rgb * uW[1].x;
+    acc += texture(uSrc, b + vec2(-2.0 * s, 0.0)).rgb * uW[1].y;
+    acc += texture(uSrc, b + vec2(0.0, -2.0 * s)).rgb * uW[1].z;
+    acc += texture(uSrc, b + vec2(0.0, 2.0 * s)).rgb * uW[1].w;
+    acc += texture(uSrc, b + vec2(3.0 * s, 0.0)).rgb * uW[2].x;
+    acc += texture(uSrc, b + vec2(-3.0 * s, 0.0)).rgb * uW[2].y;
+    acc += texture(uSrc, b + vec2(0.0, -3.0 * s)).rgb * uW[2].z;
+    acc += texture(uSrc, b + vec2(0.0, 3.0 * s)).rgb * uW[2].w;
+    oColor = vec4(max(acc - uW[3].y, vec3(0.0)), 1.0);
+#elif MODE == 21
+    mediump vec4 acc = QSRC(vUV) * uW[2].x;
+    acc += (QSRC(vUV - 1.0 * uA.xy) * uW[1].w + QSRC(vUV + 1.0 * uA.xy) * uW[2].y);
+    acc += (QSRC(vUV - 2.0 * uA.xy) * uW[1].z + QSRC(vUV + 2.0 * uA.xy) * uW[2].z);
+    acc += (QSRC(vUV - 3.0 * uA.xy) * uW[1].y + QSRC(vUV + 3.0 * uA.xy) * uW[2].w);
+    acc += (QSRC(vUV - 4.0 * uA.xy) * uW[1].x + QSRC(vUV + 4.0 * uA.xy) * uW[3].x);
+    if (uA.z > 4.5)
+    {
+        acc += (QSRC(vUV - 5.0 * uA.xy) * uW[0].w + QSRC(vUV + 5.0 * uA.xy) * uW[3].y);
+        acc += (QSRC(vUV - 6.0 * uA.xy) * uW[0].z + QSRC(vUV + 6.0 * uA.xy) * uW[3].z);
+        acc += (QSRC(vUV - 7.0 * uA.xy) * uW[0].y + QSRC(vUV + 7.0 * uA.xy) * uW[3].w);
+        acc += (QSRC(vUV - 8.0 * uA.xy) * uW[0].x + QSRC(vUV + 8.0 * uA.xy) * uW[4].x);
+    }
+    oColor = acc;
+#elif MODE == 22
+    mediump vec4 g = vec4(0.0);
+#define G22(A, B) g += texture(uSrc, vUV + vec2(A, B) * uSize.xy);
+    G22(-1.5, -1.5) G22(-0.5, -1.5) G22(0.5, -1.5) G22(1.5, -1.5)
+    G22(-1.5, -0.5) G22(-0.5, -0.5) G22(0.5, -0.5) G22(1.5, -0.5)
+    G22(-1.5,  0.5) G22(-0.5,  0.5) G22(0.5,  0.5) G22(1.5,  0.5)
+    G22(-1.5,  1.5) G22(-0.5,  1.5) G22(0.5,  1.5) G22(1.5,  1.5)
+    oColor = g * 0.0625;
+#elif MODE == 23
+    mediump vec3 cd = floor(texture(uSrc, vUV).rgb * 255.0 + 0.001);
+    mediump vec3 cs = floor(texture(uSrc2, vUV * uSize.xy + uSize.zw).rgb * 255.0 + 0.001);
+    oColor = vec4((cd + floor((cs - cd) * uA.x)) / 255.0, 1.0);
+#elif MODE == 25
+    mediump vec3 r = texture(uSrc, vUV - uSize.xy).rgb + texture(uSrc, vUV + vec2(uSize.x, -uSize.y)).rgb +
+                     texture(uSrc, vUV + vec2(-uSize.x, uSize.y)).rgb + texture(uSrc, vUV + uSize.xy).rgb;
+    oColor = vec4(r * 0.25, 1.0);
+#elif MODE == 26
+    mediump vec4 s1 = texture(uSrc, vUV);
+    mediump vec4 s2 = texture(uSrc2, vUV);
+    mediump vec4 g1 = clamp(vec4(s1.rgb * uA.rgb, s1.a * uA.a), 0.0, 1.0);
+    mediump vec4 g2 = clamp(vec4(s2.rgb * uB.rgb, s2.a * uB.a), 0.0, 1.0);
+    oColor = vec4(g2.rgb * g2.a + g1.rgb * (g1.a * (1.0 - g2.a)), 1.0 - (1.0 - g1.a) * (1.0 - g2.a));
+#else
+    oColor = vec4(QSRC(vUV).rgb, 1.0);
+#endif
+}
+)";
+#endif
 #else
     // ---- CG (Vita): the same stages. Varyings are float4 (Vita3K pairs them by size). ----
     const char *kMainVertex = R"(
@@ -1636,6 +1892,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         bool dynamic = false; // in this frame's arena, from vertex `first`
         uint32_t first = 0;
         bool indexed = false; // `count` indices: dynamic from indexArena[firstIndex], else in indexBuffer
+        bool idx16 = false;   // static indexBuffer holds uint16_t (GL_UNSIGNED_SHORT)
         uint32_t firstIndex = 0;
         GLuint indexBuffer = 0;
 #if !defined(PS2X_NATIVE_VITA)
@@ -1763,11 +2020,17 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     {
         GLuint mainProgram = 0, quadProgram = 0;
         GLuint skinProgram = 0; // the main program posing a skinned mesh's bind pose first (0: not built)
+#if defined(PS2X_NATIVE_VITA) || defined(PS2X_NATIVE_GLES)
+        GLuint quadPrograms[27] = {}; // (19-21: round 93's; 26: round 98's glow98)
+        GLuint regionPrograms[26] = {}; // round 94: kQuadVertexRegion + CLAMPED by mode
 #if defined(PS2X_NATIVE_VITA)
-        GLuint quadPrograms[27] = {}; // (19-21: round 93's, the Vita; 26: round 98's glow98)
-        GLuint regionPrograms[26] = {}; // round 94 (the Vita): kQuadVertexRegion + CLAMPED by mode (0, 1, 9, 16, 19-25)
         static constexpr int kRegionModes[] = {0, 1, 9, 13, 16, 19, 20, 21, 22, 23, 24, 25};
-        bool regionReady = false; // every one of them built // by mode (8 and 11: the bloom mask's, see kQuadFragment; 12 unused; 15-18 the GS bloom chain, round 65b)
+#else
+        static constexpr int kRegionModes[] = {0, 1, 9, 13, 16, 19, 20, 21, 22, 23, 25};
+        GLuint quadUberProgram = 0; // fallback uber-shader when SOTC_GL_QUAD_SPEC=0
+        bool quadSpec = false;
+#endif
+        bool regionReady = false;
 #endif
         GLuint quadBuffer = 0, blurBuffer = 0, vao = 0;
         // The shadow volumes' near-plane clamp (kDepthClamp), set by init: on
@@ -2355,6 +2618,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             uint32_t mergedVerts = 0;  // run > 1, indexed run vertex count (glDrawRangeElements)
             GLuint runVbo = 0;         // run > 1, indexed run copy VBO
             GLuint runIbo = 0;         // run > 1, indexed run copy IBO (0: non-indexed)
+            bool runIdx16 = false;     // run > 1, runIbo holds uint16_t
             GLuint runVao = 0;         // run > 1, TexArray indexed run VAO
             GLuint runArrTex = 0;      // run > 1, GL_TEXTURE_2D_ARRAY handle (0: plain GL_TEXTURE_2D)
             uint32_t runArrSlotOffset = 0;
@@ -2379,6 +2643,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             int pool = -1; // -1: seen, not copied yet
             uint32_t first = 0, count = 0, vertCount = 0;
             bool indexed = false;
+            bool idx16 = false;
             bool texArray = false;
             GLuint vbo = 0, ibo = 0, vao = 0;
             uint64_t bytes = 0;
@@ -2426,8 +2691,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         bool ensureTexArrayLayer(Texture &, uint32_t, uint32_t, int &, uint16_t &) { return false; }
         bool copyTexArrayRun(size_t, size_t, uint32_t, uint32_t, RunCopy &, const std::vector<uint64_t> &) { return false; }
 #endif
+#if defined(PS2X_NATIVE_GLES)
+        static constexpr uint64_t kMaxIndexedSrcBytes = 48ull * 1024ull * 1024ull;
+        static constexpr uint64_t kMaxIndexedRunBytes = 32ull * 1024ull * 1024ull;
+#else
         static constexpr uint64_t kMaxIndexedSrcBytes = 20ull * 1024ull * 1024ull;
         static constexpr uint64_t kMaxIndexedRunBytes = 8ull * 1024ull * 1024ull;
+#endif
         static bool runSourceOn();
         void poolSourceMake(Pool &p);
         void poolSourceFree(Pool &p);
@@ -3297,6 +3567,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 quadProgram = quadPrograms[mode];
             else if (quadPrograms[0]) // (round 94: never a region program left in place)
                 quadProgram = quadPrograms[0];
+#elif defined(PS2X_NATIVE_GLES)
+            if (quadSpec && !vitaModes && mode >= 0 && mode < 27 && quadPrograms[mode])
+                quadProgram = quadPrograms[mode];
+            else if (quadUberProgram)
+                quadProgram = quadUberProgram;
 #else
             (void)mode;
 #endif
@@ -3370,6 +3645,33 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             return head + pose + body;
         }
 
+        static bool fastLodEnabled()
+        {
+#if defined(PS2X_NATIVE_GLES)
+            static const bool on = !std::getenv("SOTC_GL_FAST_LOD") || std::atoi(std::getenv("SOTC_GL_FAST_LOD")) != 0;
+            return on;
+#else
+            return false;
+#endif
+        }
+        static bool fragFp16Enabled()
+        {
+#if defined(PS2X_NATIVE_GLES)
+            static const bool on = !std::getenv("SOTC_GL_FRAG_FP16") || std::atoi(std::getenv("SOTC_GL_FRAG_FP16")) != 0;
+            return on;
+#else
+            return false;
+#endif
+        }
+        static bool idx16Enabled()
+        {
+#if defined(PS2X_NATIVE_GLES)
+            static const bool on = !std::getenv("SOTC_GL_IDX16") || std::atoi(std::getenv("SOTC_GL_IDX16")) != 0;
+            return on;
+#else
+            return false;
+#endif
+        }
         static std::string worldVertexSrc(bool noscreen, bool texarr, bool ubo)
         {
             std::string s = kMainVertex;
@@ -3382,15 +3684,21 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             if (ubo)
                 if (const size_t at = s.find("#define UBO 0\n"); at != std::string::npos)
                     s.replace(at, 14, "#define UBO 1\n");
+            if (fastLodEnabled())
+                if (const size_t at = s.find("#define FAST_LOD 0\n"); at != std::string::npos)
+                    s.replace(at, 19, "#define FAST_LOD 1\n");
             return s;
         }
         static std::string worldFragment(bool bg, bool cut, bool nolod = false, bool soft = false, bool untex = false, bool noscreen = false, bool texarr = false, bool ubo = false)
         {
             const std::string defines = std::string("#define BG ") + (bg ? "1" : "0") + "\n#define CUT " + (cut ? "1" : "0") + "\n#define NOLOD " + (nolod ? "1" : "0") +
                                         "\n#define SOFT " + (soft ? "1" : "0") + "\n#define UNTEX " + (untex ? "1" : "0") +
-                                        (noscreen ? "\n#define NOSCREEN 1" : "") + (texarr ? "\n#define TEXARR 1" : "") + (ubo ? "\n#define UBO 1\n" : "\n");
+                                        (noscreen ? "\n#define NOSCREEN 1" : "") + (texarr ? "\n#define TEXARR 1" : "") +
+                                        (fastLodEnabled() ? "\n#define FAST_LOD 1" : "") + (ubo ? "\n#define UBO 1\n" : "\n");
 #if defined(PS2X_NATIVE_VITA)
             return defines + kWorldFragment;
+#elif defined(PS2X_NATIVE_GLES)
+            return (fragFp16Enabled() ? PS2X_GL_VERSION_FRAG_MED : PS2X_GL_VERSION_FRAG) + defines + kWorldFragment;
 #else
             return PS2X_GL_VERSION_FRAG + defines + kWorldFragment;
 #endif
@@ -3542,6 +3850,83 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     glUniform1i(uniform(false, "uSrc2"), 1);
             }
             quadProgram = quadPrograms[0];
+#elif defined(PS2X_NATIVE_GLES)
+            quadUberProgram = program(kQuadVertex, kQuadFragment, {"aPos"});
+            quadProgram = quadUberProgram;
+            static const bool wantQuadSpec = !std::getenv("SOTC_GL_QUAD_SPEC") || std::atoi(std::getenv("SOTC_GL_QUAD_SPEC")) != 0;
+            if (wantQuadSpec)
+            {
+                const GLuint vPlain = compile(GL_VERTEX_SHADER, kQuadVertexPlainGles);
+                const GLuint vTurned = compile(GL_VERTEX_SHADER, kQuadVertex);
+                const GLuint vAffine = compile(GL_VERTEX_SHADER, kQuadVertexAffineGles);
+                const GLuint vRegion = compile(GL_VERTEX_SHADER, kQuadVertexRegionGles);
+                auto bindQuadSamplers = [&](GLuint prog)
+                {
+                    quadProgram = prog;
+                    glUseProgram(prog);
+                    const GLint s0 = uniform(false, "uSrc");
+                    if (s0 >= 0) glUniform1i(s0, 0);
+                    const GLint s1 = uniform(false, "uSrc2");
+                    if (s1 >= 0) glUniform1i(s1, 1);
+                    const GLint s2 = uniform(false, "uDepth");
+                    if (s2 >= 0) glUniform1i(s2, 2);
+                };
+                bool allBase = vPlain && vTurned && vAffine && vRegion;
+                if (allBase)
+                {
+                    for (int mode : {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 26})
+                    {
+                        const std::string src = std::string("#version 310 es\n#define MODE ") + std::to_string(mode) + "\n" + kQuadFragmentGlesSpec;
+                        quadPrograms[mode] = program(mode == 3 ? vTurned : vPlain, src.c_str(), {"aPos"});
+                        if (!quadPrograms[mode])
+                        {
+                            std::fprintf(stderr, "[native:gl] GLES quad program %d did not build\n", mode);
+                            allBase = false;
+                            continue;
+                        }
+                        bindQuadSamplers(quadPrograms[mode]);
+                    }
+                    for (int mode : {19, 20, 21})
+                    {
+                        const std::string src = std::string("#version 310 es\n#define MODE ") + std::to_string(mode) + "\n" + kQuadFragmentGlesSpec;
+                        quadPrograms[mode] = program(vAffine, src.c_str(), {"aPos"});
+                        if (!quadPrograms[mode])
+                        {
+                            std::fprintf(stderr, "[native:gl] GLES r93 quad program %d did not build\n", mode);
+                            continue;
+                        }
+                        bindQuadSamplers(quadPrograms[mode]);
+                    }
+                    regionReady = true;
+                    for (int mode : kRegionModes)
+                    {
+                        const std::string src = std::string("#version 310 es\n#define CLAMPED 1\n#define MODE ") + std::to_string(mode) + "\n" + kQuadFragmentGlesSpec;
+                        regionPrograms[mode] = program(vRegion, src.c_str(), {"aPos"});
+                        if (!regionPrograms[mode])
+                        {
+                            std::fprintf(stderr, "[native:gl] GLES r94 region program %d did not build\n", mode);
+                            regionReady = false;
+                            continue;
+                        }
+                        bindQuadSamplers(regionPrograms[mode]);
+                    }
+                }
+                if (vPlain) glDeleteShader(vPlain);
+                if (vTurned) glDeleteShader(vTurned);
+                if (vAffine) glDeleteShader(vAffine);
+                if (vRegion) glDeleteShader(vRegion);
+                quadSpec = allBase;
+                if (quadSpec)
+                {
+                    quadProgram = quadPrograms[0];
+                    std::fprintf(stderr, "[native:gl] GLES host opts: quadSpec=1 regionReady=%d fp16=%d fastLod=%d idx16=%d\n",
+                                 regionReady ? 1 : 0, fragFp16Enabled() ? 1 : 0, fastLodEnabled() ? 1 : 0, idx16Enabled() ? 1 : 0);
+                }
+                else
+                {
+                    quadProgram = quadUberProgram;
+                }
+            }
 #else
             quadProgram = program(kQuadVertex, kQuadFragment, {"aPos"});
 #endif
@@ -3593,10 +3978,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             const int plainKinds = 1;
 #endif
             const bool useUbo = uboEnabled();
-            const std::string leanVertSrc = useUbo ? worldVertexSrc(false, false, true) : std::string(kMainVertex);
-            const GLuint leanVertex = useUbo ? compile(GL_VERTEX_SHADER, leanVertSrc.c_str()) : mainVertex;
-            const std::string leanSkinSrc = (useUbo && skinProgram) ? skinnedVertex(leanVertSrc.c_str()) : std::string();
-            const GLuint leanSkinVertex = useUbo ? (leanSkinSrc.empty() ? 0 : compile(GL_VERTEX_SHADER, leanSkinSrc.c_str())) : skinVertex;
+            const bool customLeanVert = useUbo || fastLodEnabled();
+            const std::string leanVertSrc = customLeanVert ? worldVertexSrc(false, false, useUbo) : std::string(kMainVertex);
+            const GLuint leanVertex = customLeanVert ? compile(GL_VERTEX_SHADER, leanVertSrc.c_str()) : mainVertex;
+            const std::string leanSkinSrc = (customLeanVert && skinProgram) ? skinnedVertex(leanVertSrc.c_str()) : std::string();
+            const GLuint leanSkinVertex = customLeanVert ? (leanSkinSrc.empty() ? 0 : compile(GL_VERTEX_SHADER, leanSkinSrc.c_str())) : skinVertex;
             for (int plain = 0; plain < plainKinds; ++plain)
                 for (int skinned = 0; skinned < 2; ++skinned)
                     for (int bg = 0; bg < 2; ++bg)
@@ -4261,6 +4647,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             // Round 94: the shared targets of the small passes (see fxAtlas).
             for (Target &t : fxAtlas)
                 makeTarget(t, std::max(w / 4u, 1u) + 192u, std::max(std::max(h / 4u, 1u), 128u), false);
+#endif
+#if defined(PS2X_NATIVE_VITA) || defined(PS2X_NATIVE_GLES)
             makeTarget(bloomAtlas, 192, 128, false);
             bloomAtlasHistory = false;
 #endif
@@ -4481,13 +4869,19 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             }
 #if defined(PS2X_NATIVE_VITA)
             glUniform1f(uniform(false, "uMode"), static_cast<float>(mode));
+#elif defined(PS2X_NATIVE_GLES)
+            if (quadProgram == quadUberProgram)
+                glUniform1i(uniform(false, "uMode"), macMode(mode));
 #else
             glUniform1i(uniform(false, "uMode"), macMode(mode));
 #endif
             const float zero[4] = {0, 0, 0, 0};
-            glUniform4fv(uniform(false, "uA"), 1, a ? a : zero);
-            glUniform4fv(uniform(false, "uB"), 1, b ? b : zero);
-            glUniform4fv(uniform(false, "uQuad"), 1, quadParams ? quadParams : zero);
+            const GLint locA = uniform(false, "uA");
+            if (locA >= 0) glUniform4fv(locA, 1, a ? a : zero);
+            const GLint locB = uniform(false, "uB");
+            if (locB >= 0) glUniform4fv(locB, 1, b ? b : zero);
+            const GLint locQ = uniform(false, "uQuad");
+            if (locQ >= 0) glUniform4fv(locQ, 1, quadParams ? quadParams : zero);
 #if !defined(PS2X_NATIVE_VITA)
             if (vao && cache.vao != vao)
             {
@@ -4519,9 +4913,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         void quadRegion(const Target &target, const Region &r, int mode, QuadBlend blend, const float a[4] = nullptr, const float b[4] = nullptr,
                         const float uvAffine[4] = nullptr, const float clampRect[4] = nullptr, const float size[4] = nullptr)
         {
-#if defined(PS2X_NATIVE_VITA)
+#if defined(PS2X_NATIVE_VITA) || defined(PS2X_NATIVE_GLES)
             gpu86::label("r%d", mode);
             bindTarget(target);
+#if defined(PS2X_NATIVE_GLES)
+            if (r.x == 0 && r.y == 0 && r.w == target.width && r.h == target.height && blend == QuadBlend::None && !target.depth)
+                invalidateTarget(target, GL_COLOR_ATTACHMENT0);
+#endif
             glViewport(0, 0, static_cast<GLsizei>(target.width), static_cast<GLsizei>(target.height));
             useRegion(mode);
             glDisable(GL_DEPTH_TEST);
@@ -4547,20 +4945,40 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
                 glBlendFuncSeparate(GL_ZERO, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
                 break;
+            case QuadBlend::Premul:
+                glEnable(GL_BLEND);
+                glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
+                glBlendFuncSeparate(GL_ONE, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
+                break;
             }
             const float zero[4] = {0, 0, 0, 0}, identity[4] = {1, 1, 0, 0}, whole[4] = {0, 0, 1, 1};
             const float tw = static_cast<float>(target.width), th = static_cast<float>(target.height);
             const float rect[4] = {2.0f * static_cast<float>(r.w) / tw, 2.0f * static_cast<float>(r.h) / th, 2.0f * static_cast<float>(r.x) / tw - 1.0f,
                                    2.0f * static_cast<float>(r.y) / th - 1.0f};
-            glUniform4fv(uniform(false, "uA"), 1, a ? a : zero);
-            glUniform4fv(uniform(false, "uB"), 1, b ? b : zero);
-            glUniform4fv(uniform(false, "uQuad"), 1, uvAffine ? uvAffine : identity);
-            glUniform4fv(uniform(false, "uRect"), 1, rect);
+            const GLint locA = uniform(false, "uA");
+            if (locA >= 0) glUniform4fv(locA, 1, a ? a : zero);
+            const GLint locB = uniform(false, "uB");
+            if (locB >= 0) glUniform4fv(locB, 1, b ? b : zero);
+            const GLint locQ = uniform(false, "uQuad");
+            if (locQ >= 0) glUniform4fv(locQ, 1, uvAffine ? uvAffine : identity);
+            const GLint locR = uniform(false, "uRect");
+            if (locR >= 0) glUniform4fv(locR, 1, rect);
             const GLint clampAt = uniform(false, "uClamp");
             if (clampAt >= 0)
                 glUniform4fv(clampAt, 1, clampRect ? clampRect : whole);
             if (size)
-                glUniform4fv(uniform(false, "uSize"), 1, size);
+            {
+                const GLint locS = uniform(false, "uSize");
+                if (locS >= 0) glUniform4fv(locS, 1, size);
+            }
+#if !defined(PS2X_NATIVE_VITA)
+            if (vao && cache.vao != vao)
+            {
+                glBindVertexArray(vao);
+                cache.vao = vao;
+                cache.buffer = ~0u;
+            }
+#endif
             glBindBuffer(GL_ARRAY_BUFFER, blurBuffer);
             glEnableVertexAttribArray(0);
             glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
@@ -4573,20 +4991,18 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 std::snprintf(what, sizeof what, "%ux%u region", target.width, target.height);
                 px98Quad(what, mode, static_cast<double>(r.w) * r.h);
             }
-            // (bindTarget sets the whole target's viewport only at a bind: it is the whole target already)
 #else
             (void)target, (void)r, (void)mode, (void)blend, (void)a, (void)b, (void)uvAffine, (void)clampRect, (void)size;
 #endif
         }
         Region whole(const Target &t) const { return Region{0, 0, t.width, t.height}; }
-        // The region program of `mode` in use (uniform() then finds its uniforms).
         void useRegion(int mode)
         {
-#if defined(PS2X_NATIVE_VITA)
+#if defined(PS2X_NATIVE_VITA) || defined(PS2X_NATIVE_GLES)
             quadProgram = regionPrograms[mode];
             useProgram(quadProgram);
 #else
-            (void)mode; // (region programs are the Vita's only)
+            (void)mode;
 #endif
         }
 
@@ -4730,12 +5146,14 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             if (mesh.dynamic || !mesh.vao || !staticVaoEnabled())
 #endif
                 glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.dynamic ? indexBuffers[arenaIndex] : mesh.indexBuffer);
+            const bool use16 = !mesh.dynamic && mesh.idx16;
+            const GLenum idxType = use16 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT;
             const uintptr_t first = mesh.dynamic ? mesh.firstIndex : 0u;
-            const void *idxOff = reinterpret_cast<const void *>(first * sizeof(uint32_t));
+            const void *idxOff = reinterpret_cast<const void *>(first * (use16 ? sizeof(uint16_t) : sizeof(uint32_t)));
             if (drawRangeEnabled() && !mesh.dynamic && mesh.pool < 0 && mesh.vertexCount > 0u)
-                glDrawRangeElements(GL_TRIANGLES, 0u, mesh.vertexCount - 1u, static_cast<GLsizei>(count), GL_UNSIGNED_INT, idxOff);
+                glDrawRangeElements(GL_TRIANGLES, 0u, mesh.vertexCount - 1u, static_cast<GLsizei>(count), idxType, idxOff);
             else
-                glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(count), GL_UNSIGNED_INT, idxOff);
+                glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(count), idxType, idxOff);
         }
         // Round 92 diagnostic (Tuning glDiag92Half, picture wrong): a mesh
         // draw's first half of its triangles (at least one).
@@ -5064,9 +5482,23 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         glBindBuffer(GL_ARRAY_BUFFER, mesh.buffer);
         uploadStream(GL_ARRAY_BUFFER, vertices, count * sizeof(native_renderer::Vertex), GL_STATIC_DRAW);
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.indexBuffer);
-        uploadStream(GL_ELEMENT_ARRAY_BUFFER, indices, indexCount * sizeof(uint32_t), GL_STATIC_DRAW);
+        const bool use16 = idx16Enabled() && count <= 0xFFFFu;
+        mesh.idx16 = use16;
+        if (use16)
+        {
+            static std::vector<uint16_t> idx16Tmp;
+            idx16Tmp.resize(indexCount);
+            for (uint32_t i = 0; i < indexCount; ++i)
+                idx16Tmp[i] = static_cast<uint16_t>(indices[i]);
+            uploadStream(GL_ELEMENT_ARRAY_BUFFER, idx16Tmp.data(), indexCount * sizeof(uint16_t), GL_STATIC_DRAW);
+        }
+        else
+        {
+            uploadStream(GL_ELEMENT_ARRAY_BUFFER, indices, indexCount * sizeof(uint32_t), GL_STATIC_DRAW);
+        }
         mesh.count = indexCount;
-        mesh.bytes = static_cast<uint64_t>(count) * sizeof(native_renderer::Vertex) + static_cast<uint64_t>(indexCount) * sizeof(uint32_t);
+        mesh.bytes = static_cast<uint64_t>(count) * sizeof(native_renderer::Vertex) +
+                     static_cast<uint64_t>(indexCount) * (use16 ? sizeof(uint16_t) : sizeof(uint32_t));
         meshBytes += mesh.bytes;
         if (native_renderer::tuning().glMergeDraws && count && indexCount && indexedSrcBytes + mesh.bytes <= kMaxIndexedSrcBytes)
         {
@@ -6003,7 +6435,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     {
         const native_renderer::DrawState &x = a.state, &y = b.state;
         if ((!ignoreTex && x.texture != y.texture) || x.clamp != y.clamp || x.blend != y.blend || x.order != y.order || x.alphaTest != y.alphaTest || !sameFloats(x, y) ||
-            x.background != y.background || x.backgroundFge != y.backgroundFge || x.fogged != y.fogged || x.writeDepth != y.writeDepth || x.noDepthWrite != y.noDepthWrite ||
+            x.background != y.background || x.backgroundFge != y.backgroundFge || x.fogged != y.fogged || (x.blend == native_renderer::Blend::Additive && x.writeDepth != y.writeDepth) || x.noDepthWrite != y.noDepthWrite ||
             x.overlay != y.overlay || x.screen != y.screen || x.screenDepthTest != y.screenDepthTest || x.shadowVolume || y.shadowVolume ||
             x.reflectionSource != y.reflectionSource || x.reflectionSample != y.reflectionSample || x.refractionSample != y.refractionSample ||
             x.fresnel != y.fresnel || x.screenCopy != y.screenCopy || x.previousFrame != y.previousFrame || x.debugColour != y.debugColour ||
@@ -6694,6 +7126,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     p.mergedVerts = copy->vertCount ? copy->vertCount : totalVerts;
                     p.runVbo = copy->vbo;
                     p.runIbo = copy->ibo;
+                    p.runIdx16 = copy->idx16;
                     if (copy->vao && (usedTexArr || staticVaoEnabled()))
                         p.runVao = copy->vao;
                     if (usedTexArr && runArrBucket >= 0)
@@ -6926,7 +7359,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                                                (static_cast<uint32_t>(x.blend) << 4) |
                                                (static_cast<uint32_t>(x.alphaTest) << 8) |
                                                (x.lit ? (1u << 24) : 0u) |
-                                               (x.writeDepth ? (1u << 25) : 0u) |
+                                               ((x.blend == native_renderer::Blend::Additive && x.writeDepth) ? (1u << 25) : 0u) |
                                                (x.noDepthWrite ? (1u << 26) : 0u) |
                                                (x.fogged ? (1u << 27) : 0u) |
                                                (x.fresnel ? (1u << 28) : 0u));
@@ -7404,8 +7837,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     {
         static const bool mergeDiag = ps2_diag::env("SOTC_GL_MERGE_STATS") && std::atoi(ps2_diag::env("SOTC_GL_MERGE_STATS")) != 0;
         const uint64_t diagStart = mergeDiag ? native_renderer::nowUs() : 0u;
+        const bool use16 = idx16Enabled() && totalVerts <= 0xFFFFu;
         const uint64_t bytes = static_cast<uint64_t>(totalVerts) * sizeof(native_renderer::Vertex) +
-                               static_cast<uint64_t>(totalIndices) * sizeof(uint32_t);
+                               static_cast<uint64_t>(totalIndices) * (use16 ? sizeof(uint16_t) : sizeof(uint32_t));
         if (indexedRunBytes + bytes > kMaxIndexedRunBytes)
         {
             std::vector<std::pair<uint64_t, uint64_t>> old;
@@ -7491,10 +7925,22 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         glBindBuffer(GL_ARRAY_BUFFER, copy.vbo);
         uploadStream(GL_ARRAY_BUFFER, packedVerts.data(), packedVerts.size() * sizeof(native_renderer::Vertex), GL_STATIC_DRAW);
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, copy.ibo);
-        uploadStream(GL_ELEMENT_ARRAY_BUFFER, packedIndices.data(), packedIndices.size() * sizeof(uint32_t), GL_STATIC_DRAW);
+        if (use16)
+        {
+            static std::vector<uint16_t> packedIndices16;
+            packedIndices16.resize(packedIndices.size());
+            for (size_t i = 0; i < packedIndices.size(); ++i)
+                packedIndices16[i] = static_cast<uint16_t>(packedIndices[i]);
+            uploadStream(GL_ELEMENT_ARRAY_BUFFER, packedIndices16.data(), packedIndices16.size() * sizeof(uint16_t), GL_STATIC_DRAW);
+        }
+        else
+        {
+            uploadStream(GL_ELEMENT_ARRAY_BUFFER, packedIndices.data(), packedIndices.size() * sizeof(uint32_t), GL_STATIC_DRAW);
+        }
         if (!staticVaoEnabled())
             cache.buffer = ~0u;
         copy.indexed = true;
+        copy.idx16 = use16;
         copy.texArray = false;
         copy.pool = -1;
         copy.first = 0;
@@ -7547,7 +7993,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             b.clamp = c;
             b.filter = filter;
             const uint32_t targetCap = (bw <= 64u && bh <= 64u) ? 64u
-                                     : (bw <= 128u && bh <= 128u) ? (promote128Enabled() ? 64u : 16u)
+                                     : (bw <= 128u && bh <= 128u) ? (promote128Enabled() ? 128u : 16u)
                                                                   : 8u;
             b.capacity = std::min<uint32_t>(static_cast<uint32_t>(maxArrayLayers), targetCap);
             glGenTextures(1, &b.tex);
@@ -7641,8 +8087,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     {
         static const bool mergeDiag = ps2_diag::env("SOTC_GL_MERGE_STATS") && std::atoi(ps2_diag::env("SOTC_GL_MERGE_STATS")) != 0;
         const uint64_t diagStart = mergeDiag ? native_renderer::nowUs() : 0u;
+        const bool use16 = idx16Enabled() && totalVerts <= 0xFFFFu;
         const uint64_t bytes = static_cast<uint64_t>(totalVerts) * sizeof(TexArrVertex) +
-                               static_cast<uint64_t>(totalIndices) * sizeof(uint32_t);
+                               static_cast<uint64_t>(totalIndices) * (use16 ? sizeof(uint16_t) : sizeof(uint32_t));
         if (indexedRunBytes + bytes > kMaxIndexedRunBytes)
         {
             std::vector<std::pair<uint64_t, uint64_t>> old;
@@ -7728,10 +8175,22 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         glBindBuffer(GL_ARRAY_BUFFER, copy.vbo);
         uploadStream(GL_ARRAY_BUFFER, packedVerts.data(), packedVerts.size() * sizeof(TexArrVertex), GL_STATIC_DRAW);
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, copy.ibo);
-        uploadStream(GL_ELEMENT_ARRAY_BUFFER, packedIndices.data(), packedIndices.size() * sizeof(uint32_t), GL_STATIC_DRAW);
+        if (use16)
+        {
+            static std::vector<uint16_t> packedIndices16;
+            packedIndices16.resize(packedIndices.size());
+            for (size_t i = 0; i < packedIndices.size(); ++i)
+                packedIndices16[i] = static_cast<uint16_t>(packedIndices[i]);
+            uploadStream(GL_ELEMENT_ARRAY_BUFFER, packedIndices16.data(), packedIndices16.size() * sizeof(uint16_t), GL_STATIC_DRAW);
+        }
+        else
+        {
+            uploadStream(GL_ELEMENT_ARRAY_BUFFER, packedIndices.data(), packedIndices.size() * sizeof(uint32_t), GL_STATIC_DRAW);
+        }
         cache.vao = copy.vao;
         cache.buffer = copy.vbo;
         copy.indexed = true;
+        copy.idx16 = use16;
         copy.texArray = true;
         copy.texMinAlpha = minA;
         copy.texMaxAlpha = maxA;
@@ -9464,7 +9923,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     {
                         if (mesh.dynamic || !mesh.vao || !staticVaoEnabled())
                             glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.indexBuffer);
-                        glDrawElementsInstanced(GL_TRIANGLES, static_cast<GLsizei>(diagHalf(mesh.count)), GL_UNSIGNED_INT, nullptr, static_cast<GLsizei>(planned.instances));
+                        glDrawElementsInstanced(GL_TRIANGLES, static_cast<GLsizei>(diagHalf(mesh.count)), (!mesh.dynamic && mesh.idx16) ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT, nullptr, static_cast<GLsizei>(planned.instances));
                     }
                     else
                         glDrawArraysInstanced(GL_TRIANGLES, firstVertex, static_cast<GLsizei>(diagHalf(mesh.count)), static_cast<GLsizei>(planned.instances));
@@ -9481,10 +9940,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     {
                         if (!planned.runVao)
                             glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, planned.runIbo);
+                        const GLenum runIdxType = planned.runIdx16 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT;
                         if (drawRangeEnabled() && planned.mergedVerts > 0u)
-                            glDrawRangeElements(GL_TRIANGLES, 0u, planned.mergedVerts - 1u, static_cast<GLsizei>(diagHalf(planned.mergedCount)), GL_UNSIGNED_INT, nullptr);
+                            glDrawRangeElements(GL_TRIANGLES, 0u, planned.mergedVerts - 1u, static_cast<GLsizei>(diagHalf(planned.mergedCount)), runIdxType, nullptr);
                         else
-                            glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(diagHalf(planned.mergedCount)), GL_UNSIGNED_INT, nullptr);
+                            glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(diagHalf(planned.mergedCount)), runIdxType, nullptr);
                     }
                     else
                         glDrawArrays(GL_TRIANGLES, firstVertex, static_cast<GLsizei>(diagHalf(planned.mergedCount)));
@@ -9586,7 +10046,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                         {
                             if (mesh.dynamic || !mesh.vao || !staticVaoEnabled())
                                 glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.indexBuffer);
-                            glDrawElementsInstanced(GL_TRIANGLES, static_cast<GLsizei>(diagHalf(mesh.count)), GL_UNSIGNED_INT, nullptr, static_cast<GLsizei>(planned.instances));
+                            glDrawElementsInstanced(GL_TRIANGLES, static_cast<GLsizei>(diagHalf(mesh.count)), (!mesh.dynamic && mesh.idx16) ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT, nullptr, static_cast<GLsizei>(planned.instances));
                         }
                         else
                             glDrawArraysInstanced(GL_TRIANGLES, firstVertex, static_cast<GLsizei>(diagHalf(mesh.count)), static_cast<GLsizei>(planned.instances));
@@ -9601,10 +10061,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                         {
                             if (!planned.runVao)
                                 glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, planned.runIbo);
+                            const GLenum runIdxType = planned.runIdx16 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT;
                             if (drawRangeEnabled() && planned.mergedVerts > 0u)
-                                glDrawRangeElements(GL_TRIANGLES, 0u, planned.mergedVerts - 1u, static_cast<GLsizei>(diagHalf(planned.mergedCount)), GL_UNSIGNED_INT, nullptr);
+                                glDrawRangeElements(GL_TRIANGLES, 0u, planned.mergedVerts - 1u, static_cast<GLsizei>(diagHalf(planned.mergedCount)), runIdxType, nullptr);
                             else
-                                glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(diagHalf(planned.mergedCount)), GL_UNSIGNED_INT, nullptr);
+                                glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(diagHalf(planned.mergedCount)), runIdxType, nullptr);
                         }
                         else
                             glDrawArrays(GL_TRIANGLES, firstVertex, static_cast<GLsizei>(diagHalf(planned.mergedCount)));
@@ -9801,17 +10262,134 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 bindTexture(0, gsBloom[1].texture);
                 quad(gsBloom[2], 0, QuadBlend::None);
                 const float alpha[4] = {gsBloomHistory ? bloom.temporal : 0.0f, 0, 0, 0};
+                const float taps = bloomTapAlpha();
+                const float r64[4] = {64, taps, 0, 0}, r128[4] = {128, taps, 0, 0};
+                const float colour[4] = {bloom.color[0], bloom.color[1], bloom.color[2], bloom.color[3]};
+                const float scale[4] = {static_cast<float>(width) / 512.0f, static_cast<float>(height) / 448.0f, 0, 0};
+#if defined(PS2X_NATIVE_GLES)
+                const bool chain94 = quadSpec && native_renderer::tuning().glBloom94 && regionReady && bloomAtlas.fbo;
+                if (chain94)
+                {
+                    float histUv[4], histClamp[4];
+                    bloomA().uvOf(bloomAtlas, histUv);
+                    bloomA().clampOf(bloomAtlas, histClamp);
+                    if (gsBloomHistory && !bloomAtlasHistory)
+                    {
+                        bindTexture(0, gsBloom[4].texture);
+                        quadRegion(bloomAtlas, bloomA(), 0, QuadBlend::None);
+                        ++r94Stats.histMove;
+                    }
+                    bindTexture(0, gsBloom[2].texture);
+                    bindTexture(1, bloomAtlas.texture);
+                    quadRegion(gsBloom[3], whole(gsBloom[3]), 23, QuadBlend::None, alpha, nullptr, nullptr, nullptr, histUv);
+                    bindTexture(0, gsBloom[3].texture);
+                    const bool sum = native_renderer::tuning().glBlur93 && regionPrograms[20];
+                    for (int which = 0; which < 2; ++which)
+                    {
+                        const Region to = which ? bloomB() : bloomA();
+                        const float r = which ? 128.0f : 64.0f;
+                        if (sum)
+                        {
+                            float wts[16];
+                            blur93Weights(taps, wts);
+                            useRegion(20);
+                            glUniform4fv(uniform(false, "uW"), 4, wts);
+                            const float k = 64.0f / r, base = (0.5f - 0.5f * k) / 64.0f;
+                            const float params[4] = {base, -base, k / 64.0f, 0.0f};
+                            quadRegion(bloomAtlas, to, 20, QuadBlend::None, params);
+                            ++r93Stats.blur;
+                        }
+                        else
+                        {
+                            const float rr[4] = {r, taps, 0, 0};
+                            quadRegion(bloomAtlas, to, 16, QuadBlend::None, rr);
+                        }
+                    }
+                    gsBloomHistory = bloomAtlasHistory = true;
+                    ++r94Stats.bloom;
+                    const float before = bloomLog() ? targetMean(colorPlain, 0) : 0.0f;
+                    if (sum && native_renderer::tuning().glPost93 && regionPrograms[19])
+                    {
+                        const float sx = 128.0f / 192.0f, cx = 1.0f / 1024.0f, cy = -(0.5f - 128.0f / 448.0f) / 256.0f;
+                        const float affine[4] = {sx, 1.0f, cx * sx, cy};
+                        float bClamp[4];
+                        bloomB().clampOf(bloomAtlas, bClamp);
+                        bindTexture(0, bloomAtlas.texture);
+                        quadRegion(colorPlain, whole(colorPlain), 19, QuadBlend::Add, nullptr, colour, affine, bClamp);
+                        ++r93Stats.post;
+                        ++r94Stats.bloomDirect;
+                    }
+                    else
+                    {
+                        float bUv[4], bClamp[4];
+                        bloomB().uvOf(bloomAtlas, bUv);
+                        bloomB().clampOf(bloomAtlas, bClamp);
+                        bindTexture(0, bloomAtlas.texture);
+                        quadRegion(gsBloom[6], whole(gsBloom[6]), 0, QuadBlend::None, nullptr, nullptr, bUv, bClamp);
+                        bindTexture(0, gsBloom[6].texture);
+                        if (native_renderer::tuning().glPost93 && quadPrograms[19])
+                        {
+                            const float affine[4] = {1.0f, 1.0f, 1.0f / 1024.0f, -(0.5f - 128.0f / 448.0f) / 256.0f};
+                            quad(colorPlain, 19, QuadBlend::Add, nullptr, colour, affine);
+                            ++r93Stats.post;
+                        }
+                        else
+                        {
+                            quad(colorPlain, 18, QuadBlend::Add, scale, colour);
+                        }
+                    }
+                    logAdd("gles-depth-94", colorPlain, before);
+                    return;
+                }
+                if (bloomAtlasHistory)
+                {
+                    if (gsBloomHistory && regionReady && bloomAtlas.fbo)
+                    {
+                        float histUv[4], histClamp[4];
+                        bloomA().uvOf(bloomAtlas, histUv);
+                        bloomA().clampOf(bloomAtlas, histClamp);
+                        bindTexture(0, bloomAtlas.texture);
+                        quadRegion(gsBloom[4], whole(gsBloom[4]), 0, QuadBlend::None, nullptr, nullptr, histUv, histClamp);
+                        ++r94Stats.histMove;
+                    }
+                    bloomAtlasHistory = false;
+                }
+#endif
                 bindTexture(0, gsBloom[2].texture);
                 bindTexture(1, gsBloom[4].texture);
                 quad(gsBloom[3], 17, QuadBlend::None, alpha);
-                const float taps = bloomTapAlpha();
-                const float r64[4] = {64, taps, 0, 0}, r128[4] = {128, taps, 0, 0};
                 bindTexture(0, gsBloom[3].texture);
-                quad(gsBloom[4], 16, QuadBlend::None, r64);
-                gsBloomHistory = true;
-                quad(gsBloom[5], 16, QuadBlend::None, r128);
-                bindTexture(0, gsBloom[5].texture);
-                quad(gsBloom[6], 0, QuadBlend::None);
+                GLuint bloomSrcTex = gsBloom[6].texture;
+#if defined(PS2X_NATIVE_GLES)
+                if (quadSpec && native_renderer::tuning().glBlur93 && quadPrograms[20])
+                {
+                    auto blurSum = [&](Target &to, float r)
+                    {
+                        const float k = 64.0f / r;
+                        float wts[16];
+                        blur93Weights(taps, wts);
+                        useQuad(20);
+                        glUniform4fv(uniform(false, "uW"), 4, wts);
+                        const float base = (0.5f - 0.5f * k) / 64.0f;
+                        const float params[4] = {base, -base, k / 64.0f, 0.0f}, identity[4] = {1.0f, 1.0f, 0.0f, 0.0f};
+                        quad(to, 20, QuadBlend::None, params, nullptr, identity);
+                        ++r93Stats.blur;
+                    };
+                    blurSum(gsBloom[4], 64.0f);
+                    gsBloomHistory = true;
+                    blurSum(gsBloom[5], 128.0f);
+                    bloomSrcTex = gsBloom[5].texture;
+                }
+                else
+#endif
+                {
+                    quad(gsBloom[4], 16, QuadBlend::None, r64);
+                    gsBloomHistory = true;
+                    quad(gsBloom[5], 16, QuadBlend::None, r128);
+                    bindTexture(0, gsBloom[5].texture);
+                    quad(gsBloom[6], 0, QuadBlend::None);
+                    bloomSrcTex = gsBloom[6].texture;
+                }
                 for (int i = 0; i < 7; ++i)
                     bloomStage(kBloomStageNames[i], gsBloom[i]);
                 float dtMac = 1.0f;
@@ -9819,10 +10397,17 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     dtMac = std::clamp(1.0f - 0.1f * (bloom.threshold + 1.0f - bloom.zA) / bloom.zB, 0.0f, 1.0f);
                 logChain("mac-depth", dtMac);
                 const float before = bloomLog() ? targetMean(colorPlain, 0) : 0.0f;
-                const float scale[4] = {static_cast<float>(width) / 512.0f, static_cast<float>(height) / 448.0f, 0, 0};
-                const float colour[4] = {bloom.color[0], bloom.color[1], bloom.color[2], bloom.color[3]};
-                bindTexture(0, gsBloom[6].texture);
-                quad(colorPlain, 18, QuadBlend::Add, scale, colour);
+                bindTexture(0, bloomSrcTex);
+#if defined(PS2X_NATIVE_GLES)
+                if (quadSpec && native_renderer::tuning().glPost93 && quadPrograms[19])
+                {
+                    const float affine[4] = {1.0f, 1.0f, 1.0f / 1024.0f, -(0.5f - 128.0f / 448.0f) / 256.0f};
+                    quad(colorPlain, 19, QuadBlend::Add, nullptr, colour, affine);
+                    ++r93Stats.post;
+                }
+                else
+#endif
+                    quad(colorPlain, 18, QuadBlend::Add, scale, colour);
                 logAdd("mac-depth", colorPlain, before);
                 return;
             }
@@ -9861,6 +10446,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #if defined(PS2X_NATIVE_VITA)
         const bool fx94On = native_renderer::tuning().glFx94 && regionReady && fxAtlas[0].fbo && fxAtlas[1].fbo;
         const bool glow94On = native_renderer::tuning().glGlow94 && regionReady;
+#elif defined(PS2X_NATIVE_GLES)
+        const bool fx94On = false;
+        const bool glow94On = quadSpec && native_renderer::tuning().glGlow94 && regionReady;
 #else
         const bool fx94On = false, glow94On = false;
 #endif
@@ -9979,8 +10567,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         {
 #if defined(PS2X_NATIVE_VITA)
             if (native_renderer::tuning().glGlow98 && glow.amountA > 0.0f && glow.amountB > 0.0f && quadPrograms[26])
+#elif defined(PS2X_NATIVE_GLES)
+            if (quadSpec && native_renderer::tuning().glGlow98 && glow.amountA > 0.0f && glow.amountB > 0.0f && quadPrograms[26])
 #else
-            if (false) // (mode 26 is the Vita's quad program only)
+            if (false) // (mode 26 is Vita / GLES specialized quad program only)
 #endif
             {
                 const float a[4] = {glow.tint[0], glow.tint[1], glow.tint[2], glow.amountA}, b[4] = {glow.tint[0], glow.tint[1], glow.tint[2], glow.amountB};
@@ -10197,14 +10787,18 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 if (glow.rounds > 1)
                 {
                     reduce(glowSmall[1], glowSmall[2], 0.0f);
-#if defined(PS2X_NATIVE_VITA)
+#if defined(PS2X_NATIVE_VITA) || defined(PS2X_NATIVE_GLES)
                     // Round 93 (Tuning glGlow93, a candidate): the rounds + 1
                     // half-texel copies there and back are each a 2 x 2 box
                     // (a [1 2 1] / 4 tent a pair, separable): together the
                     // binomial kernel of order 2 (rounds + 1) each way, drawn as
                     // two passes (across, then down) instead of 2 (rounds + 1).
                     const int n = glow.rounds + 1;
-                    if (glow.rounds > 2 && n <= 8 && native_renderer::tuning().glGlow93 && quadPrograms[21])
+                    if (glow.rounds > 2 && n <= 8 && native_renderer::tuning().glGlow93 && quadPrograms[21]
+#if defined(PS2X_NATIVE_GLES)
+                        && quadSpec
+#endif
+                        )
                     {
                         const int order = 2 * n; // taps 0..order, centred at order / 2
                         float wts[20] = {};
