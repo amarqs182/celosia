@@ -26,6 +26,7 @@
 void installSotcNative(PS2Runtime &runtime); // sotc_native.cpp
 void installSotcNativeLate(PS2Runtime &runtime);
 #include "sotc_decomp.h"
+#include "a9sweep.h"
 #include "sotc_prof.h"
 #include "sotc_replay.h"
 
@@ -1304,6 +1305,7 @@ namespace
 
     void applySotcOverrides(PS2Runtime &runtime)
     {
+        a9sweep::init(); // round A9 sweep: the hoisted switches' values, before any native or hook is registered
         runtime.eeScheduler().enableHostClockSync();
         // DIAG (teto: 1x): applySotcOverrides chamado?
         {

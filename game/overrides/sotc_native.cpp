@@ -105,6 +105,7 @@ extern "C" void ps2x_vita_pace143_ab(int on);             // raylib_vita.cpp (ro
 #include <vector>
 #include "s9rt.h"
 #include "s11rt.h"
+#include "a9sweep.h"
 
 namespace decomp_hot44g
 {
@@ -3281,10 +3282,10 @@ namespace sotc_native
     // guest screenBlur's own GS writes keep the jobs' order through gsReg's
     // hooks, and a recorded blur still joins first.
     bool g_sblur100 = true;
+    A9S_HOIST(bool, a9s_sotc_native_v_3111, [] { const char *e = std::getenv("SOTC_SBLUR100"); return !e || std::atoi(e) != 0; }()); // round A9 sweep (a9sweep.h)
     bool sblur100Start()
     {
-        static const bool v = [] { const char *e = std::getenv("SOTC_SBLUR100"); return !e || std::atoi(e) != 0; }();
-        return v;
+        return A9S_VAL(::a9sweep::on(), a9s_sotc_native_v_3111, bool, [] { const char *e = std::getenv("SOTC_SBLUR100"); return !e || std::atoi(e) != 0; }());
     }
     void abSwitches()
     {
@@ -3457,7 +3458,7 @@ namespace sotc_native
         constexpr size_t kTuningCount = sizeof(kTuningFlags) / sizeof(kTuningFlags[0]);
         static int tuningAt[kTuningCount];
         // The decomp rounds' subsystem switches (sotc_decomp.h's table).
-        static const char *const switchNames[sotc_decomp::kSwitchCount] = {"camcoll", "collprobe", "motion", "leaves", "hotlist", "hotlist44", "hotlist46", "hotlist47", "scriptvm", "isys", "hotlist48", "fastnative", "fastnative2", "fastnative3", "ptcl62", "coll63", "tex64", "walk67", "pref69", "coll71", "charlod78", "ptcl79", "seg80", "pose82", "walk83", "ptcl83", "probe84", "find84", "ground85", "ptcl89", "ptcl91", "join95", "draw95", "early95", "obj96", "sel96", "sel97", "links97", "path97", "plan97", "walk101", "skin101", "leaf101", "obj101", "sw102", "ptcl103", "solid103", "grp106", "oan106", "ai106", "coll115", "pkt117", "glv117", "draw117", "leaf117", "sym120", "heap120", "flush119", "walk119", "part119", "view119", "ptcl123", "blend123", "seg123", "gaze122", "cloth122", "quat122", "keys122", "fin125", "obj125", "scroll127", "geo126", "ctl126", "imm128", "texr128", "pf134", "clip134", "pose136", "key136", "euler136", "pf135", "fin138", "sub139", "rnd139", "gc139", "sort140", "quad140", "clip140", "pf141", "pfc141", "liftd1", "liftd2", "liftd3", "liftd4", "liftd5", "liftalt", "s9rt", "s10draw", "s4disp", "s11rt"};
+        static const char *const switchNames[sotc_decomp::kSwitchCount] = {"camcoll", "collprobe", "motion", "leaves", "hotlist", "hotlist44", "hotlist46", "hotlist47", "scriptvm", "isys", "hotlist48", "fastnative", "fastnative2", "fastnative3", "ptcl62", "coll63", "tex64", "walk67", "pref69", "coll71", "charlod78", "ptcl79", "seg80", "pose82", "walk83", "ptcl83", "probe84", "find84", "ground85", "ptcl89", "ptcl91", "join95", "draw95", "early95", "obj96", "sel96", "sel97", "links97", "path97", "plan97", "walk101", "skin101", "leaf101", "obj101", "sw102", "ptcl103", "solid103", "grp106", "oan106", "ai106", "coll115", "pkt117", "glv117", "draw117", "leaf117", "sym120", "heap120", "flush119", "walk119", "part119", "view119", "ptcl123", "blend123", "seg123", "gaze122", "cloth122", "quat122", "keys122", "fin125", "obj125", "scroll127", "geo126", "ctl126", "imm128", "texr128", "pf134", "clip134", "pose136", "key136", "euler136", "pf135", "fin138", "sub139", "rnd139", "gc139", "sort140", "quad140", "clip140", "pf141", "pfc141", "liftd1", "liftd2", "liftd3", "liftd4", "liftd5", "liftalt", "s9rt", "s10draw", "s4disp", "s11rt", "s2coll", "s3chara", "a9sweep"};
         static int switchAt[sotc_decomp::kSwitchCount];
         static bool switchStart[sotc_decomp::kSwitchCount];
         static int layerAt[32];
@@ -11119,7 +11120,7 @@ namespace sotc_native
         const ps2_load::GameZone hookZone(0x2001u);
         const auto zone = [](uint32_t z)
         {
-            if (ps2_load::t_slot == ps2_load::kGame)
+            if (ps2_load::zonesWanted() && ps2_load::t_slot == ps2_load::kGame)
                 ps2_load::gameZone.store(z, std::memory_order_relaxed);
         };
         ensureFrameSynced(rdram);
