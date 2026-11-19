@@ -6502,7 +6502,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         if (!m || !m->count)
             return false;
         const native_renderer::DrawState &st = d.state;
-        if (st.background || st.overlay || st.screen || st.screenDepthTest || st.noDepthWrite || st.writeDepth ||
+        if (st.background || st.overlay || st.screen || st.screenDepthTest || st.noDepthWrite || (st.blend == native_renderer::Blend::Additive && st.writeDepth) ||
             st.shadowVolume || st.reflectionSource || st.reflectionSample || st.refractionSample ||
             st.screenCopy || st.previousFrame || st.fresnel || st.debugColour || st.skinPalette)
             return false;
@@ -7491,12 +7491,12 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                         return a.tex < b.tex;
                     if (a.state != b.state)
                         return a.state < b.state;
-                    if (a.tieTex != b.tieTex)
-                        return a.tieTex < b.tieTex;
                     if (a.where != b.where)
                         return a.where < b.where;
                     if (a.clip != b.clip)
                         return a.clip < b.clip;
+                    if (a.tieTex != b.tieTex)
+                        return a.tieTex < b.tieTex;
                     return a.k < b.k;
                 });
                 sortOrder.clear();
@@ -7994,7 +7994,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             b.filter = filter;
             const uint32_t targetCap = (bw <= 64u && bh <= 64u) ? 64u
                                      : (bw <= 128u && bh <= 128u) ? (promote128Enabled() ? 128u : 16u)
-                                                                  : 8u;
+                                                                  : 32u;
             b.capacity = std::min<uint32_t>(static_cast<uint32_t>(maxArrayLayers), targetCap);
             glGenTextures(1, &b.tex);
             glActiveTexture(GL_TEXTURE0);
