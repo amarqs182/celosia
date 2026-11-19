@@ -12968,6 +12968,7 @@ namespace sotc_native
 {
     // The native renderer draws (no PS2 lists, the GS rasterises nothing): the screen passes' packets have no reader.
     bool s4NativeDrawing() { return !native_renderer::tuning().ps2Lists && GS::skipRaster(); }
+    bool s4Reflections() { return native_renderer::tuning().reflections; }
     uint64_t s4Emits() { return g_s4Emits; }
     // The host state a screen pass's hooks may change (the layer mirror, the requested texture, the camera note, the bloom
     // flag, the fog), hashed.
