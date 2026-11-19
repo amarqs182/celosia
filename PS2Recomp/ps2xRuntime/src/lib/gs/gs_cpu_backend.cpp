@@ -44,7 +44,6 @@ namespace
 #include "runtime/gs/ps2_gs_psmt4.h"
 #include "runtime/gs/ps2_gs_psmt8.h"
 #include "runtime/gs/ps2_gs_memory.h"
-#include "runtime/gs/gs_metal_raster.h"
 #include "ps2_log.h"
 #include <atomic>
 #include <algorithm>
@@ -621,15 +620,6 @@ void GSCpuBackend::Initialize(uint8_t *vram, uint32_t vramSize)
     m_vram = vram;
     m_vramSize = vramSize;
     ResetUnlocked();
-#ifdef PS2X_HAVE_METAL
-    // Rasterize on the GPU by default (only the backend of the live GS memory;
-    // scratch backends used for presentation stay on the CPU).
-    // PS2X_GS_GPU=0 keeps everything on the CPU.
-    static const bool wantGpu = !std::getenv("PS2X_GS_GPU") || std::atoi(std::getenv("PS2X_GS_GPU")) != 0;
-    m_gpu.reset();
-    if (wantGpu && m_gpuAllowed && vram)
-        m_gpu = GSMetalRaster::create(vram, vramSize);
-#endif
 }
 
 void GSCpuBackend::Reset()
@@ -683,13 +673,6 @@ namespace
         }
     } g_gsProfile;
 }
-
-#ifdef PS2X_HAVE_METAL
-namespace
-{
-    bool gpuCanDraw(const GSPrimitiveBatch &batch);
-}
-#endif
 
 // SOTC_BLOOM_LOG: the picture (224, 512 x 448) in the bloom's mask (336) and outside it: mean R, % R >= 250.
 static void bloomRegionLog(const uint8_t *vram, uint64_t frame, const char *when)
@@ -962,20 +945,7 @@ void GSCpuBackend::Submit(const GSPrimitiveBatch &batch)
 
     static const bool immediate = std::getenv("PS2X_GS_IMMEDIATE") != nullptr;
     UpdateTextureReadMode(batch);
-    bool gpuFeedback = false;
-#ifdef PS2X_HAVE_METAL
-    if (!immediate && !m_textureDirectRead && gpuUploads() && batch.state.prim.tme && gpuCanDraw(batch))
-    {
-        // Feedback draw on the GPU: it samples a copy of the texture memory
-        // taken right before it, like the CPU path below.
-        flushPendingUnlocked("GpuFeedback");
-        const auto &tex = batch.state.context.tex0;
-        bufferRange(tex.tbp0 * 256u, std::max<uint32_t>(batch.state.textureWidth, tex.tbw * 64u),
-                    batch.state.textureHeight, tex.psm, m_gpuFeedbackRange.first, m_gpuFeedbackRange.second);
-        gpuFeedback = true;
-    }
-#endif
-    if (!gpuFeedback && (immediate || !m_textureDirectRead))
+    if (immediate || !m_textureDirectRead)
     {
         // Feedback draws read what earlier draws wrote: keep them serial.
         flushPendingUnlocked("Feedback");
@@ -1070,55 +1040,12 @@ void GSCpuBackend::Submit(const GSPrimitiveBatch &batch)
     }
     m_pendingClut.push_back(static_cast<uint32_t>(m_clutVersions.size() - 1u));
     m_pending.push_back(batch);
-    if (gpuFeedback)
-    {
-        flushPendingUnlocked("GpuFeedback");
-        m_gpuFeedbackRange = {0u, 0u};
-    }
-    else if (m_pending.size() >= 4096u)
+    if (m_pending.size() >= 4096u)
         flushPendingUnlocked("Full");
 }
 
 void GSCpuBackend::flushPendingUnlocked(const char *reason)
 {
-#ifdef PS2X_HAVE_METAL
-    if (m_gpu)
-    {
-        // GPU work only has to be committed to keep draw order (Metal orders
-        // passes that touch the same memory); the CPU waits for it only when
-        // it is about to read or write GS memory itself.
-        const bool orderingOnly = std::strcmp(reason, "Hazard") == 0 || std::strcmp(reason, "Full") == 0 ||
-                                  std::strcmp(reason, "Flush") == 0 || std::strcmp(reason, "GpuUpload") == 0 ||
-                                  std::strcmp(reason, "GpuFeedback") == 0;
-        if (!m_pending.empty())
-        {
-            if (g_gsProfile.on)
-                ++g_gsProfile.reasons[reason];
-            if (orderingOnly)
-            {
-                // The CPU must not touch this memory until the GPU is done.
-                for (const auto *list : {&m_pendingWrites, &m_pendingReads})
-                    for (const auto &range : *list)
-                        addInflightRange(range);
-            }
-            rasterizePendingGpu();
-            finishPendingUnlocked();
-        }
-        if (!orderingOnly)
-        {
-            const auto w0 = std::chrono::steady_clock::now();
-            gpuWaitIdle();
-            if (g_gsProfile.on)
-            {
-                const double waited = std::chrono::duration<double>(std::chrono::steady_clock::now() - w0).count();
-                g_gsProfile.serial += waited; // reported as "serial" in GPU mode: time the CPU waits for the GPU
-                ++g_gsProfile.reasons[std::string("wait:") + reason];
-                g_gsProfile.report();
-            }
-        }
-        return;
-    }
-#endif
     if (m_pending.empty())
         return;
     if (g_gsProfile.on)
@@ -1232,334 +1159,6 @@ void GSCpuBackend::finishPendingUnlocked()
     m_pendingWrites.clear();
     m_pendingReads.clear();
 }
-
-#ifdef PS2X_HAVE_METAL
-namespace
-{
-    bool isTargetPsm(uint32_t psm) { return psm == GS_PSM_CT32 || psm == GS_PSM_CT24 || psm == GS_PSM_CT16 || psm == GS_PSM_CT16S; }
-    bool isDepthPsm(uint32_t psm) { return psm == GS_PSM_Z32 || psm == GS_PSM_Z24 || psm == GS_PSM_Z16 || psm == GS_PSM_Z16S; }
-    bool isTexturePsm(uint32_t psm)
-    {
-        switch (psm)
-        {
-        case GS_PSM_CT32: case GS_PSM_CT24: case GS_PSM_CT16: case GS_PSM_CT16S:
-        case GS_PSM_T8: case GS_PSM_T4: case GS_PSM_T8H: case GS_PSM_T4HL: case GS_PSM_T4HH:
-        case GS_PSM_Z32: case GS_PSM_Z24: case GS_PSM_Z16: case GS_PSM_Z16S:
-            return true;
-        default:
-            return false;
-        }
-    }
-
-    // Formats and primitive types the GPU path reproduces exactly.
-    bool gpuCanDraw(const GSPrimitiveBatch &batch)
-    {
-        const GSDrawState &state = batch.state;
-        const auto &ctx = state.context;
-        const auto type = state.prim.type;
-        const bool triangle = type == GS_PRIM_TRIANGLE || type == GS_PRIM_TRISTRIP || type == GS_PRIM_TRIFAN;
-        if (!(triangle && batch.vertexCount >= 3) && !(type == GS_PRIM_SPRITE && batch.vertexCount >= 2))
-            return false;
-        if (!isTargetPsm(ctx.frame.psm))
-            return false;
-        const uint32_t ztst = static_cast<uint32_t>((ctx.test >> 17) & 3u);
-        if ((ztst >= 2u || !ctx.zbuf.zmask) && !isDepthPsm(ctx.zbuf.psm))
-            return false;
-        if (state.prim.tme && !isTexturePsm(ctx.tex0.psm))
-            return false;
-        return true;
-    }
-
-    void splitDepth(double z, float &hi, float &lo)
-    {
-        const DepthPair pair = depthSplit(z);
-        hi = pair.hi;
-        lo = pair.lo;
-    }
-
-    uint32_t packRgba(const GSVertex &v)
-    {
-        return static_cast<uint32_t>(v.r) | (static_cast<uint32_t>(v.g) << 8) | (static_cast<uint32_t>(v.b) << 16) | (static_cast<uint32_t>(v.a) << 24);
-    }
-
-    // Same setup as DrawTriangle (without band clipping).
-    bool setupGpuTriangle(const GSPrimitiveBatch &batch, GSGpuPrim &p)
-    {
-        const GSDrawState &state = batch.state;
-        const auto &ctx = state.context;
-        const int ofx = ctx.xyoffset.ofx >> 4;
-        const int ofy = ctx.xyoffset.ofy >> 4;
-        float fx[3], fy[3];
-        for (int i = 0; i < 3; ++i)
-        {
-            fx[i] = batch.vertices[i].x - static_cast<float>(ofx);
-            fy[i] = batch.vertices[i].y - static_cast<float>(ofy);
-        }
-        int minX = static_cast<int>(std::floor(std::min({fx[0], fx[1], fx[2]})));
-        int maxX = static_cast<int>(std::ceil(std::max({fx[0], fx[1], fx[2]})));
-        int minY = static_cast<int>(std::floor(std::min({fy[0], fy[1], fy[2]})));
-        int maxY = static_cast<int>(std::ceil(std::max({fy[0], fy[1], fy[2]})));
-        minX = clampInt(minX, ctx.scissor.x0, ctx.scissor.x1);
-        maxX = clampInt(maxX, ctx.scissor.x0, ctx.scissor.x1);
-        minY = clampInt(minY, ctx.scissor.y0, ctx.scissor.y1);
-        maxY = clampInt(maxY, ctx.scissor.y0, ctx.scissor.y1);
-        if (minY > maxY)
-            return false;
-        const float denom = (fy[1] - fy[2]) * (fx[0] - fx[2]) + (fx[2] - fx[1]) * (fy[0] - fy[2]);
-        if (std::fabs(denom) < 0.001f)
-            return false;
-        p.kind = 0;
-        p.x0 = minX;
-        p.x1 = maxX;
-        p.y0 = minY;
-        p.y1 = maxY;
-        p.winding = (denom < 0.0f) ? -1.0f : 1.0f;
-        p.invAbsDenom = 1.0f / std::fabs(denom);
-        for (int i = 0; i < 3; ++i)
-        {
-            const GSVertex &v = batch.vertices[i];
-            p.fx[i] = fx[i];
-            p.fy[i] = fy[i];
-            splitDepth(v.z, p.zhi[i], p.zlo[i]);
-            p.rgba[i] = packRgba(v);
-            p.s[i] = v.s;
-            p.t[i] = v.t;
-            p.q[i] = v.q;
-            p.u[i] = static_cast<float>(v.u);
-            p.v[i] = static_cast<float>(v.v);
-            p.fog[i] = static_cast<float>(v.fog);
-        }
-        return true;
-    }
-
-    // Same setup as DrawSprite (without band clipping).
-    bool setupGpuSprite(const GSPrimitiveBatch &batch, GSGpuPrim &p)
-    {
-        const GSDrawState &state = batch.state;
-        const GSVertex &v0 = batch.vertices[0];
-        const GSVertex &v1 = batch.vertices[1];
-        const auto &ctx = state.context;
-        const float ofx = static_cast<float>(ctx.xyoffset.ofx) / 16.0f;
-        const float ofy = static_cast<float>(ctx.xyoffset.ofy) / 16.0f;
-        const float sx0 = v0.x - ofx, sy0 = v0.y - ofy, sx1 = v1.x - ofx, sy1 = v1.y - ofy;
-        const int unclippedX0 = static_cast<int>(std::ceil(std::min(sx0, sx1)));
-        const int unclippedY0 = static_cast<int>(std::ceil(std::min(sy0, sy1)));
-        const int unclippedX1 = static_cast<int>(std::ceil(std::max(sx0, sx1))) - 1;
-        const int unclippedY1 = static_cast<int>(std::ceil(std::max(sy0, sy1))) - 1;
-        if (unclippedX1 < unclippedX0 || unclippedY1 < unclippedY0)
-            return false;
-        if (unclippedX1 < ctx.scissor.x0 || unclippedX0 > ctx.scissor.x1 ||
-            unclippedY1 < ctx.scissor.y0 || unclippedY0 > ctx.scissor.y1)
-            return false;
-        p.kind = 1;
-        p.x0 = clampInt(unclippedX0, ctx.scissor.x0, ctx.scissor.x1);
-        p.y0 = clampInt(unclippedY0, ctx.scissor.y0, ctx.scissor.y1);
-        p.x1 = clampInt(unclippedX1, ctx.scissor.x0, ctx.scissor.x1);
-        p.y1 = clampInt(unclippedY1, ctx.scissor.y0, ctx.scissor.y1);
-        p.fx[0] = sx0;
-        p.fy[0] = sy0;
-        p.fx[1] = sx1;
-        p.fy[1] = sy1;
-        p.winding = (sx1 != sx0) ? 1.0f / (sx1 - sx0) : 0.0f;
-        p.invAbsDenom = (sy1 != sy0) ? 1.0f / (sy1 - sy0) : 0.0f;
-        const uint32_t z1 = static_cast<uint32_t>(v1.z);
-        std::memcpy(&p.zhi[0], &z1, sizeof(z1));
-        p.rgba[0] = packRgba(v1);
-        p.fog[0] = static_cast<float>(v1.fog);
-        if (state.prim.tme)
-        {
-            if (state.prim.fst)
-            {
-                // UV are 12.4 fixed point: keep the fraction (SotC's bloom
-                // passes put sprites at texel centres with .5 UVs).
-                p.su0 = static_cast<float>(v0.u) / 16.0f;
-                p.sv0 = static_cast<float>(v0.v) / 16.0f;
-                p.su1 = static_cast<float>(v1.u) / 16.0f;
-                p.sv1 = static_cast<float>(v1.v) / 16.0f;
-            }
-            else
-            {
-                const float q0 = fabsQ(v0.q);
-                const float q1 = fabsQ(v1.q);
-                p.su0 = (v0.s / q0) * static_cast<float>(state.textureWidth);
-                p.sv0 = (v0.t / q0) * static_cast<float>(state.textureHeight);
-                p.su1 = (v1.s / q1) * static_cast<float>(state.textureWidth);
-                p.sv1 = (v1.t / q1) * static_cast<float>(state.textureHeight);
-            }
-        }
-        return true;
-    }
-
-    GSGpuState makeGpuState(const GSDrawState &state, uint32_t clutIndex)
-    {
-        const auto &ctx = state.context;
-        GSGpuState st{};
-        st.fbp = framePageBaseToBlock(ctx.frame.fbp);
-        st.fbw = std::max<uint32_t>(ctx.frame.fbw, 1u);
-        st.fpsm = ctx.frame.psm;
-        st.fbmsk = ctx.frame.fbmsk;
-        st.zbp = framePageBaseToBlock(ctx.zbuf.zbp);
-        st.zpsm = ctx.zbuf.psm;
-        st.zmask = ctx.zbuf.zmask ? 1u : 0u;
-        st.test = static_cast<uint32_t>(ctx.test);
-        st.asel = ctx.alpha & 3u;
-        st.bsel = (ctx.alpha >> 2) & 3u;
-        st.csel = (ctx.alpha >> 4) & 3u;
-        st.dsel = (ctx.alpha >> 6) & 3u;
-        st.fix = static_cast<uint32_t>((ctx.alpha >> 32) & 0xFFu);
-        st.abe = state.prim.abe ? 1u : 0u;
-        st.pabe = state.pabe ? 1u : 0u;
-        st.fba = ((ctx.fba & 1u) != 0u && ctx.frame.psm != GS_PSM_CT24) ? 1u : 0u;
-        // Bit 1: COLCLAMP off, the blend's result wraps modulo 256 (SotC's
-        // shadow volumes count +1 / 255 per face that way).
-        if ((state.colclamp & 1u) == 0u && state.prim.abe)
-            st.fba |= 2u;
-        st.fge = state.prim.fge ? 1u : 0u;
-        st.fogR = state.fogR;
-        st.fogG = state.fogG;
-        st.fogB = state.fogB;
-        st.iip = state.prim.iip ? 1u : 0u;
-        st.tme = state.prim.tme ? 1u : 0u;
-        st.fst = state.prim.fst ? 1u : 0u;
-        st.linear = state.linearFilter ? 1u : 0u;
-        st.tbp0 = ctx.tex0.tbp0;
-        st.tbw = ctx.tex0.tbw;
-        st.tpsm = ctx.tex0.psm;
-        st.texW = state.textureWidth;
-        st.texH = state.textureHeight;
-        st.tcc = ctx.tex0.tcc;
-        st.tfx = ctx.tex0.tfx;
-        st.cpsm = ctx.tex0.cpsm;
-        st.csm = ctx.tex0.csm;
-        st.csa = ctx.tex0.csa;
-        st.wrapU = static_cast<uint32_t>(ctx.clamp & 0x3u);
-        st.wrapV = static_cast<uint32_t>((ctx.clamp >> 2) & 0x3u);
-        st.minU = static_cast<uint32_t>((ctx.clamp >> 4) & 0x3FFu);
-        st.maxU = static_cast<uint32_t>((ctx.clamp >> 14) & 0x3FFu);
-        st.minV = static_cast<uint32_t>((ctx.clamp >> 24) & 0x3FFu);
-        st.maxV = static_cast<uint32_t>((ctx.clamp >> 34) & 0x3FFu);
-        st.ta0 = state.texa.ta0;
-        st.aem = state.texa.aem ? 1u : 0u;
-        st.ta1 = state.texa.ta1;
-        st.clut = clutIndex;
-        return st;
-    }
-}
-
-void GSCpuBackend::rasterizePendingGpu()
-{
-    static const bool verify = std::getenv("PS2X_GS_GPU_VERIFY") != nullptr;
-    std::vector<uint8_t> before, gpuResult;
-    if (verify)
-        before.assign(m_vram, m_vram + m_vramSize);
-
-    std::vector<uint16_t> cluts;
-    cluts.reserve(m_clutVersions.size() * 512u);
-    for (const auto &version : m_clutVersions)
-        cluts.insert(cluts.end(), version.begin(), version.end());
-
-    std::vector<GSGpuPrim> prims;
-    std::vector<uint64_t> keys;
-    std::vector<GSGpuState> states;
-    prims.reserve(m_pending.size());
-    keys.reserve(m_pending.size());
-    auto submit = [&]
-    {
-        if (!prims.empty())
-            m_gpu->draw(prims.data(), keys.data(), prims.size(), states.data(), states.size(), cluts.data(), m_clutVersions.size(),
-                        m_gpuFeedbackRange.first, m_gpuFeedbackRange.second);
-        prims.clear();
-        keys.clear();
-        states.clear();
-    };
-    m_textureDirectRead = true;
-    for (uint32_t index = 0; index < m_pending.size(); ++index)
-    {
-        const GSPrimitiveBatch &batch = m_pending[index];
-        if (!gpuCanDraw(batch))
-        {
-            // Lines, points and unusual formats: CPU, in order.
-            submit();
-            gpuWaitIdle();
-            t_clut = m_clutVersions[m_pendingClut[index]].data();
-            DrawPrimitive(batch);
-            t_clut = nullptr;
-            continue;
-        }
-        GSGpuPrim prim;
-        const bool sprite = batch.state.prim.type == GS_PRIM_SPRITE;
-        if (!(sprite ? setupGpuSprite(batch, prim) : setupGpuTriangle(batch, prim)))
-            continue;
-        const GSGpuState state = makeGpuState(batch.state, m_pendingClut[index]);
-        if (states.empty() || std::memcmp(&states.back(), &state, sizeof(state)) != 0)
-            states.push_back(state);
-        prim.state = static_cast<uint32_t>(states.size() - 1u);
-        prims.push_back(prim);
-        keys.push_back(GSMetalRaster::pipelineKey(prim.kind, state));
-    }
-    submit();
-
-    if (verify)
-    {
-        gpuWaitIdle();
-        // PS2X_GS_GPU_VERIFY=1: redo the batch on the CPU from the same memory
-        // and report the bytes that differ. The CPU result is kept.
-        gpuResult.assign(m_vram, m_vram + m_vramSize);
-        std::memcpy(m_vram, before.data(), m_vramSize);
-        rasterizePendingCpu();
-        static uint64_t batches = 0, mismatchedBatches = 0, mismatchedBytes = 0;
-        ++batches;
-        size_t diff = 0, first = SIZE_MAX;
-        for (size_t i = 0; i < m_vramSize; ++i)
-        {
-            if (gpuResult[i] != m_vram[i])
-            {
-                if (first == SIZE_MAX)
-                    first = i;
-                ++diff;
-            }
-        }
-        if (diff)
-        {
-            ++mismatchedBatches;
-            mismatchedBytes += diff;
-            if (mismatchedBatches <= 20)
-                std::fprintf(stderr, "[gs:gpu-verify] batch %llu (%zu draws): %zu bytes differ, first at 0x%zx (cpu %02x gpu %02x)\n",
-                             (unsigned long long)batches, m_pending.size(), diff, first, m_vram[first], gpuResult[first]);
-            if (mismatchedBatches <= 3)
-            {
-                const size_t at = first & ~size_t(15);
-                for (const auto &[name, data] : {std::pair<const char *, const uint8_t *>{"before", before.data()},
-                                                 {"cpu   ", m_vram}, {"gpu   ", gpuResult.data()}})
-                {
-                    std::fprintf(stderr, "[gs:gpu-verify]   %s %06zx:", name, at);
-                    for (size_t i = 0; i < 16; ++i)
-                        std::fprintf(stderr, " %02x", data[at + i]);
-                    std::fprintf(stderr, "\n");
-                }
-                for (const GSPrimitiveBatch &batch : m_pending)
-                {
-                    const auto &c = batch.state.context;
-                    std::fprintf(stderr, "[gs:gpu-verify]   type=%u gpu=%d fbp=%u fbw=%u fpsm=0x%x zbp=%u zpsm=0x%x zmask=%u test=0x%llx tme=%u fst=%u tbp=%u tbw=%u tpsm=0x%x tfx=%u tcc=%u lin=%d abe=%u alpha=0x%llx fge=%u iip=%u fbmsk=0x%x xy0=(%.1f,%.1f) xy1=(%.1f,%.1f) uv0=(%u,%u) stq0=(%g,%g,%g) rgba1=(%u,%u,%u,%u)\n",
-                                 (unsigned)batch.state.prim.type, (int)gpuCanDraw(batch), c.frame.fbp, c.frame.fbw, c.frame.psm, c.zbuf.zbp, c.zbuf.psm, (unsigned)c.zbuf.zmask,
-                                 (unsigned long long)c.test, (unsigned)batch.state.prim.tme, (unsigned)batch.state.prim.fst, c.tex0.tbp0, (unsigned)c.tex0.tbw, (unsigned)c.tex0.psm,
-                                 (unsigned)c.tex0.tfx, (unsigned)c.tex0.tcc, (int)batch.state.linearFilter, (unsigned)batch.state.prim.abe, (unsigned long long)c.alpha,
-                                 (unsigned)batch.state.prim.fge, (unsigned)batch.state.prim.iip, c.frame.fbmsk,
-                                 batch.vertices[0].x - (c.xyoffset.ofx >> 4), batch.vertices[0].y - (c.xyoffset.ofy >> 4),
-                                 batch.vertices[1].x - (c.xyoffset.ofx >> 4), batch.vertices[1].y - (c.xyoffset.ofy >> 4),
-                                 batch.vertices[0].u, batch.vertices[0].v, batch.vertices[0].s, batch.vertices[0].t, batch.vertices[0].q,
-                                 batch.vertices[1].r, batch.vertices[1].g, batch.vertices[1].b, batch.vertices[1].a);
-                    std::fprintf(stderr, "[gs:gpu-verify]     z=(%.3f, %.3f, %.3f) xy2=(%.4f,%.4f)\n", batch.vertices[0].z, batch.vertices[1].z, batch.vertices[2].z,
-                                 batch.vertices[2].x - (c.xyoffset.ofx >> 4), batch.vertices[2].y - (c.xyoffset.ofy >> 4));
-                }
-            }
-        }
-        if ((batches % 2000u) == 0u)
-            std::fprintf(stderr, "[gs:gpu-verify] %llu batches, %llu differ (%llu bytes)\n",
-                         (unsigned long long)batches, (unsigned long long)mismatchedBatches, (unsigned long long)mismatchedBytes);
-    }
-}
-#endif
 
 size_t GSCpuBackend::TextureKeyHash::operator()(const TextureKey &key) const noexcept
 {
@@ -1844,39 +1443,9 @@ const GSCpuBackend::DecodedTexture *GSCpuBackend::decodedTexture(const GSDrawSta
     return &entry;
 }
 
-void GSCpuBackend::addInflightRange(const std::pair<uint64_t, uint64_t> &range)
-{
-    if (range.second <= range.first)
-        return;
-    for (auto &existing : m_gpuInflight)
-    {
-        if (range.first <= existing.second && existing.first <= range.second)
-        {
-            existing.first = std::min(existing.first, range.first);
-            existing.second = std::max(existing.second, range.second);
-            return;
-        }
-    }
-    m_gpuInflight.push_back(range);
-}
-
-void GSCpuBackend::gpuWaitIdle()
-{
-#ifdef PS2X_HAVE_METAL
-    if (m_gpu)
-        m_gpu->waitIdle();
-#endif
-    m_gpuInflight.clear();
-}
-
 bool GSCpuBackend::pendingTouches(uint64_t begin, uint64_t end) const
 {
-    if (end <= begin)
-        return false;
-    for (const auto &range : m_gpuInflight)
-        if (begin < range.second && range.first < end)
-            return true;
-    if (m_pending.empty())
+    if (end <= begin || m_pending.empty())
         return false;
     for (const auto &range : m_pendingWrites)
         if (begin < range.second && range.first < end)
@@ -1924,16 +1493,10 @@ void GSCpuBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
     // The CLUT is read from VRAM now: queued draws must not still be writing it.
     uint64_t cb = 0, ce = 0;
     bufferRange(tex0.cbp * 256u, 64u * std::max<uint32_t>(1u, texclut.cbw), 16u + texclut.cov, tex0.cpsm, cb, ce);
-    for (const auto *list : {&m_pendingWrites, &m_gpuInflight})
-    {
-        const bool touched = std::any_of(list->begin(), list->end(), [&](const auto &range)
-                                         { return cb < range.second && range.first < ce; });
-        if (touched)
-        {
-            flushPendingUnlocked("LoadClut");
-            break;
-        }
-    }
+    const bool touched = std::any_of(m_pendingWrites.begin(), m_pendingWrites.end(), [&](const auto &range)
+                                     { return cb < range.second && range.first < ce; });
+    if (touched)
+        flushPendingUnlocked("LoadClut");
     LoadClutUnlocked(tex0, texclut);
     m_clutChanged = true;
 }
@@ -3119,7 +2682,7 @@ void GSCpuBackend::DrawLine(const GSPrimitiveBatch &batch)
 
 bool GSCpuBackend::uploadTouchesPending(const GSTransferCommand &command) const
 {
-    if (m_pending.empty() && m_gpuInflight.empty())
+    if (m_pending.empty())
         return false;
     // Only the pages under the destination rectangle matter.
     uint32_t pw = 0, ph = 0;
@@ -3152,7 +2715,7 @@ void GSCpuBackend::BeginTransfer(const GSTransferCommand &command)
         // dsax can push the rectangle one page column further.
         m_uploadRange.second += 8192u;
         if (uploadTouchesPending(command))
-            flushPendingUnlocked(gpuUploads() ? "GpuUpload" : "BeginTransfer");
+            flushPendingUnlocked("BeginTransfer");
     }
     else
     {
@@ -3178,114 +2741,9 @@ void GSCpuBackend::BeginTransfer(const GSTransferCommand &command)
         PerformLocalToHostTransfer();
 }
 
-bool GSCpuBackend::gpuUploads() const
-{
-#ifdef PS2X_HAVE_METAL
-    static const bool disabled = std::getenv("PS2X_GS_GPU_UPLOAD") && std::atoi(std::getenv("PS2X_GS_GPU_UPLOAD")) == 0;
-    return m_gpu && !disabled && !std::getenv("PS2X_GS_GPU_VERIFY");
-#else
-    return false;
-#endif
-}
-
-#ifdef PS2X_HAVE_METAL
-// An IMAGE piece over memory the GPU still uses: write it on the GPU, after
-// the queued work, instead of waiting for the GPU and writing it here.
-bool GSCpuBackend::uploadImageOnGpu(const uint8_t *data, uint32_t sizeBytes)
-{
-    if (!gpuUploads() || !data || sizeBytes == 0u || m_transferState.direction != 0u ||
-        m_transfer.trxreg.rrw == 0u || m_transfer.trxreg.rrh == 0u || m_transferState.totalPixels == 0u)
-        return false;
-    uint32_t pixels = 0u;
-    switch (m_transfer.bitbltbuf.dpsm)
-    {
-    case GS_PSM_CT32: case GS_PSM_Z32:
-        if (sizeBytes % 4u)
-            return false;
-        pixels = sizeBytes / 4u;
-        break;
-    case GS_PSM_CT24: case GS_PSM_Z24:
-        if (sizeBytes % 3u)
-            return false;
-        pixels = sizeBytes / 3u;
-        break;
-    case GS_PSM_CT16: case GS_PSM_CT16S: case GS_PSM_Z16: case GS_PSM_Z16S:
-        if (sizeBytes % 2u)
-            return false;
-        pixels = sizeBytes / 2u;
-        break;
-    case GS_PSM_T8: case GS_PSM_T8H:
-        pixels = sizeBytes;
-        break;
-    case GS_PSM_T4: case GS_PSM_T4HL: case GS_PSM_T4HH:
-        if (m_transferState.copiedPixels % 2u)
-            return false;
-        pixels = sizeBytes * 2u;
-        break;
-    default:
-        return false;
-    }
-    if (!uploadTouchesPending(m_transfer))
-        return false; // nothing to order against: the CPU writes it directly
-    pixels = std::min(pixels, m_transferState.totalPixels - m_transferState.copiedPixels);
-    flushPendingUnlocked("GpuUpload");
-    const GSGpuUpload upload{m_transfer.bitbltbuf.dbp, std::max<uint32_t>(m_transfer.bitbltbuf.dbw, 1u),
-                             m_transfer.bitbltbuf.dpsm, m_transfer.trxpos.dsax, m_transfer.trxpos.dsay,
-                             m_transfer.trxreg.rrw, m_transferState.copiedPixels, pixels};
-    m_gpu->upload(upload, data, sizeBytes);
-    // PS2X_GS_GPU_UPLOAD_VERIFY=1: redo the piece on the CPU and compare.
-    static const bool verify = std::getenv("PS2X_GS_GPU_UPLOAD_VERIFY") != nullptr;
-    if (verify)
-    {
-        static uint64_t checked = 0, bad = 0;
-        gpuWaitIdle();
-        std::vector<uint8_t> gpuResult(m_vram, m_vram + m_vramSize);
-        const GSTransferSnapshot saved = m_transferState;
-        // Undo the GPU write by replaying the CPU writer over a copy taken
-        // before it is not possible here; compare against a CPU write into
-        // the GPU result instead (idempotent when both agree).
-        uploadImageCpuUnlocked(data, sizeBytes);
-        m_transferState = saved;
-        ++checked;
-        size_t diff = 0, first = SIZE_MAX;
-        for (size_t i = 0; i < m_vramSize; ++i)
-            if (gpuResult[i] != m_vram[i])
-            {
-                if (first == SIZE_MAX)
-                    first = i;
-                ++diff;
-            }
-        if (diff && ++bad <= 20)
-            std::fprintf(stderr, "[gs:upload-verify] psm=0x%x dbp=%u dbw=%u xy=(%u,%u) rrw=%u first=%u count=%u: %zu bytes differ, first at 0x%zx (cpu %02x gpu %02x)\n",
-                         upload.dpsm, upload.dbp, upload.dbw, upload.dsax, upload.dsay, upload.rrw, upload.firstPixel, upload.count,
-                         diff, first, m_vram[first], gpuResult[first]);
-        if ((checked & 1023u) == 0u)
-            std::fprintf(stderr, "[gs:upload-verify] %llu pieces, %llu differ\n", (unsigned long long)checked, (unsigned long long)bad);
-    }
-    addInflightRange(m_uploadRange);
-    markVramWritten(m_uploadRange.first, m_uploadRange.second);
-    m_transferState.copiedPixels += pixels;
-    if (m_transferState.copiedPixels >= m_transferState.totalPixels)
-    {
-        m_transferState.direction = 3u;
-        m_transferState.totalPixels = 0u;
-    }
-    else
-    {
-        m_transferState.x = m_transfer.trxpos.dsax + (m_transferState.copiedPixels % m_transfer.trxreg.rrw);
-        m_transferState.y = m_transfer.trxpos.dsay + (m_transferState.copiedPixels / m_transfer.trxreg.rrw);
-    }
-    return true;
-}
-#endif
-
 void GSCpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
-#ifdef PS2X_HAVE_METAL
-    if (uploadImageOnGpu(data, sizeBytes))
-        return;
-#endif
     // Draws can be queued between the pieces of an IMAGE transfer.
     if (uploadTouchesPending(m_transfer))
         flushPendingUnlocked("UploadImage");

@@ -3,7 +3,6 @@
 
 #include "runtime/gs/gs_backend.h"
 #include "runtime/gs/gs_texture_page_cache.h"
-#include "runtime/gs/gs_metal_raster.h"
 
 #include <array>
 #include <memory>
@@ -15,8 +14,6 @@ class GSCpuBackend final : public GSRasterBackend
 {
 public:
     GSCpuBackend();
-    // The backend of the live GS memory may rasterize on the GPU (PS2X_GS_GPU=1).
-    void allowGpu() { m_gpuAllowed = true; }
 
     void Initialize(uint8_t *vram, uint32_t vramSize) override;
     void Reset() override;
@@ -162,11 +159,6 @@ private:
     const DecodedTexture *decodedTexture(const GSDrawState &state, const uint16_t *clut, uint64_t clutHash);
     void markVramWritten(uint64_t begin, uint64_t end);
     std::pair<uint64_t, uint64_t> m_uploadRange{0u, 0u}; // destination of the host->local transfer
-    // True when queued draws read or write VRAM bytes in [begin, end).
-    void addInflightRange(const std::pair<uint64_t, uint64_t> &range);
-    void gpuWaitIdle();
-    bool gpuUploads() const;
-    bool uploadImageOnGpu(const uint8_t *data, uint32_t sizeBytes);
     void uploadImageCpuUnlocked(const uint8_t *data, uint32_t sizeBytes);
     void uploadImageCpuWrite(const uint8_t *data, uint32_t sizeBytes);
     bool pendingTouches(uint64_t begin, uint64_t end) const;
@@ -176,20 +168,12 @@ private:
     // being submitted (set by UpdateTextureReadMode).
     std::vector<std::pair<uint64_t, uint64_t>> m_pendingWrites;
     std::vector<std::pair<uint64_t, uint64_t>> m_pendingReads;
-    // GS memory touched by draws handed to the GPU without waiting for them
-    // (ordering-only flushes); cleared when the GPU is idle.
-    std::vector<std::pair<uint64_t, uint64_t>> m_gpuInflight;
-    // Texture memory the GPU draw being submitted samples from a pre-draw copy.
-    std::pair<uint64_t, uint64_t> m_gpuFeedbackRange{0u, 0u};
     std::pair<uint64_t, uint64_t> m_lastTexRange{0u, 0u};
     std::pair<uint64_t, uint64_t> m_lastFrameRange{0u, 0u};
     std::pair<uint64_t, uint64_t> m_lastZRange{0u, 0u};
     void flushPendingUnlocked(const char *reason = "other");
     void rasterizePendingCpu();
-    void rasterizePendingGpu();
     void finishPendingUnlocked();
-    std::unique_ptr<GSMetalRaster> m_gpu; // PS2X_GS_GPU=1 (macOS)
-    bool m_gpuAllowed = false;
     std::vector<uint8_t> m_uploadBefore; // pages an upload touches, before it
     void UpdateTextureReadMode(const GSPrimitiveBatch &batch);
     void drawRowsParallel(int y0, int y1, int rowWidth, const std::function<void(int)> &drawRow);

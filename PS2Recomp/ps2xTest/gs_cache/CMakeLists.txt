@@ -17,11 +17,6 @@ add_library(ps2_gs_cache_backend_under_test STATIC
     "${PS2_GS_RUNTIME_DIR}/src/lib/gs/gs_frontend.cpp"
     "${PS2_GS_RUNTIME_DIR}/src/lib/gs/ps2_gs_memory.cpp"
 )
-if(NOT APPLE)
-    target_sources(ps2_gs_cache_backend_under_test PRIVATE
-        "${PS2_GS_RUNTIME_DIR}/src/lib/gs/gs_metal_raster_stub.cpp"
-    )
-endif()
 target_include_directories(ps2_gs_cache_backend_under_test PUBLIC
     "${PS2_GS_RUNTIME_DIR}/include"
     "${PS2_GS_RUNTIME_DIR}/../ps2xIOP/include"

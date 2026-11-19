@@ -137,7 +137,6 @@ namespace
         if (hardware)
             return std::make_unique<GSAsyncBackend>(std::make_unique<GSHwBackend>());
         auto backend = std::make_unique<GSCpuBackend>();
-        backend->allowGpu();
         if (synchronous)
             return backend;
         return std::make_unique<GSAsyncBackend>(std::move(backend));
