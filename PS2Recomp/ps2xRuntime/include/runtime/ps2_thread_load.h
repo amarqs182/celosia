@@ -7,6 +7,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include "runtime/ps2_a9.h"
 
 namespace ps2_load
 {
@@ -55,11 +56,15 @@ namespace ps2_load
     inline std::atomic<int> gameSiteNow{-1};
     inline std::atomic<uint32_t> gameZone{0};
     inline std::atomic<int> gameThreadUid{0};
+    // Round A9 sweep: gameZone's only reader is the sampling profiler (SOTC_PROF129, which sets this when it installs).
+    // With nothing reading it the zones are left alone under ps2_a9::on(kZone).
+    inline bool g_zoneReader = false;
+    inline bool zonesWanted() { return g_zoneReader || !ps2_a9::on(ps2_a9::kZone); }
     struct GameZone
     {
         bool on;
         uint32_t prev = 0;
-        explicit GameZone(uint32_t zone) : on(t_slot == kGame)
+        explicit GameZone(uint32_t zone) : on(zonesWanted() && t_slot == kGame)
         {
             if (on)
             {

@@ -536,6 +536,17 @@ private:
     std::unordered_map<int, GuestThread> m_threads;
     int m_threadCacheId = -1;                // thread(): the last one found
     GuestThread *m_threadCache = nullptr;
+    // Round A9 sweep (ps2_a9::on(kCache)): thread() keeps the last 8 found, by id & 7 (wakeupThread of another thread
+    // no longer evicts the running one); every erase / clear forgets them all, as the single entry.
+    std::array<int, 8> m_threadWayId{-1, -1, -1, -1, -1, -1, -1, -1};
+    std::array<GuestThread *, 8> m_threadWay{};
+    void forgetThreadCache()
+    {
+        m_threadCacheId = -1;
+        m_threadCache = nullptr;
+        m_threadWayId.fill(-1);
+        m_threadWay.fill(nullptr);
+    }
     // Shared VU0 register state (see EeScheduler::run()).
     struct Vu0OwnerKey
     {
@@ -623,6 +634,17 @@ private:
     uint32_t m_gsVSyncCallbackGp = 0;
     uint32_t m_gsVSyncCallbackSp = 0;
     std::unordered_map<uint64_t, uint32_t> m_invocationStackTops;
+    // Round A9 sweep (ps2_a9::on(kCache)): invocationStackTop's answers by key, direct-mapped (16).
+    struct StackTopWay
+    {
+        uint64_t key = ~0ull;
+        uint32_t top = 0u;
+    };
+    std::array<StackTopWay, 16> m_stackTopWay{};
+    // Round A9 sweep: syncCyclesToHostClock's lag cap (PS2X_HOST_CLOCK_MAX_LAG), read at its first call (0: not yet).
+    uint64_t m_maxLagA9 = 0u;
+    // Round A9 sweep: wakeupThread's PS2X_SELF_WAKE, read at its first call (-1: not yet).
+    int8_t m_selfWakeA9 = -1;
     std::atomic<uint64_t> m_nextDeadlineCycle{0};
 
     mutable std::mutex m_snapshotMutex;
