@@ -47,9 +47,6 @@ extern "C" unsigned int _pthread_stack_default_user; // ps2_vita_runtime.cpp
 
 namespace native_renderer::detail
 {
-#if !defined(PS2X_HAVE_METAL)
-    Backend *createMetalBackend() { return nullptr; }
-#endif
 #if !defined(PS2X_NATIVE_GL)
     Backend *createGlBackend(std::function<void()>) { return nullptr; }
 #endif
@@ -1190,74 +1187,6 @@ namespace native_renderer
 
 namespace
 {
-    // SOTC_NATIVE_GL=check (macOS): Metal draws what is shown and OpenGL the
-    // same frames alongside; every 60 frames the two pictures are compared
-    // ([native:check] mean difference per channel, and the share of pixels
-    // off by more than 8), the GL one written next to it (PS2X_NATIVE_CHECK_DIR).
-    class CheckBackend final : public native_renderer::detail::Backend
-    {
-    public:
-        CheckBackend(native_renderer::detail::Backend *shown, native_renderer::detail::Backend *other) : a(shown), b(other) {}
-        bool hasMesh(uint64_t id) override { return a->hasMesh(id) && b->hasMesh(id); }
-        uint64_t meshEvictions() override { return a->meshEvictions() + b->meshEvictions(); }
-        void uploadMesh(uint64_t id, const native_renderer::Vertex *v, uint32_t n, bool f) override { a->uploadMesh(id, v, n, f), b->uploadMesh(id, v, n, f); }
-        void uploadIndexedMesh(uint64_t id, const native_renderer::Vertex *v, uint32_t n, const uint32_t *idx, uint32_t in) override { a->uploadIndexedMesh(id, v, n, idx, in), b->uploadIndexedMesh(id, v, n, idx, in); }
-        bool hasTexture(uint64_t id) override { return a->hasTexture(id) && b->hasTexture(id); }
-        void uploadTexture(uint64_t id, uint32_t w, uint32_t h, const uint8_t *p, uint32_t l) override { a->uploadTexture(id, w, h, p, l), b->uploadTexture(id, w, h, p, l); }
-        void beginFrame() override { a->beginFrame(), b->beginFrame(); }
-        void draw(uint64_t m, const float c[16], const native_renderer::DrawState &s) override { a->draw(m, c, s), b->draw(m, c, s); }
-        void setFog(const native_renderer::Fog &f) override { a->setFog(f), b->setFog(f); }
-        void setBloom(const native_renderer::Bloom &x) override { a->setBloom(x), b->setBloom(x); }
-        void addScreenBlur(const native_renderer::ScreenBlur &x) override { a->addScreenBlur(x), b->addScreenBlur(x); }
-        void setGlowComposite(const native_renderer::GlowComposite &x) override { a->setGlowComposite(x), b->setGlowComposite(x); }
-        void setDepthOfField(const native_renderer::DepthOfField &x) override { a->setDepthOfField(x), b->setDepthOfField(x); }
-        void endFrame(uint32_t w, uint32_t h) override
-        {
-            a->endFrame(w, h);
-            b->endFrame(w, h);
-            b->finishFrames(); // the same frame from both
-            if (++m_frames % 60u != 0u)
-                return;
-            std::vector<uint8_t> x, y;
-            uint32_t xw = 0, xh = 0, yw = 0, yh = 0;
-            if (!a->latestFrame(x, xw, xh) || !b->latestFrame(y, yw, yh) || xw != yw || xh != yh)
-                return;
-            uint64_t sum = 0, off = 0;
-            for (size_t i = 0; i < x.size(); i += 4)
-            {
-                int worst = 0;
-                for (int c = 0; c < 3; ++c)
-                {
-                    const int d = std::abs(static_cast<int>(x[i + c]) - static_cast<int>(y[i + c]));
-                    sum += static_cast<uint64_t>(d);
-                    worst = std::max(worst, d);
-                }
-                off += worst > 8 ? 1u : 0u;
-            }
-            const double pixels = static_cast<double>(x.size() / 4u);
-            std::cerr << "[native:check] frame " << m_frames << " mean " << static_cast<double>(sum) / (pixels * 3.0) << " off>8 " << 100.0 * static_cast<double>(off) / pixels
-                      << "%" << std::endl;
-            if (const char *dir = std::getenv("PS2X_NATIVE_CHECK_DIR"))
-            {
-                for (int k = 0; k < 2; ++k)
-                {
-                    const std::string path = std::string(dir) + "/" + (k ? "gl_" : "metal_") + std::to_string(m_frames) + ".rgba";
-                    if (FILE *f = std::fopen(path.c_str(), "wb"))
-                    {
-                        const auto &p = k ? y : x;
-                        std::fwrite(p.data(), 1, p.size(), f);
-                        std::fclose(f);
-                    }
-                }
-            }
-        }
-        bool latestFrame(std::vector<uint8_t> &rgba, uint32_t &w, uint32_t &h) override { return a->latestFrame(rgba, w, h); }
-
-    private:
-        native_renderer::detail::Backend *a, *b;
-        uint64_t m_frames = 0;
-    };
-
     native_renderer::detail::Backend *g_backend = nullptr;
     bool g_tried = false;
     std::atomic<bool> g_shown{false};
@@ -1273,13 +1202,12 @@ namespace
         return !gl || std::atoi(gl) != 0;
 #else
         const char *gl = std::getenv("SOTC_NATIVE_GL");
-        return gl && (std::atoi(gl) != 0 || std::string(gl) == "check");
+        return gl && std::atoi(gl) != 0;
 #endif
     }
 
-    // OpenGL: created by the first call after available() (the Vita: by
-    // setGlContext, on the main thread); the context is made current on the
-    // backend's render thread, which makes every GL call from then on.
+    // OpenGL: created by the first call after available(); the context is made
+    // current on the backend's render thread, which makes every GL call from then on.
     native_renderer::detail::Backend *backend()
     {
         if (!g_tried)
@@ -1291,15 +1219,7 @@ namespace
                 g_backend = native_renderer::detail::createGlBackend(g_glMakeCurrent);
                 ps2_stats::bootMark("native renderer: built");
                 std::cerr << "[native] OpenGL renderer " << (g_backend ? "up" : "failed") << std::endl;
-                const char *mode = std::getenv("SOTC_NATIVE_GL");
-                if (g_backend && mode && std::string(mode) == "check")
-                {
-                    if (auto *metal = native_renderer::detail::createMetalBackend())
-                        g_backend = new CheckBackend(metal, g_backend);
-                }
             }
-            if (!g_backend && !wantGl())
-                g_backend = native_renderer::detail::createMetalBackend();
         }
         return g_backend;
     }
@@ -1314,7 +1234,7 @@ namespace native_renderer::detail
 
 namespace native_renderer
 {
-    const char *backendName() { return wantGl() ? "OpenGL" : "Metal"; }
+    const char *backendName() { return wantGl() ? "OpenGL" : "None"; }
     bool inEmulator() { return detail::g_inEmulator.load(std::memory_order_relaxed); }
     bool tuningApplies(const TuningItem &item) { return (item.backends & (wantGl() ? 2u : 1u)) != 0u; }
 

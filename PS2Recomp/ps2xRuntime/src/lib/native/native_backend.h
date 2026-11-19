@@ -93,8 +93,6 @@ namespace native_renderer::detail
         std::vector<uint32_t> m_indexScratch;
     };
 
-    // nullptr when the platform or the device does not have it.
-    Backend *createMetalBackend();
     // makeCurrent: makes the OpenGL context current (on the thread that will draw).
     Backend *createGlBackend(std::function<void()> makeCurrent);
     // The host's present hook (native_renderer::setPresentHook), for the GL backend.

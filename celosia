@@ -266,58 +266,6 @@ cmd_clean() {
     rm -rf "$BUILD"
 }
 
-# PS Vita build: ./celosia vita -> build/vita/ps2xRuntime/ps2EntryRunner.vpk
-# Install the VPK, then copy disc/ to ux0:data/celosia/disc/.
-cmd_vita() {
-    local VITAGL_REV=464876a
-    export VITASDK=${VITASDK:-$HOME/vitasdk}
-    [ -f "$VITASDK/share/vita.toolchain.cmake" ] || die "VitaSDK not found (set VITASDK)"
-    [ -n "$(find "$RUNNER_DIR" -maxdepth 1 -name '*.cpp' -print -quit 2>/dev/null)" ] || die "no recompiled code yet (run: ./celosia setup)"
-    local dir=$BUILD/vita
-    # vitaGL built for this port: Z buffers kept across scenes (the GPU GS
-    # renderer switches render targets mid-frame), at a pinned revision with
-    # our patches. Rebuilt when the revision or the patches change.
-    # HAVE_VERTEX_LAYOUT_CACHE: a draw with the program and vertex layout of
-    # a recent one skips the attribute set-up and the vertex program lookup
-    # (round 13: ~6% of the render thread's time, every draw went that way).
-    # HAVE_SHADER_CACHE: each compiled shader kept on ux0 (data/shader_cache/
-    # CELO00001), keyed by its source's hash: the next boots skip libshacccg
-    # (round 19: compiling the GS's and the native renderer's shaders was
-    # ~20 s of calibrated Vita3K's boot before the first picture). The VPK
-    # also carries a seed of that cache (build/vita-shader-seed, made by
-    # SEED=1 tools/vita3k.sh), so the first boot skips it too.
-    local vgl=$BUILD/vitagl-src
-    local vglPatch=$ROOT/PS2Recomp/ps2xRuntime/platform/vita/vitagl/celosia.patch
-    local vglStamp="$VITAGL_REV sharklog nosplash vlcache shadercache $(shasum "$vglPatch" | cut -d' ' -f1)"
-    if [ ! -f "$vgl/libvitaGL.a" ] || [ "$(cat "$vgl/.celosia-stamp" 2>/dev/null)" != "$vglStamp" ]; then
-        say "building vitaGL ($VITAGL_REV)"
-        [ -d "$vgl/.git" ] || git clone -q https://github.com/Rinnegatamante/vitaGL "$vgl" || die "could not clone vitaGL"
-        git -C "$vgl" checkout -q -f "$VITAGL_REV" || die "vitaGL revision $VITAGL_REV not found"
-        git -C "$vgl" apply "$vglPatch" || die "could not apply $vglPatch"
-        PATH="$VITASDK/bin:$PATH" make -C "$vgl" clean >/dev/null 2>&1
-        PATH="$VITASDK/bin:$PATH" make -C "$vgl" -j "$JOBS" NO_DEBUG=1 STORE_DEPTH_STENCIL=1 HAVE_SHARK_LOG=1 NO_SPLASHSCREEN=1 HAVE_VERTEX_LAYOUT_CACHE=1 HAVE_SHADER_CACHE=1 >"$LOGS/vitagl-build.log" 2>&1 ||
-            { tail -20 "$LOGS/vitagl-build.log"; die "vitaGL build failed (log: logs/vitagl-build.log)"; }
-        echo "$vglStamp" >"$vgl/.celosia-stamp"
-    fi
-    say "configuring the Vita build in $dir"
-    cmake -S "$ROOT/PS2Recomp" -B "$dir" -G Ninja \
-        -DCMAKE_TOOLCHAIN_FILE="$VITASDK/share/vita.toolchain.cmake" \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DPS2X_BUILD_RECOMP=OFF -DPS2X_BUILD_STUDIO=OFF -DPS2X_BUILD_TEST=OFF -DPS2X_BUILD_ANALYZER=OFF \
-        -DPS2X_ENABLE_AGRESSIVE_LOGS=OFF -DPS2X_ENABLE_FFMPEG=OFF -DPS2X_ENABLE_DEBUG_UI=OFF \
-        -DPS2X_ENABLE_RUNNER_PCH=OFF \
-        "-DPS2X_RUNNER_DIRS=$RUNNER_DIR;$VU1REC_DIR;$ROOT/game/overrides" \
-        "-DPS2X_VITA_APP_NAME=Shadow of the Colossus" -DPS2X_VITA_TITLEID=CELO00001 \
-        -DPS2X_DEFAULT_BOOT_ELF=ux0:data/celosia/disc/$BOOT \
-        "-DPS2X_VITA_VITAGL_DIR=$vgl" \
-        ${CELOSIA_VITA_CMAKE_ARGS:-} >"$LOGS/vita-configure.log" 2>&1 ||
-        { tail -30 "$LOGS/vita-configure.log"; die "Vita configure failed (log: logs/vita-configure.log)"; }
-    say "building the Vita VPK (this takes a while)"
-    cmake --build "$dir" --target ps2EntryRunner.vpk-vpk -j "$JOBS" >"$LOGS/vita-build.log" 2>&1 ||
-        { grep -m 20 -E "error|Error" "$LOGS/vita-build.log" || tail -30 "$LOGS/vita-build.log"; die "Vita build failed (log: logs/vita-build.log)"; }
-    say "VPK: $dir/ps2xRuntime/ps2EntryRunner.vpk"
-}
-
 cmd_help() {
     sed -n '2,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     cat <<'EOF'
@@ -330,7 +278,6 @@ Commands:
   recompile            relink modules + recompile game code + rebuild
   build                rebuild the runner (after editing PS2Recomp sources)
   autotest [s] [int]   scripted run with periodic screenshots in shots/run
-  vita                 build the PS Vita VPK (build/vita/ps2xRuntime/ps2EntryRunner.vpk)
   clean                delete the build directory
 EOF
 }
@@ -344,7 +291,6 @@ vu1) cmd_vu1 ;;
 recompile) cmd_recompile ;;
 build) cmd_build ;;
 autotest) shift; cmd_autotest "$@" ;;
-vita) cmd_vita ;;
 clean) cmd_clean ;;
 help | -h | --help) cmd_help ;;
 *) die "unknown command '$1' (see ./celosia help)" ;;
