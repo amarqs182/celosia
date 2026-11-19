@@ -496,7 +496,7 @@ namespace native_renderer
         // of eight. SOTC_GL_GLOW93=0/1; A/B `glow93`.
         // blur93: console A/B 2026-11-06 busy -7.6 ms, frame -2.9 ms, the
         // sky glow judged the same on the console: default on on the Vita.
-#if defined(__vita__)
+#if defined(__vita__) || defined(__linux__)
         bool glBlur93 = true;
 #else
         bool glBlur93 = false;
@@ -552,6 +552,11 @@ namespace native_renderer
         bool glGlow94 = true;
         bool glFx94 = true;
         bool glBloom94 = true;
+#elif defined(__linux__)
+        bool glBgCopy94 = true;
+        bool glGlow94 = true;
+        bool glFx94 = false;
+        bool glBloom94 = true;
 #else
         bool glBgCopy94 = false;
         bool glGlow94 = false;
@@ -598,7 +603,7 @@ namespace native_renderer
         // as one premultiplied pass reading both: one full-screen blended
         // pass fewer (the first one's 8-bit store between them left out:
         // within a level). SOTC_GL_GLOW98=0/1; A/B `glow98` (r98all too).
-#if defined(__vita__)
+#if defined(__vita__) || defined(__linux__)
         bool glGlow98 = true;
 #else
         bool glGlow98 = false;
