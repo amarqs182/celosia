@@ -43,6 +43,7 @@
 namespace sotc_native
 {
     bool s4NativeDrawing();
+    bool s4Reflections();
     uint64_t s4Emits();
     uint64_t s4HostDigest();
     void s4NoteCamera(uint32_t context);
@@ -142,12 +143,18 @@ namespace s4disp
         sotc_native::s4BloomRan();
     }
 
-    // reflectionBegin: the ripple clock (0x118c030 += 0.1 x the frame step f12, the code's FPU ops: mul.s then add.s).
+    // reflectionBegin: the ripple clock (0x118c030 += 0.1 x the frame step f12, matching decomp_hot43g's PS2 FPU ops
+    // and early-out when native reflections are disabled).
     constexpr uint32_t kRippleTime = 0x0118C030u;
     void reflectionEffects(const Ram &ram, R5900Context *ctx, std::vector<Effect> &out)
     {
-        const float step = ctx->f[12];
-        const float t = ram.f32(kRippleTime) + step * 0.1f;
+        if (!sotc_native::s4Reflections())
+            return;
+        float kTenth;
+        const uint32_t kTenthBits = 0x3DCCCCCCu;
+        std::memcpy(&kTenth, &kTenthBits, 4);
+        const float delta = FPU_MUL_S(FPU_MOV_S(ctx->f[12]), kTenth);
+        const float t = FPU_ADD_S(ram.f32(kRippleTime), delta);
         uint32_t b;
         std::memcpy(&b, &t, 4);
         out.push_back({kRippleTime, b});
