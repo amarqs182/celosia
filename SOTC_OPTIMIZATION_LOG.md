@@ -318,3 +318,28 @@ Full raw logs, `[gl:texbrk]` / `[gl:texstate]` / `[gl:passprof]` breakdowns, and
 
 - **PR #43 Branch-Cleanup Ports ([`game/overrides/decomp_collision.cpp`](game/overrides/decomp_collision.cpp), [`tools/gamecore_base_check.py`](tools/gamecore_base_check.py)):**
   - Ported opt-in `SOTC_S2WATER=0/1` conservative XZ AABB pre-tests for `waterProbe` and un-filtered `waterSurface` (hardened with `G::plain` bounds checks and `std::getenv` so release builds remain toggleable), plus `tools/gamecore_base_check.py`. Cross-compile verified via `build/linux-aarch64` (`ps2EntryRunner`); `SOTC_DIFFTEST=waterProbe`/`waterSurface` and R36S benchmarks are not yet run, so `SOTC_S2WATER` remains **`0` by default**.
+
+---
+
+## Selective Upstream Ports (PRs #46–#50) & R36S Hardware Verification (`2026-11-18` / `2026-11-19`)
+
+- **Selective upstream integration (`amarqs182/celosia:main` PRs #46–#50):**
+  - **PR #46 (`d0f07ae`):** Correctness fixes (grip ring glow, `keys122` per-lane `s_tmp[2]`, unity build clashes, D1–D5 lifter fixes).
+  - **PR #47 (`e30a565`):** Round S9 (`SOTC_S9RT`, `game/overrides/s9rt.h`) and Round S10 (`SOTC_S10DRAW`).
+  - **PR #48 (`3dc527c`):** Round S4 (`SOTC_S4DISP`, `SOTC_LAYER_MIRROR`, `game/overrides/s4_disp.cpp`, `s4_palette.cpp`, `4f116f2` null-`g_ram` boot fix) and Round S11 (`SOTC_S11RT`, `game/overrides/s11rt.h`, `s11_motion.cpp`).
+  - **PR #49 (`d2a533c`):** Round S2 (`SOTC_S2COLL` replacing draft `SOTC_S2WATER`, `coll_types.h`, `s2_coll.h`, `s2_water.h`, `coll125.h` tagged splits), Round S3 (`SOTC_S3CHARA`, `chara_types.h`, `pose82_math.h`, `s3_chara.cpp`, `decomp_char122.cpp` key splits, using ARMv8 `pose82::normalize`), and ARMv8 subset of A9 sweep (`SOTC_A9SWEEP`: `kHoist | kCache | kZone` in `ps2_a9.h` / `a9sweep.h`, omitting ARMv7-only `kDiv` and `kMemcmp`/`A9_MEMEQ`).
+  - **PR #50 (`9851063`):** Fixed `s4disp::reflectionEffects` (`effects differ 209/212` caught on real R36S `SOTC_S4DISP_CHECK=10`) by guarding with `sotc_native::s4Reflections()` and matching `decomp_hot43g.cpp`'s `0x3DCCCCCCu` + `FPU_MUL_S` / `FPU_ADD_S`.
+- **On-device `CHECK=1` Equivalence Verification (R36S `192.168.2.121`, `build/linux-aarch64` dev build):**
+  - `SOTC_S2COLL_CHECK=1`: `view clips compared with the original 1357, differ 0` (`frame 9758`); `waterProbe` under-end `12984 differ 0`, `waterSurface` crossing `20819 differ 0` (`frame 9749`).
+  - `SOTC_S3CHARA_CHECK=1`: `poses 60001 bones 2244519 differ 0` (`frame 9823`).
+  - `SOTC_S9RT_CHECK=1`: `camera copies 9456, checks 9456, differ 0` (`frame 9600`).
+  - `SOTC_S10DRAW_CHECK=1`: `check 54626 calls (cloth records compared 54626), records differ 0` (`frame 9600`).
+  - `SOTC_S11RT_CHECK=1`: `checks 83313, unwound 2191, differ 0` (`frame 9600`).
+  - `SOTC_A9SWEEP_LOG=1`: `23 hoisted initialisers run; SOTC_A9SWEEP on; parts following the switch 0x19` (`0` `DIFFERS`).
+  - `SOTC_S4DISP_CHECK=10` (post-PR #50): `reflectionBegin: 78 checked (0 incomplete): guest words unknown 0, effects differ 0, host state differ 0, emissions differ 0` (`frame 1800`).
+- **On-device Rotating A/B (`SOTC_AB_PERIOD=120 SOTC_AB_ROTATE=1`, dev build, `from 10200` Shrine gameplay):**
+  - `s2coll,s3chara,a9sweep` (`360 s`, `n=8` matched bins): baseline `all on` `28.88 ms` (`870.25` draws); `a9sweep` `+0.24±0.77 ms` (`game +0.24±0.78`), `s3chara` `+0.23±0.56 ms` (`game +0.24±0.56`), `s2coll` `+0.04±0.80 ms` (`game +0.06±0.80`).
+- **Deployed Release+PGO+Selective LTO+4 GiB Fastmem Binary & Phase C `SotC.sh` Check (`50,340,592` B stripped):**
+  - Installed at `/roms/ports/.SotC_Celosia/ps2sotc_aarch64_pie_sdl` (previous binary backed up at `ps2sotc_aarch64_pie_sdl.bak_pre_pr46_50`). `[fastmem]` logged `16` one-time boot traps and **`0` traps** during gameplay.
+  - Baseline `SotC.sh` flags (`n=25` gameplay summaries, `draws` med `2243`, max `3546`): game `27.50 ms` med / `27.74 ms` mean (`36.20 FPS` med, `36.02 FPS` mean, peak `38.90 FPS`), `render` med `25.80 ms`, `present` med `11.50 ms`; `[wait143]` in heavy Shrine views (`1967–3546` draws) showed `165–223` presents per `600` game hand-overs (`draw 35.97–59.04 ms`, `present 34.23–39.41 ms`).
+  - With Phase C GLES flags enabled (`SOTC_GL_TEXARRAY=1`, `SOTC_GL_PROMOTE_128=1`, `SOTC_GL_STATIC_VAO=1`, `SOTC_GL_DRAW_RANGE=1`, `SOTC_GL_SORT_PROG=1`, now active in `/roms/ports/.SotC_Celosia/SotC.sh` with `SotC.sh.bak_pre_phasec`): `n=28` gameplay summaries (`draws` `991–2565`, med `1967`), game `27.55 ms` med / `27.39 ms` mean (`36.15 FPS` med / `36.42 FPS` mean, peak `37.90 FPS`), `wait 0.00 ms`; `[wait143]` heavy Shrine window (`1967` draws) improved presented frames `165 -> 226` per `600` game hand-overs (`draw 59.04 -> 33.14 ms`), while GPU/VSync `present` (`39.48 ms`) + `draw` still cap host presentation rate (~`14–28` host presents/s in heavy views vs `36+` game FPS) until Phase C `C-3..C-6` shader/copy/alpha-test reductions.
