@@ -485,11 +485,11 @@ layout(location = 3) in vec2 aUV;
 #if TEXARR
 layout(location = 4) in float aTexSlot;
 uniform vec4 uTexSlots[64];
-flat out mediump vec4 vTexMeta; // layer, lodK, lodScale, maxLod
-flat out mediump float vMinLod;
+flat out highp vec4 vTexMeta; // layer, lodK, lodScale, maxLod
+flat out highp float vMinLod;
 #endif
 #if FAST_LOD
-out mediump float vLogW;
+out highp float vLogW;
 #endif
 #if UBO
 layout(std140) uniform FrameBlock {
@@ -673,12 +673,12 @@ in mediump vec4 vColor;
 in highp vec4 vScreen;
 #endif
 #if FAST_LOD
-in mediump float vLogW;
+in highp float vLogW;
 #endif
 #if TEXARR
 uniform mediump sampler2DArray uTexArr;
-flat in mediump vec4 vTexMeta; // layer, lodK, lodScale, maxLod
-flat in mediump float vMinLod;
+flat in highp vec4 vTexMeta; // layer, lodK, lodScale, maxLod
+flat in highp float vMinLod;
 #elif !UNTEX
 uniform sampler2D uTex;
 #endif
@@ -717,9 +717,9 @@ void main()
     mediump float alpha = clamp(vColor.a, 0.0, 1.0);
 #elif TEXARR
 #if FAST_LOD
-    mediump float lod = vTexMeta.w > vMinLod ? clamp(vLogW * vTexMeta.z + vTexMeta.y, vMinLod, vTexMeta.w) : vMinLod;
+    highp float lod = vTexMeta.w > vMinLod ? clamp(vLogW * vTexMeta.z + vTexMeta.y, vMinLod, vTexMeta.w) : vMinLod;
 #else
-    mediump float lod = vTexMeta.w > vMinLod ? clamp(log2(max(depth, 1e-3)) * vTexMeta.z + vTexMeta.y, vMinLod, vTexMeta.w) : vMinLod;
+    highp float lod = vTexMeta.w > vMinLod ? clamp(log2(max(depth, 1e-3)) * vTexMeta.z + vTexMeta.y, vMinLod, vTexMeta.w) : vMinLod;
 #endif
     mediump vec4 t = textureLod(uTexArr, vec3(vUV.xy, vTexMeta.x), lod);
     mediump float alpha = clamp(t.a * 2.0 * vColor.a, 0.0, 1.0);
@@ -728,9 +728,9 @@ void main()
     mediump float alpha = clamp(t.a * 2.0 * vColor.a, 0.0, 1.0);
 #else
 #if FAST_LOD
-    mediump float lod = uFogC.w > 0.0 ? clamp(vLogW * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
+    highp float lod = uFogC.w > 0.0 ? clamp(vLogW * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
 #else
-    mediump float lod = uFogC.w > 0.0 ? clamp(log2(max(depth, 1e-3)) * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
+    highp float lod = uFogC.w > 0.0 ? clamp(log2(max(depth, 1e-3)) * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
 #endif
     mediump vec4 t = textured > 0.5 ? textureLod(uTex, vUV.xy, lod) : vec4(vec3(128.0 / 255.0), 1.0); // untextured: the GS takes the vertex colour as is (255 = white)
     mediump float alpha = clamp(t.a * (textured > 0.5 ? 2.0 : 1.0) * vColor.a, 0.0, 1.0);
@@ -2693,8 +2693,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         bool copyTexArrayRun(size_t, size_t, uint32_t, uint32_t, RunCopy &, const std::vector<uint64_t> &) { return false; }
 #endif
 #if defined(PS2X_NATIVE_GLES)
-        static constexpr uint64_t kMaxIndexedSrcBytes = 48ull * 1024ull * 1024ull;
-        static constexpr uint64_t kMaxIndexedRunBytes = 32ull * 1024ull * 1024ull;
+        static constexpr uint64_t kMaxIndexedSrcBytes = 32ull * 1024ull * 1024ull;
+        static constexpr uint64_t kMaxIndexedRunBytes = 20ull * 1024ull * 1024ull;
 #else
         static constexpr uint64_t kMaxIndexedSrcBytes = 20ull * 1024ull * 1024ull;
         static constexpr uint64_t kMaxIndexedRunBytes = 8ull * 1024ull * 1024ull;
@@ -3111,6 +3111,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         int arenaIndex = 0;
         std::vector<std::pair<const Mesh *, size_t>> instScratch;
         uint64_t arenaFrame = 0;
+        uint64_t mergeBuildUs = 0;
         uint32_t paceSeq = 0; // round 110: the frame release this frame started at (native_renderer::g_paceSeq at its hand-over)
         // [gl:tex] every 300 frames (the Vita's log; SOTC_GL_TEX_LOG elsewhere):
         // draws whose texture is not here (drawn white), uploads, GL errors.
@@ -3688,10 +3689,35 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         static bool arenaSubDataEnabled()
         {
 #if defined(PS2X_NATIVE_GLES)
-            static const bool on = !std::getenv("SOTC_GL_ARENA_SUBDATA") || std::atoi(std::getenv("SOTC_GL_ARENA_SUBDATA")) != 0;
+            static const bool on = std::getenv("SOTC_GL_ARENA_SUBDATA") && std::atoi(std::getenv("SOTC_GL_ARENA_SUBDATA")) != 0;
             return on;
 #else
             return false;
+#endif
+        }
+        static bool dynIdx16Enabled()
+        {
+#if defined(PS2X_NATIVE_GLES)
+            static const bool on = std::getenv("SOTC_GL_DYN_IDX16") && std::atoi(std::getenv("SOTC_GL_DYN_IDX16")) != 0;
+            return on;
+#else
+            return false;
+#endif
+        }
+        static uint64_t mergeBudgetUs()
+        {
+#if defined(PS2X_NATIVE_GLES)
+            static const uint64_t budget = []() -> uint64_t {
+                if (const char *env = std::getenv("SOTC_GL_MERGE_BUDGET_US"))
+                {
+                    const int v = std::atoi(env);
+                    return v > 0 ? static_cast<uint64_t>(v) : 0ull;
+                }
+                return 2000u;
+            }();
+            return budget;
+#else
+            return 0u;
 #endif
         }
         static std::string worldVertexSrc(bool noscreen, bool texarr, bool ubo)
@@ -6578,6 +6604,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         const size_t n = drawOrder.size();
         plan.assign(n, Planned{});
         texArrSlotData.clear();
+        mergeBuildUs = 0;
         // Round 98 (Tuning glNoFog98): the fog's start, when the draws' greatest depths are wanted.
         const float fogFar98 = native_renderer::tuning().glNoFog98 && fog.enabled && fog.width > 0.0f ? fog.start : 0.0f;
         const bool ahead = native_renderer::tuning().glLeanPass; // round 74: the next draws' records and lookups asked for ahead
@@ -7137,6 +7164,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     }
                     if (!copy->vbo && copy->frames >= runFrames)
                     {
+                        const uint64_t budget = mergeBudgetUs();
+                        if (budget == 0u || mergeBuildUs < budget)
+                        {
+                            const uint64_t t0 = native_renderer::nowUs();
                         if (collectIdxDiag)
                             ++idxMergeStats.copyAttempts;
                         bool okCopy = false;
@@ -7152,8 +7183,10 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                         }
                         else
                             okCopy = copyIndexedRun(k, end, total, totalVerts, *copy);
+                        mergeBuildUs += native_renderer::nowUs() - t0;
                         if (!okCopy)
                             copy->frames = 0;
+                        }
                     }
                     if (!copy->vbo || !copy->ibo || copy->count != total || (usedTexArr && (!copy->texArray || !copy->vao)))
                     {
@@ -8826,7 +8859,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 if (!indexBuffers[arenaIndex])
                     glGenBuffers(1, &indexBuffers[arenaIndex]);
                 glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, indexBuffers[arenaIndex]);
-                const bool use16 = idx16Enabled() && arena.size() <= 0xFFFFu;
+                const bool use16 = dynIdx16Enabled() && arena.size() <= 0xFFFFu;
                 indexArena16[arenaIndex] = use16;
                 const void *srcPtr = indexArena.data();
                 size_t bytes = indexArena.size() * sizeof(uint32_t);
