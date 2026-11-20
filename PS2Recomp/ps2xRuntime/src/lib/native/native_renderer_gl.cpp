@@ -3679,7 +3679,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         static bool frustumCullEnabled()
         {
 #if defined(PS2X_NATIVE_GLES)
-            static const bool on = !std::getenv("SOTC_GL_FRUSTUM_CULL") || std::atoi(std::getenv("SOTC_GL_FRUSTUM_CULL")) != 0;
+            static const bool on = std::getenv("SOTC_GL_FRUSTUM_CULL") && std::atoi(std::getenv("SOTC_GL_FRUSTUM_CULL")) != 0;
             return on;
 #else
             return false;
