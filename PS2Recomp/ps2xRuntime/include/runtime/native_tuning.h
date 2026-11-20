@@ -322,7 +322,14 @@ namespace native_renderer
         // destination as it was. The alpha test's second passes, particles
         // and overlays: a discard makes the SGX's tile wait on the program
         // for the pixel's visibility. SOTC_GL_SOFT_CUT=0/1; A/B name `soft75`.
+#if defined(__linux__) && (defined(__aarch64__) || defined(__arm__))
+        // GLES / Mali-G31: GL_LESS in the second alpha-test pass already
+        // rejects pass-1 pixels before fragment shading; keeping softSecond
+        // off avoids ~46 glUseProgram switches and ~370 uniform checks/frame.
+        bool glSoftCut = false;
+#else
         bool glSoftCut = true;
+#endif
         // Round 75: a background (layer 1) draw whose mesh lies wholly past
         // layer 1's near plane (its bounds' least clip w, a margin for the
         // GPU's rounding) is drawn without the near-plane cut (uGuard): no
