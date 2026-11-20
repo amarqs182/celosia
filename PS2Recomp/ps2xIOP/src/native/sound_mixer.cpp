@@ -35,6 +35,7 @@ namespace ps2x::iop::detail
     SoundMixer::SoundMixer()
         : m_ram(kRamWords), m_ring(kRingFrames * 2u)
     {
+        m_decoded.resize(kDecodedEntries);
         reset();
     }
 
@@ -75,6 +76,8 @@ namespace ps2x::iop::detail
     void SoundMixer::reset()
     {
         std::fill(m_ram.begin(), m_ram.end(), uint16_t{0});
+        for (DecodedBlock &d : m_decoded)
+            d.tag = ~0u;
         m_voices.fill({});
         for (Core &core : m_cores)
             core = Core{};
@@ -208,6 +211,7 @@ namespace ps2x::iop::detail
     {
         if (words == 0u)
             return;
+        dropDecoded(first, words); // (whatever the switch says: an A/B window may turn the N2 paths back on)
         for (Core &core : m_cores)
         {
             if (core.zeroSteps == 0u)
@@ -272,8 +276,86 @@ namespace ps2x::iop::detail
         }
     }
 
+    void SoundMixer::dropDecoded(uint32_t first, uint32_t words)
+    {
+        if (words == 0u)
+            return;
+        if (words >= kDecodedEntries * 8u)
+        {
+            for (DecodedBlock &d : m_decoded)
+                d.tag = ~0u;
+            return;
+        }
+        const uint32_t from = first >> 3u, to = (first + words - 1u) >> 3u; // (may run past the end: wraps by the mask)
+        for (uint32_t b = from; b <= to; ++b)
+        {
+            const uint32_t block = b & (kRamWords / 8u - 1u);
+            DecodedBlock &d = m_decoded[block & (kDecodedEntries - 1u)];
+            if (d.tag == block)
+                d.tag = ~0u;
+        }
+    }
+
+    // decodeBlock's results, a block decoded once per history (DecodedBlock).
+    void SoundMixer::decodeBlockN2(Voice &voice)
+    {
+        const uint32_t address = voice.next & (kRamWords - 8u);
+        const uint16_t header = m_ram[address];
+        voice.blockFlags = static_cast<uint8_t>(header >> 8u);
+        voice.blockAddress = address;
+        if (voice.blockFlags & 4u)
+            voice.loop = address;
+        voice.blockIndex = 0;
+        const uint32_t block = address >> 3u;
+        DecodedBlock &d = m_decoded[block & (kDecodedEntries - 1u)];
+        if (d.tag == block && d.prev1 == voice.prev1 && d.prev2 == voice.prev2)
+        {
+            std::memcpy(voice.block.data(), d.samples, sizeof(d.samples));
+            voice.prev1 = d.samples[27];
+            voice.prev2 = d.samples[26];
+            ++m_decodeHits;
+            return;
+        }
+        ++m_decodeMisses;
+        uint32_t shift = header & 0xFu;
+        const uint32_t filter = std::min<uint32_t>((header >> 4u) & 7u, 4u);
+        if (shift > 12u)
+            shift = 9u;
+        const int32_t f0 = kFilter0[filter], f1 = kFilter1[filter];
+        const int32_t in1 = voice.prev1, in2 = voice.prev2;
+        int32_t prev1 = in1, prev2 = in2;
+        int16_t *out = voice.block.data();
+        for (uint32_t w = 0; w < 7u; ++w)
+        {
+            const uint32_t word = m_ram[address + 1u + w];
+            for (uint32_t q = 0; q < 4u; ++q)
+            {
+                int32_t sample = static_cast<int16_t>(static_cast<uint16_t>(((word >> (q * 4u)) & 0xFu) << 12u)) >> shift;
+                sample = clamp16(sample + ((prev1 * f0 + prev2 * f1 + 32) >> 6));
+                prev2 = prev1;
+                prev1 = sample;
+                out[w * 4u + q] = static_cast<int16_t>(sample);
+            }
+        }
+        voice.prev1 = prev1;
+        voice.prev2 = prev2;
+        // Not kept inside a reverb work area (the reverb writes there without writeRam).
+        for (const Core &core : m_cores)
+            if (address + 7u >= core.esa && address <= std::max(core.eea, core.esa))
+                return;
+        d.tag = block;
+        d.prev1 = static_cast<int16_t>(in1);
+        d.prev2 = static_cast<int16_t>(in2);
+        std::memcpy(d.samples, out, sizeof(d.samples));
+    }
+
     void SoundMixer::decodeBlock(Voice &voice)
     {
+        if (m_n2)
+        {
+            decodeBlockN2(voice);
+            return;
+        }
         const uint32_t address = voice.next & (kRamWords - 8u);
         const uint16_t header = m_ram[address];
         uint32_t shift = header & 0xFu;
@@ -906,7 +988,68 @@ namespace ps2x::iop::detail
         alignas(16) int16_t h0[kBlock], h1[kBlock], h2[kBlock], h3[kBlock];
         alignas(16) uint32_t count[kBlock];
         uint32_t position = c0;
-        for (uint32_t i = 0; i < outputs; ++i)
+        uint32_t i = 0;
+#if defined(PS2X_MIX_NEON)
+        if (m_n2)
+        {
+            // Round N2: four outputs at a time, gathered and mixed in registers: each output's four samples one
+            // vector load, the 4 x 4 transposed into the four history vectors, then mixSamples' arithmetic as it
+            // is written there (the same bits); the last outputs (fewer than four) through mixSamples.
+            const uint32x4_t frac = vdupq_n_u32(0xFFFu);
+            const float32x4_t half = vdupq_n_f32(0.5f), two = vdupq_n_f32(2.0f), three = vdupq_n_f32(3.0f), four = vdupq_n_f32(4.0f), five = vdupq_n_f32(5.0f);
+            const float32x4_t inv4096 = vdupq_n_f32(1.0f / 4096.0f);
+            const int32x4_t lo16 = vdupq_n_s32(-32768), hi16 = vdupq_n_s32(32767);
+            const int32_t volL = voice.volL, volR = voice.volR;
+            for (; i + 4u <= outputs; i += 4u)
+            {
+                const uint32_t q0 = position + pitch, q1 = q0 + pitch, q2 = q1 + pitch, q3 = q2 + pitch;
+                position = q3;
+                const int16x4_t a = vld1_s16(run + (q0 >> 12u)), b = vld1_s16(run + (q1 >> 12u));
+                const int16x4_t c = vld1_s16(run + (q2 >> 12u)), d = vld1_s16(run + (q3 >> 12u));
+                const int16x4x2_t ab = vtrn_s16(a, b), cd = vtrn_s16(c, d);
+                const int32x2x2_t even = vtrn_s32(vreinterpret_s32_s16(ab.val[0]), vreinterpret_s32_s16(cd.val[0]));
+                const int32x2x2_t odd = vtrn_s32(vreinterpret_s32_s16(ab.val[1]), vreinterpret_s32_s16(cd.val[1]));
+                const float32x4_t p0 = vcvtq_f32_s32(vmovl_s16(vreinterpret_s16_s32(even.val[0])));
+                const float32x4_t p1 = vcvtq_f32_s32(vmovl_s16(vreinterpret_s16_s32(odd.val[0])));
+                const float32x4_t p2 = vcvtq_f32_s32(vmovl_s16(vreinterpret_s16_s32(even.val[1])));
+                const float32x4_t p3 = vcvtq_f32_s32(vmovl_s16(vreinterpret_s16_s32(odd.val[1])));
+                const uint32_t qs[4] = {q0, q1, q2, q3};
+                const float32x4_t t = vmulq_f32(vcvtq_f32_u32(vandq_u32(vld1q_u32(qs), frac)), inv4096);
+                float32x4_t A = vsubq_f32(vaddq_f32(vmulq_f32(three, vsubq_f32(p1, p2)), p3), p0);
+                float32x4_t B = vsubq_f32(vaddq_f32(vsubq_f32(vmulq_f32(two, p0), vmulq_f32(five, p1)), vmulq_f32(four, p2)), p3);
+                B = vaddq_f32(B, vmulq_f32(t, A));
+                const float32x4_t C = vaddq_f32(vsubq_f32(p2, p0), vmulq_f32(t, B));
+                const float32x4_t r = vaddq_f32(p1, vmulq_f32(vmulq_f32(half, t), C));
+                const int32x4_t clamped = vminq_s32(vmaxq_s32(vcvtq_s32_f32(r), lo16), hi16);
+                const int32x4_t sample = vshrq_n_s32(vmulq_s32(clamped, vld1q_s32(level + i)), 15);
+                const int32x4_t left = vshrq_n_s32(vmulq_n_s32(sample, volL), 15), right = vshrq_n_s32(vmulq_n_s32(sample, volR), 15);
+                if (dryL)
+                    vst1q_s32(dryL + i, vaddq_s32(vld1q_s32(dryL + i), left));
+                if (dryR)
+                    vst1q_s32(dryR + i, vaddq_s32(vld1q_s32(dryR + i), right));
+                if (wetL)
+                    vst1q_s32(wetL + i, vaddq_s32(vld1q_s32(wetL + i), left));
+                if (wetR)
+                    vst1q_s32(wetR + i, vaddq_s32(vld1q_s32(wetR + i), right));
+            }
+            const uint32_t first = i;
+            for (uint32_t r = 0; i < outputs; ++i, ++r)
+            {
+                position += pitch;
+                const uint32_t k = position >> 12u;
+                h0[r] = run[k];
+                h1[r] = run[k + 1u];
+                h2[r] = run[k + 2u];
+                h3[r] = run[k + 3u];
+                count[r] = position & 0xFFFu;
+            }
+            if (outputs > first)
+                mixSamples(h0, h1, h2, h3, count, level + first, outputs - first, volL, volR, dryL ? dryL + first : nullptr, dryR ? dryR + first : nullptr,
+                           wetL ? wetL + first : nullptr, wetR ? wetR + first : nullptr);
+            return;
+        }
+#endif
+        for (; i < outputs; ++i)
         {
             position += pitch;
             const uint32_t k = position >> 12u;
@@ -1094,6 +1237,146 @@ namespace ps2x::iop::detail
             core.quietSteps = 0;
     }
 
+    // Round N2: reverb90's results for a block's samples (renderCores90's linear case: the 28 positions as pointers,
+    // no wrap inside the block), in one loop: the preset's volumes, the pointers and the area read once, the log's
+    // counts only while the log is on, the written words' largest magnitude only for the residue clear.
+    void SoundMixer::reverbRunN2(Core &core, const int32_t *inL, const int32_t *inR, int32_t *outL, int32_t *outR, uint32_t n, uint16_t *const *lin,
+                                 uint32_t &steps, uint32_t &idle)
+    {
+        const uint32_t esa = core.esa, size = std::max(core.eea, esa) - esa + 1u;
+        uint16_t *const ram = m_ram.data() + esa;
+        uint16_t *P[28];
+        for (int k = 0; k < 28; ++k)
+            P[k] = lin[k];
+        const int32_t vIIR = core.revVol[0], vCOMB1 = core.revVol[1], vCOMB2 = core.revVol[2], vCOMB3 = core.revVol[3], vCOMB4 = core.revVol[4];
+        const int32_t vWALL = core.revVol[5], vAPF1 = core.revVol[6], vAPF2 = core.revVol[7], vLIN = core.revVol[8], vRIN = core.revVol[9];
+        const bool logging = audio_stats::level() != 0;
+        const bool flush = m_flush90 && !m_revOverlap;
+        const bool needMax = flush || logging;
+        const uint32_t flushMax = static_cast<uint32_t>(audio_stats::mix90FlushMax());
+        const int c = &core == &m_cores[1] ? 1 : 0;
+        int32_t revInL = core.revInL, revInR = core.revInR;
+        int32_t revOutL = core.revOutL, revOutR = core.revOutR, revPrevL = core.revPrevL, revPrevR = core.revPrevR;
+        bool odd = core.reverbOdd;
+        uint32_t x = core.reverbX, zeroSteps = core.zeroSteps, quietSteps = core.quietSteps;
+        uint32_t j = 0, stepsHere = 0, idleHere = 0;
+        auto mul = [](int32_t a, int32_t b) -> int32_t { return (a * b) >> 15; };
+        for (uint32_t i = 0; i < n; ++i)
+        {
+            revInL += inL[i];
+            revInR += inR[i];
+            odd = !odd;
+            if (odd)
+            {
+                outL[i] = (revPrevL + revOutL) / 2;
+                outR[i] = (revPrevR + revOutR) / 2;
+                continue;
+            }
+            const int32_t Lin0 = revInL / 2, Rin0 = revInR / 2;
+            revInL = revInR = 0;
+            revPrevL = revOutL;
+            revPrevR = revOutR;
+            if (zeroSteps >= size && Lin0 == 0 && Rin0 == 0)
+            {
+                x = x + 1u >= size ? 0u : x + 1u;
+                revOutL = revOutR = 0;
+                outL[i] = revPrevL;
+                outR[i] = revPrevR;
+                ++idleHere;
+                ++j;
+                continue;
+            }
+            ++stepsHere;
+            uint32_t written = 0, wordMax = 0;
+            auto rd = [&](int k) -> int32_t { return static_cast<int16_t>(P[k][j]); };
+            auto wr = [&](int k, int32_t value)
+            {
+                const int32_t v = clamp16(value);
+                written |= static_cast<uint16_t>(v);
+                if (needMax)
+                    wordMax = std::max<uint32_t>(wordMax, static_cast<uint32_t>(v < 0 ? -v : v));
+                P[k][j] = static_cast<uint16_t>(v);
+            };
+            const int32_t Lin = mul(Lin0, vLIN);
+            const int32_t Rin = mul(Rin0, vRIN);
+            wr(0, mul(clamp16(Lin + mul(rd(4), vWALL) - rd(2)), vIIR) + rd(2));
+            wr(1, mul(clamp16(Rin + mul(rd(5), vWALL) - rd(3)), vIIR) + rd(3));
+            wr(6, mul(clamp16(Lin + mul(rd(10), vWALL) - rd(8)), vIIR) + rd(8));
+            wr(7, mul(clamp16(Rin + mul(rd(11), vWALL) - rd(9)), vIIR) + rd(9));
+            int32_t Lout = clamp16(mul(vCOMB1, rd(12)) + mul(vCOMB2, rd(13)) + mul(vCOMB3, rd(14)) + mul(vCOMB4, rd(15)));
+            int32_t Rout = clamp16(mul(vCOMB1, rd(16)) + mul(vCOMB2, rd(17)) + mul(vCOMB3, rd(18)) + mul(vCOMB4, rd(19)));
+            Lout = clamp16(Lout - mul(vAPF1, rd(22)));
+            wr(20, Lout);
+            Lout = clamp16(mul(Lout, vAPF1) + rd(22));
+            Rout = clamp16(Rout - mul(vAPF1, rd(23)));
+            wr(21, Rout);
+            Rout = clamp16(mul(Rout, vAPF1) + rd(23));
+            Lout = clamp16(Lout - mul(vAPF2, rd(26)));
+            wr(24, Lout);
+            Lout = clamp16(mul(Lout, vAPF2) + rd(26));
+            Rout = clamp16(Rout - mul(vAPF2, rd(27)));
+            wr(25, Rout);
+            Rout = clamp16(mul(Rout, vAPF2) + rd(27));
+            x = x + 1u >= size ? 0u : x + 1u;
+            revOutL = Lout;
+            revOutR = Rout;
+            outL[i] = revPrevL;
+            outR[i] = revPrevR;
+            if (logging)
+            {
+                if (Lout | Rout)
+                    ++m_revLoud[c];
+                if (Lin0 | Rin0)
+                    ++m_revFed[c];
+                else
+                {
+                    const uint32_t big = static_cast<uint32_t>(std::max(std::abs(Lout), std::abs(Rout)));
+                    m_revQuietMax[c] = std::max(m_revQuietMax[c], big);
+                    m_revQuietWordMax[c] = std::max(m_revQuietWordMax[c], wordMax);
+                }
+            }
+            if (written == 0u && !m_revOverlap)
+            {
+                if (zeroSteps < size)
+                    ++zeroSteps;
+            }
+            else
+                zeroSteps = 0;
+            if (flush && (Lin0 | Rin0) == 0)
+            {
+                if (wordMax <= flushMax && static_cast<uint32_t>(std::abs(Lout)) <= flushMax && static_cast<uint32_t>(std::abs(Rout)) <= flushMax)
+                {
+                    if (++quietSteps >= size && zeroSteps < size)
+                    {
+                        std::fill(ram, ram + size, uint16_t{0});
+                        zeroSteps = size;
+                        quietSteps = 0;
+                        revOutL = revOutR = 0;
+                        revPrevL = revPrevR = 0;
+                        ++m_revFlushes[c];
+                    }
+                }
+                else
+                    quietSteps = 0;
+            }
+            else
+                quietSteps = 0;
+            ++j;
+        }
+        core.revInL = revInL;
+        core.revInR = revInR;
+        core.revOutL = revOutL;
+        core.revOutR = revOutR;
+        core.revPrevL = revPrevL;
+        core.revPrevR = revPrevR;
+        core.reverbOdd = odd;
+        core.reverbX = x;
+        core.zeroSteps = zeroSteps;
+        core.quietSteps = quietSteps;
+        steps += stepsHere;
+        idle += idleHere;
+    }
+
     // render()'s two cores a block at a time: each core's input, its
     // routing's sums (the routing read once a block), the reverb, then the
     // reverb's return and master volume, core 0's output feeding core 1's
@@ -1218,6 +1501,19 @@ namespace ps2x::iop::detail
                 }
             }
             uint32_t stepsHere = 0, idleHere = 0, j = 0;
+            if (m_n2 && linear)
+            {
+                alignas(16) int32_t retL[kBlock], retR[kBlock];
+                reverbRunN2(core, revL, revR, retL, retR, n, lin, stepsHere, idleHere);
+                for (uint32_t i = 0; i < n; ++i)
+                {
+                    extL[i] = clamp16(((mixL[i] + ((retL[i] * rvL) >> 15)) * mL) >> 15);
+                    extR[i] = clamp16(((mixR[i] + ((retR[i] * rvR) >> 15)) * mR) >> 15);
+                }
+                steps[c] += stepsHere;
+                idle[c] += idleHere;
+                continue;
+            }
             for (uint32_t i = 0; i < n; ++i)
             {
                 int32_t reverbL = 0, reverbR = 0;
@@ -1284,6 +1580,9 @@ namespace ps2x::iop::detail
         bool voice90 = audio_stats::mix90Voice(), core90 = audio_stats::mix90Core();
         if (m_pathOverride >= 0)
             voice90 = core90 = m_pathOverride != 0;
+        // Round N2: the N2 paths (round 90's under them); under PS2X_MIX_CHECK=90 with them on, the shadow mixes
+        // without them (path 1) and this mixer with them (path 2).
+        m_n2 = m_pathOverride >= 0 ? m_pathOverride == 2 : (voice90 && core90 && audio_stats::n2Mix());
         {
             static const bool checking = std::getenv("PS2X_MIX_CHECK") && std::atoi(std::getenv("PS2X_MIX_CHECK")) == 90;
             m_flush90 = core90 && !checking && audio_stats::mix90Flush();
@@ -1313,10 +1612,11 @@ namespace ps2x::iop::detail
             {
                 static SoundMixer *shadow = new SoundMixer();
                 shadow->copyStateFrom(*this);
-                shadow->m_pathOverride = 0;
+                const bool n2 = m_n2;
+                shadow->m_pathOverride = n2 ? 1 : 0;
                 std::vector<int16_t> a(frames * 2u), b(frames * 2u);
                 shadow->render(a.data(), frames);
-                m_pathOverride = 1;
+                m_pathOverride = n2 ? 2 : 1;
                 render(b.data(), frames);
                 m_pathOverride = -1;
                 std::memcpy(destination, b.data(), frames * 2u * sizeof(int16_t));
@@ -1429,6 +1729,15 @@ namespace ps2x::iop::detail
         }
         if (pcmUnder)
             audio_stats::pcmUnderFrames.fetch_add(pcmUnder, std::memory_order_relaxed);
+        // Round N2: SOTC_AUDIO_LOG on, the decode cache's counts every 8 192 pieces.
+        if (m_n2 && audio_stats::level() != 0 && m_pathOverride < 0)
+        {
+            static uint64_t n2Pieces = 0;
+            if (++n2Pieces % 8192u == 0u)
+                std::fprintf(stderr, "[n2mix] pieces %llu decoded blocks: kept %llu decoded %llu (%.1f%% kept)\n", (unsigned long long)n2Pieces,
+                             (unsigned long long)m_decodeHits, (unsigned long long)m_decodeMisses,
+                             100.0 * static_cast<double>(m_decodeHits) / static_cast<double>(m_decodeHits + m_decodeMisses + 1u));
+        }
         if (audio_stats::level() != 0)
             for (int c = 0; c < 2; ++c)
             {
@@ -1520,7 +1829,12 @@ namespace ps2x::iop::detail
                 return env ? std::clamp<uint32_t>(static_cast<uint32_t>(std::atoi(env)), 1u, kBlock) : 0u;
             }();
             // Round 90: SOTC_MIX90_CHUNK / the A/B's `chunk90` (audio_stats::mix90Chunk).
-            const uint32_t chunk = chunkEnv ? chunkEnv : static_cast<uint32_t>(audio_stats::mix90Chunk());
+            // Round N2: 64 frames (the whole block) with the N2 paths: the per-block work (envelope runs, the
+            // reverb's pointers, the voice loop) halved (Mac harness: -10..14%); the status request does not wait
+            // for a piece (sg2q139), and with n2snd it is a direct call.
+            const uint32_t chunk = chunkEnv ? chunkEnv
+                                            : (audio_stats::n2Mix() ? std::max<uint32_t>(64u, static_cast<uint32_t>(audio_stats::mix90Chunk()))
+                                                                    : static_cast<uint32_t>(audio_stats::mix90Chunk()));
             static const bool handoff = !(std::getenv("PS2X_MIX_HANDOFF") && std::atoi(std::getenv("PS2X_MIX_HANDOFF")) == 0);
             for (size_t done = 0; done < frames;)
             {

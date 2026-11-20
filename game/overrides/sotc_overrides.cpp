@@ -46,6 +46,11 @@ namespace sotc_decomp
     bool gamecoreEntered() { return g_gamecoreEntered; }
 }
 
+namespace sound_n2
+{
+    void install(PS2Runtime &runtime); // sound_n2.cpp (round N2)
+}
+
 namespace
 {
     // Real entry address of GAMECORE.XFF after module relocation at 0x01333500.
@@ -1327,6 +1332,9 @@ namespace
             g_free = runtime.lookupFunction(0x001B0328u);
             runtime.registerFunction(0x001B0328u, heapHook<2>);
         }
+        // Round N2 (n2snd): the sound engine's remote layer on the host (sound_n2.cpp); before the logging hook,
+        // which then wraps it, and before sotc_decomp::install (D7's lifted Sg2RemoteTickProc leaves the slot).
+        sound_n2::install(runtime);
         if (std::getenv("SOTC_LOG_SG2") && runtime.hasFunction(0x001D21E8u))
         {
             g_sg2RemoteTick = runtime.lookupFunction(0x001D21E8u);
