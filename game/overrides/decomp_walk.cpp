@@ -824,8 +824,8 @@ namespace decomp_walk
     inline float sacFarTerrainScale()
     {
         static const float s = []() {
-            if (const char *e = std::getenv("SOTC_SAC_FAR_TERRAIN_SCALE"))
-                return std::strtof(e, nullptr);
+            if (const char *e = std::getenv("SOTC_SAC_FAR_TERRAIN_SCALE")) {
+                const float v = std::strtof(e, nullptr); return (v > 0.0f) ? std::max(1.0f, v) : 0.0f; }
             if (const char *e = std::getenv("SOTC_SAC_FAR_TERRAIN"))
                 return (std::atoi(e) != 0) ? 1.5f : 0.0f;
             return 0.0f;
