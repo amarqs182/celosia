@@ -42,15 +42,23 @@ namespace
 
     std::recursive_mutex g_glMutex;
     int g_glLockDepth = 0;
+    std::atomic<int> g_glWaiters{0};
     std::mutex g_inputMutex;
     std::atomic<int> g_swapInterval{0};
     std::atomic<int> g_targetFps{60};
     int g_appliedSwapInterval = -999;
 }
 
+bool ps2xLinuxGlHasWaiter()
+{
+    return g_glWaiters.load(std::memory_order_relaxed) > 0;
+}
+
 void ps2xLinuxGlLock()
 {
+    g_glWaiters.fetch_add(1, std::memory_order_relaxed);
     g_glMutex.lock();
+    g_glWaiters.fetch_sub(1, std::memory_order_relaxed);
     if (++g_glLockDepth == 1 && g_window && g_context)
     {
         if (SDL_GL_MakeCurrent(g_window, g_context) != 0)

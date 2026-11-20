@@ -41,6 +41,7 @@
 #define PS2X_NATIVE_GLES 1
 void ps2xLinuxGlLock();
 void ps2xLinuxGlUnlock();
+bool ps2xLinuxGlHasWaiter();
 // ES has no GL_DEPTH_CLAMP (desktop only): the shadow volumes' near-plane
 // clamp is GL_EXT_depth_clamp's, whose enum the headers may not define.
 #ifndef GL_DEPTH_CLAMP_EXT
@@ -1078,13 +1079,13 @@ void main()
 #elif MODE == 6
     oColor = vec4(1.0);
 #elif MODE == 7
-    highp vec2 size = vec2(textureSize(uSrc, 0));
-    ivec2 base = ivec2(vUV * size) & ~3;
-    mediump float sum = 0.0;
-    for (int y = 0; y < 4; ++y)
-        for (int x = 0; x < 4; ++x)
-            sum += texelFetch(uSrc, min(base + ivec2(x, y), ivec2(size) - 1), 0).r;
-    oColor = vec4(vec3(sum * 0.0625), 1.0);
+    highp vec2 inv = 1.0 / vec2(textureSize(uSrc, 0));
+    highp vec2 d = inv;
+    mediump float sum = texture(uSrc, vUV + vec2(-d.x, -d.y)).r
+                      + texture(uSrc, vUV + vec2( d.x, -d.y)).r
+                      + texture(uSrc, vUV + vec2(-d.x,  d.y)).r
+                      + texture(uSrc, vUV + vec2( d.x,  d.y)).r;
+    oColor = vec4(vec3(sum * 0.25), 1.0);
 #elif MODE == 8
     highp vec2 size = vec2(textureSize(uDepth, 0));
     ivec2 base = ivec2(vUV * size) & ~3;
@@ -3101,6 +3102,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         Arena<uint32_t> indexArena;
         GLuint arenaBuffers[3] = {};                 // in turn: the GPU may still read the last two
         GLuint indexBuffers[3] = {};                 // the same for indexArena
+        size_t arenaCap[3] = {};                     // allocated byte capacity per ring slot
+        size_t indexCap[3] = {};                     // allocated byte capacity per ring slot
+        bool indexArena16[3] = {};                   // indexBuffers[slot] holds uint16_t
 #if !defined(PS2X_NATIVE_VITA)
         GLuint arenaVaos[3] = {};                    // cached plain-vertex VAOs for arenaBuffers
 #endif
@@ -3672,6 +3676,24 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             return false;
 #endif
         }
+        static bool frustumCullEnabled()
+        {
+#if defined(PS2X_NATIVE_GLES)
+            static const bool on = !std::getenv("SOTC_GL_FRUSTUM_CULL") || std::atoi(std::getenv("SOTC_GL_FRUSTUM_CULL")) != 0;
+            return on;
+#else
+            return false;
+#endif
+        }
+        static bool arenaSubDataEnabled()
+        {
+#if defined(PS2X_NATIVE_GLES)
+            static const bool on = !std::getenv("SOTC_GL_ARENA_SUBDATA") || std::atoi(std::getenv("SOTC_GL_ARENA_SUBDATA")) != 0;
+            return on;
+#else
+            return false;
+#endif
+        }
         static std::string worldVertexSrc(bool noscreen, bool texarr, bool ubo)
         {
             std::string s = kMainVertex;
@@ -3919,8 +3941,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 if (quadSpec)
                 {
                     quadProgram = quadPrograms[0];
-                    std::fprintf(stderr, "[native:gl] GLES host opts: quadSpec=1 regionReady=%d fp16=%d fastLod=%d idx16=%d\n",
-                                 regionReady ? 1 : 0, fragFp16Enabled() ? 1 : 0, fastLodEnabled() ? 1 : 0, idx16Enabled() ? 1 : 0);
+                    std::fprintf(stderr, "[native:gl] GLES host opts: quadSpec=1 regionReady=%d fp16=%d fastLod=%d idx16=%d cull=%d subdata=%d\n",
+                                 regionReady ? 1 : 0, fragFp16Enabled() ? 1 : 0, fastLodEnabled() ? 1 : 0, idx16Enabled() ? 1 : 0,
+                                 frustumCullEnabled() ? 1 : 0, arenaSubDataEnabled() ? 1 : 0);
                 }
                 else
                 {
@@ -5146,7 +5169,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             if (mesh.dynamic || !mesh.vao || !staticVaoEnabled())
 #endif
                 glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.dynamic ? indexBuffers[arenaIndex] : mesh.indexBuffer);
-            const bool use16 = !mesh.dynamic && mesh.idx16;
+            const bool use16 = mesh.dynamic ? indexArena16[arenaIndex] : mesh.idx16;
             const GLenum idxType = use16 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT;
             const uintptr_t first = mesh.dynamic ? mesh.firstIndex : 0u;
             const void *idxOff = reinterpret_cast<const void *>(first * (use16 ? sizeof(uint16_t) : sizeof(uint32_t)));
@@ -6582,28 +6605,54 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             if (m && m->count)
             {
                 m->used = arenaFrame;
-                p.mesh = m;
-                p.minAlpha = m->dynamic ? 0 : m->minAlpha;
-                p.maxAlpha = m->dynamic ? 0xFF : m->maxAlpha;
-                if (d.state.background && m->box && !m->dynamic && !m->skinned)
+                bool culled = false;
+                if (frustumCullEnabled() && m->box && !m->dynamic && !m->skinned &&
+                    !d.state.screen && !d.state.overlay && !d.state.shadowVolume)
                 {
-                    // Round 75: the least clip w over the box (c.w is linear in
-                    // the position: least at the corner each axis picks by its sign).
                     const float *c = d.clip;
-                    float w = c[15];
-                    for (int a = 0; a < 3; ++a)
-                        w += c[4 * a + 3] * (c[4 * a + 3] >= 0.0f ? m->lo[a] : m->hi[a]);
-                    p.minW = std::isfinite(w) ? w : -1.0f;
+                    const float *lo = m->lo, *hi = m->hi;
+                    auto maxPlane = [&](float a0, float a1, float a2, float a3) noexcept -> float
+                    {
+                        return a3 + (a0 >= 0.0f ? a0 * hi[0] : a0 * lo[0])
+                                  + (a1 >= 0.0f ? a1 * hi[1] : a1 * lo[1])
+                                  + (a2 >= 0.0f ? a2 * hi[2] : a2 * lo[2]);
+                    };
+                    const float maxW = maxPlane(c[3], c[7], c[11], c[15]);
+                    if (std::isfinite(maxW) &&
+                        (maxW < 0.05f ||
+                         maxPlane(c[0] + c[3], c[4] + c[7], c[8] + c[11], c[12] + c[15]) < -1e-3f ||
+                         maxPlane(c[3] - c[0], c[7] - c[4], c[11] - c[8], c[15] - c[12]) < -1e-3f ||
+                         maxPlane(c[1] + c[3], c[5] + c[7], c[9] + c[11], c[13] + c[15]) < -1e-3f ||
+                         maxPlane(c[3] - c[1], c[7] - c[5], c[11] - c[9], c[15] - c[13]) < -1e-3f))
+                    {
+                        culled = true;
+                    }
                 }
-                if (fogFar98 > 0.0f && m->box && !m->dynamic && !m->skinned && d.state.order < 16u)
+                if (!culled)
                 {
-                    // Round 98 (Tuning glNoFog98): the greatest clip w over the box
-                    // (the corner each axis picks by its coefficient's sign).
-                    const float *c = d.clip;
-                    float w = c[15];
-                    for (int a = 0; a < 3; ++a)
-                        w += c[4 * a + 3] * (c[4 * a + 3] >= 0.0f ? m->hi[a] : m->lo[a]);
-                    p.maxW = std::isfinite(w) && w > 0.0f ? w : -1.0f;
+                    p.mesh = m;
+                    p.minAlpha = m->dynamic ? 0 : m->minAlpha;
+                    p.maxAlpha = m->dynamic ? 0xFF : m->maxAlpha;
+                    if (d.state.background && m->box && !m->dynamic && !m->skinned)
+                    {
+                        // Round 75: the least clip w over the box (c.w is linear in
+                        // the position: least at the corner each axis picks by its sign).
+                        const float *c = d.clip;
+                        float w = c[15];
+                        for (int a = 0; a < 3; ++a)
+                            w += c[4 * a + 3] * (c[4 * a + 3] >= 0.0f ? m->lo[a] : m->hi[a]);
+                        p.minW = std::isfinite(w) ? w : -1.0f;
+                    }
+                    if (fogFar98 > 0.0f && m->box && !m->dynamic && !m->skinned && d.state.order < 16u)
+                    {
+                        // Round 98 (Tuning glNoFog98): the greatest clip w over the box
+                        // (the corner each axis picks by its coefficient's sign).
+                        const float *c = d.clip;
+                        float w = c[15];
+                        for (int a = 0; a < 3; ++a)
+                            w += c[4 * a + 3] * (c[4 * a + 3] >= 0.0f ? m->hi[a] : m->lo[a]);
+                        p.maxW = std::isfinite(w) && w > 0.0f ? w : -1.0f;
+                    }
                 }
             }
             if (sameRecord)
@@ -8755,14 +8804,57 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 if (!arenaBuffers[arenaIndex])
                     glGenBuffers(1, &arenaBuffers[arenaIndex]);
                 glBindBuffer(GL_ARRAY_BUFFER, arenaBuffers[arenaIndex]);
-                uploadStream(GL_ARRAY_BUFFER, arena.data(), arena.size() * sizeof(native_renderer::Vertex));
+                const size_t bytes = arena.size() * sizeof(native_renderer::Vertex);
+                if (arenaSubDataEnabled())
+                {
+                    if (bytes > arenaCap[arenaIndex])
+                    {
+                        const size_t grow = std::max(bytes, arenaCap[arenaIndex] * 2u);
+                        arenaCap[arenaIndex] = (grow + 65535u) & ~size_t(65535u);
+                        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(arenaCap[arenaIndex]), nullptr, GL_STREAM_DRAW);
+                    }
+                    glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(bytes), arena.data());
+                }
+                else
+                {
+                    arenaCap[arenaIndex] = 0;
+                    uploadStream(GL_ARRAY_BUFFER, arena.data(), bytes);
+                }
             }
             if (!indexArena.empty())
             {
                 if (!indexBuffers[arenaIndex])
                     glGenBuffers(1, &indexBuffers[arenaIndex]);
                 glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, indexBuffers[arenaIndex]);
-                uploadStream(GL_ELEMENT_ARRAY_BUFFER, indexArena.data(), indexArena.size() * sizeof(uint32_t));
+                const bool use16 = idx16Enabled() && arena.size() <= 0xFFFFu;
+                indexArena16[arenaIndex] = use16;
+                const void *srcPtr = indexArena.data();
+                size_t bytes = indexArena.size() * sizeof(uint32_t);
+                if (use16)
+                {
+                    static std::vector<uint16_t> dynIdx16;
+                    dynIdx16.resize(indexArena.size());
+                    const uint32_t *in = indexArena.data();
+                    for (size_t i = 0; i < indexArena.size(); ++i)
+                        dynIdx16[i] = static_cast<uint16_t>(in[i]);
+                    srcPtr = dynIdx16.data();
+                    bytes = dynIdx16.size() * sizeof(uint16_t);
+                }
+                if (arenaSubDataEnabled())
+                {
+                    if (bytes > indexCap[arenaIndex])
+                    {
+                        const size_t grow = std::max(bytes, indexCap[arenaIndex] * 2u);
+                        indexCap[arenaIndex] = (grow + 16383u) & ~size_t(16383u);
+                        glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(indexCap[arenaIndex]), nullptr, GL_STREAM_DRAW);
+                    }
+                    glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(bytes), srcPtr);
+                }
+                else
+                {
+                    indexCap[arenaIndex] = 0;
+                    uploadStream(GL_ELEMENT_ARRAY_BUFFER, srcPtr, bytes);
+                }
             }
         }
         if (phases.on)
@@ -11069,6 +11161,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             glDisable(GL_STENCIL_TEST);
             bindTexture(0, shadowMask.texture);
             quad(bloomTex[0], 7, QuadBlend::None);
+#if defined(PS2X_NATIVE_GLES)
+            invalidateTarget(shadowMask, GL_COLOR_ATTACHMENT0);
+#endif
             static const int rounds = std::getenv("SOTC_SHADOW_BLUR") ? std::atoi(std::getenv("SOTC_SHADOW_BLUR")) : 1;
             blur(rounds);
             const float amount[4] = {softAmount, 0, 0, 0};
@@ -12928,9 +13023,29 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             m_idle.notify_all();
             if (!ok)
                 return;
+#if defined(PS2X_NATIVE_GLES)
+            static const bool keepCurrent = !std::getenv("SOTC_GL_KEEP_CURRENT") || std::atoi(std::getenv("SOTC_GL_KEEP_CURRENT")) != 0;
+            bool glHeld = false;
+            auto releaseHeld = [&]
+            {
+                if (glHeld)
+                {
+                    ps2xLinuxGlUnlock();
+                    glHeld = false;
+                }
+            };
+#endif
             for (;;)
             {
                 std::unique_lock<std::mutex> lock(m_mutex);
+#if defined(PS2X_NATIVE_GLES)
+                if (glHeld && (m_stop || (!m_queued && m_side.empty()) || ps2xLinuxGlHasWaiter()))
+                {
+                    lock.unlock();
+                    releaseHeld();
+                    lock.lock();
+                }
+#endif
                 while (!m_stop && !m_queued && m_side.empty())
                 {
 #if defined(__vita__)
@@ -12954,7 +13069,28 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     m_work.wait_for(lock, kRecheck);
                 }
                 if (m_stop)
+                {
+#if defined(PS2X_NATIVE_GLES)
+                    lock.unlock();
+                    releaseHeld();
+#endif
                     break;
+                }
+#if defined(PS2X_NATIVE_GLES)
+                if (keepCurrent && !glHeld)
+                {
+                    lock.unlock();
+                    ps2xLinuxGlLock();
+                    glHeld = true;
+                    lock.lock();
+                    if (m_stop)
+                    {
+                        lock.unlock();
+                        releaseHeld();
+                        break;
+                    }
+                }
+#endif
                 // Flushed uploads first (they were asked for before this frame's).
                 if (!m_side.empty())
                 {
