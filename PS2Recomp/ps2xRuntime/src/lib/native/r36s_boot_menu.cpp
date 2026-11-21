@@ -161,6 +161,9 @@ void runR36sBootMenu()
             {"Ligado", "Desligado (RGBA8)"},
         };
 
+        int prevAxisDirX[4] = {0, 0, 0, 0};
+        int prevAxisDirY[4] = {0, 0, 0, 0};
+
         while (!done && !WindowShouldClose())
         {
             const double dt = static_cast<double>(GetFrameTime());
@@ -186,20 +189,49 @@ void runR36sBootMenu()
                 if (!IsGamepadAvailable(gp))
                     continue;
 
-                if (IsGamepadButtonPressed(gp, GAMEPAD_BUTTON_LEFT_FACE_UP))
+                // Standard Raylib GAMEPAD_BUTTON_* + raw evdev indices for GO-Super Gamepad (R36S DRM)
+                if (IsGamepadButtonPressed(gp, GAMEPAD_BUTTON_LEFT_FACE_UP) || IsGamepadButtonPressed(gp, 8))
                     upPressed = true;
-                if (IsGamepadButtonPressed(gp, GAMEPAD_BUTTON_LEFT_FACE_DOWN))
+                if (IsGamepadButtonPressed(gp, GAMEPAD_BUTTON_LEFT_FACE_DOWN) || IsGamepadButtonPressed(gp, 9))
                     downPressed = true;
-                if (IsGamepadButtonPressed(gp, GAMEPAD_BUTTON_LEFT_FACE_LEFT))
+                if (IsGamepadButtonPressed(gp, GAMEPAD_BUTTON_LEFT_FACE_LEFT) || IsGamepadButtonPressed(gp, 10))
                     leftPressed = true;
-                if (IsGamepadButtonPressed(gp, GAMEPAD_BUTTON_LEFT_FACE_RIGHT))
+                if (IsGamepadButtonPressed(gp, GAMEPAD_BUTTON_LEFT_FACE_RIGHT) || IsGamepadButtonPressed(gp, 11))
                     rightPressed = true;
-                if (IsGamepadButtonPressed(gp, GAMEPAD_BUTTON_RIGHT_FACE_DOWN))
+                if (IsGamepadButtonPressed(gp, GAMEPAD_BUTTON_RIGHT_FACE_DOWN) || IsGamepadButtonPressed(gp, 0))
                     startOnlyPressed = true;
-                if (IsGamepadButtonPressed(gp, GAMEPAD_BUTTON_MIDDLE_RIGHT))
+                if (IsGamepadButtonPressed(gp, GAMEPAD_BUTTON_MIDDLE_RIGHT) || IsGamepadButtonPressed(gp, 13))
                     saveAndStartPressed = true;
-                if (IsGamepadButtonPressed(gp, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT))
+                if (IsGamepadButtonPressed(gp, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT) || IsGamepadButtonPressed(gp, 1))
                     fallbackGlPressed = true;
+
+                if ((IsGamepadButtonDown(gp, 12) && IsGamepadButtonDown(gp, 13)) ||
+                    (IsGamepadButtonDown(gp, GAMEPAD_BUTTON_MIDDLE_LEFT) && IsGamepadButtonDown(gp, GAMEPAD_BUTTON_MIDDLE_RIGHT)))
+                {
+                    CloseWindow();
+                    std::exit(0);
+                }
+
+                const float axX = GetGamepadAxisMovement(gp, GAMEPAD_AXIS_LEFT_X);
+                const float axY = GetGamepadAxisMovement(gp, GAMEPAD_AXIS_LEFT_Y);
+                const int dirX = (axX > 0.5f) ? 1 : ((axX < -0.5f) ? -1 : 0);
+                const int dirY = (axY > 0.5f) ? 1 : ((axY < -0.5f) ? -1 : 0);
+                if (dirY != prevAxisDirY[gp])
+                {
+                    if (dirY < 0)
+                        upPressed = true;
+                    else if (dirY > 0)
+                        downPressed = true;
+                    prevAxisDirY[gp] = dirY;
+                }
+                if (dirX != prevAxisDirX[gp])
+                {
+                    if (dirX < 0)
+                        leftPressed = true;
+                    else if (dirX > 0)
+                        rightPressed = true;
+                    prevAxisDirX[gp] = dirX;
+                }
             }
 
             if (upPressed || downPressed || leftPressed || rightPressed ||
