@@ -7173,7 +7173,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                         bool okCopy = false;
                         if (usedTexArr)
                         {
-                            std::vector<uint64_t> slotKeys;
+                            static std::vector<uint64_t> slotKeys; slotKeys.clear();
                             slotKeys.reserve(runArrSlots.size());
                             for (const auto &si : runArrSlots)
                                 slotKeys.push_back(si.key);
@@ -7497,7 +7497,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                     const Draw &d = drawAt(j);
                     const Mesh *m = plan[j].mesh;
                     const bool isStaticIdx = m && m->indexed && !m->skinned && !m->dynamic;
-                    const uint64_t where = isStaticIdx
+                    const uint64_t where = !m ? 0ull : isStaticIdx
                         ? (1ull << 62)
                         : ((m->skinned ? 1ull << 63 : 0ull) | (m->indexed ? 1ull << 62 : 0ull) | (m->dynamic ? 1ull << 61 : 0ull) |
                            (static_cast<uint64_t>(static_cast<uint32_t>(m->pool + 1) & 0xFFFFu) << 32) | (static_cast<uint64_t>(m->first) << 16) | (m->count & 0xFFFFu));
@@ -7924,7 +7924,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                                static_cast<uint64_t>(totalIndices) * (use16 ? sizeof(uint16_t) : sizeof(uint32_t));
         if (indexedRunBytes + bytes > kMaxIndexedRunBytes)
         {
-            std::vector<std::pair<uint64_t, uint64_t>> old;
+            static std::vector<std::pair<uint64_t, uint64_t>> old; old.clear();
             runs.forEach([&](uint64_t key, const RunCopy &r)
             {
                 if (r.indexed && r.vbo && r.used + 2u < arenaFrame)
@@ -8174,7 +8174,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                                static_cast<uint64_t>(totalIndices) * (use16 ? sizeof(uint16_t) : sizeof(uint32_t));
         if (indexedRunBytes + bytes > kMaxIndexedRunBytes)
         {
-            std::vector<std::pair<uint64_t, uint64_t>> old;
+            static std::vector<std::pair<uint64_t, uint64_t>> old; old.clear();
             runs.forEach([&](uint64_t key, const RunCopy &r)
             {
                 if (r.indexed && r.vbo && r.used + 2u < arenaFrame)
