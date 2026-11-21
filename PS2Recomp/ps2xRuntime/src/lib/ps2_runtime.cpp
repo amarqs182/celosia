@@ -1069,6 +1069,7 @@ bool PS2Runtime::initialize(const char *title)
 #else
         SetConfigFlags(FLAG_WINDOW_RESIZABLE);
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
+        native_renderer::runR36sBootMenu();
 #if defined(__APPLE__)
         if (std::getenv("PS2X_GS_HW"))
         {
