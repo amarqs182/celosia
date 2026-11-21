@@ -92,6 +92,9 @@ Light/menu scenes run locked at **`59.8–60.1 FPS`** (`16.6–16.7 ms`, `wait 0
      -DPS2X_LINUX_RELEASE=ON -DPS2X_LINUX_PGO=build/linux-aarch64/pgo_pass9
    ninja -C build/linux-aarch64 ps2EntryRunner
    ```
+4. Deploy the launcher files from [`ports/r36s/`](../ports/r36s/) to the R36S (alongside the user-supplied game files in `/roms/ports/.SotC_Celosia/`):
+   - `ports/r36s/SotC_Celosia.sh` -> `/roms/ports/SotC_Celosia.sh` (`chmod +x`)
+   - `ports/r36s/SotC.sh` and `ports/r36s/control.txt` -> `/roms/ports/.SotC_Celosia/` (`chmod +x SotC.sh`)
 
 ### Remaining Bottlenecks & Phase 6 Results
 - **Phase 6 & 6B visual correctness, cutscene freeze fix, & indexed `meshoptimizer` (`fix/r36s-visuals-and-meshopt`, [`SOTC_OPTIMIZATION_LOG.md`](../SOTC_OPTIMIZATION_LOG.md)):** Fixed `SOTC_NATIVE_NO*` `"0"` parsing and added `"SOTC_NATIVE_NOADDITIVE"` env hook to `dbg_additive` in `native_renderer.cpp`; unified `isSafeOpaqueDraw()` (removing `opacity >= 0.95f`/`Blend::Normal` shortcut) across `sortFree()` and instancing in `native_renderer_gl.cpp`; added indexed `meshoptimizer` (`SOTC_MESHOPT=1`, `VCACHE=0`, `OVERDRAW=0`, `SORT_OPAQUE=0`) + indexed `glMergeDraws` / `glDrawElementsInstanced` + `vao` guard; added `todoUrgent` terrain priority queue and atomic last-complete static packet retention (dropping `f=5058` `held` packets from `1284 (terrain 1212)` to `0 (terrain 0)`); fixed `char122::cloth::dynamics()` `$sp`/`$ra` corruption across `layoutClassFast()` fallback `callGuest()` calls (eliminating the bird-past-Wander cutscene hang) and updated `SotC.sh` with `SOTC_GL_AT98=0`, `SOTC_GL_OPAQUE88=0`, `SOTC_GL_NODISCARD=0`, `SOTC_GL_PSOFT98=0`. Verified via R36S cutscene/gameplay captures (`ab_vis_fix`, `gp_vis`), deterministic 125 s benchmark (`31.60 FPS` med in Shrine/courtyard gameplay), and on-device `ps2x_tests` (`93 Passed / 57 Failed` across `150` cases, matching `AGENTS.md`).
