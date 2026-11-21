@@ -95,6 +95,7 @@ namespace native_renderer::detail
 
     // makeCurrent: makes the OpenGL context current (on the thread that will draw).
     Backend *createGlBackend(std::function<void()> makeCurrent);
+    Backend *createMaliBackend(std::function<void()> makeCurrent);
     // The host's present hook (native_renderer::setPresentHook), for the GL backend.
     const std::function<void(uint32_t, uint32_t, uint32_t)> &presentHook();
 }

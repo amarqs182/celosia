@@ -1217,8 +1217,17 @@ namespace
             if (wantGl() && g_glMakeCurrent)
             {
                 ps2_stats::bootMark("native renderer: building");
-                g_backend = native_renderer::detail::createGlBackend(g_glMakeCurrent);
+                const char *rendererEnv = std::getenv("SOTC_RENDERER");
+                if (rendererEnv && std::strcmp(rendererEnv, "mali") == 0)
+                {
+                    g_backend = native_renderer::detail::createMaliBackend(g_glMakeCurrent);
+                    std::cerr << "[native] Mali renderer " << (g_backend ? "up" : "failed, falling back to OpenGL") << std::endl;
+                }
+                if (!g_backend)
+                {
+                    g_backend = native_renderer::detail::createGlBackend(g_glMakeCurrent);
                 ps2_stats::bootMark("native renderer: built");
+                }
                 std::cerr << "[native] OpenGL renderer " << (g_backend ? "up" : "failed") << std::endl;
             }
         }
