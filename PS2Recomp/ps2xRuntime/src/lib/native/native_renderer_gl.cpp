@@ -3671,7 +3671,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         static bool idx16Enabled()
         {
 #if defined(PS2X_NATIVE_GLES)
-            static const bool on = !std::getenv("SOTC_GL_IDX16") || std::atoi(std::getenv("SOTC_GL_IDX16")) != 0;
+            // GL_UNSIGNED_SHORT causes vertex explosion on Mali-G31/GLES (isolated on R36S).
+        static const bool on = std::getenv("SOTC_GL_IDX16") && std::atoi(std::getenv("SOTC_GL_IDX16")) != 0;
             return on;
 #else
             return false;
