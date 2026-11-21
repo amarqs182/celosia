@@ -132,7 +132,7 @@ export SOTC_FLUSH119=1
 
 # 5. Geometria Otimizada, Batching e Fast Paths do Renderizador GL
 export SOTC_GL_INSTANCING=1
-export SOTC_GL_MERGE=1
+export SOTC_GL_MERGE=0
 export SOTC_GL_POOLS=1
 export SOTC_GL_LEAN=1
 export SOTC_GL_LEAN_DRAW=1
@@ -202,7 +202,7 @@ export SOTC_GPU_SKIN=1
 
 export SOTC_GL_ARENA_SUBDATA=0
 export SOTC_GL_DYN_IDX16=0
-export SOTC_GL_IDX16=1
+export SOTC_GL_IDX16=0
 export SOTC_GL_FRAG_FP16=1
 export SOTC_GL_FAST_LOD=1
 export SOTC_GL_SOFT_CUT=0
