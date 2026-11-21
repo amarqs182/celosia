@@ -12,7 +12,12 @@ if [ -e "$LOCKFILE" ]; then
   fi
 fi
 echo "$$" > "$LOCKFILE"
-trap 'rm -f "$LOCKFILE"; nohup /bin/bash /usr/bin/emulationstation/emulationstation.sh >/tmp/es_restart.log 2>&1 &' INT TERM EXIT
+cleanup() {
+  trap - INT TERM EXIT
+  rm -f "$LOCKFILE"
+  nohup /bin/bash /usr/bin/emulationstation/emulationstation.sh >/tmp/es_restart.log 2>&1 &
+}
+trap cleanup INT TERM EXIT
 
 BOOT_ELF="./SCUS_974.72"
 if [ ! -f "$BOOT_ELF" ] && [ -f "./NICO.ELF" ]; then
@@ -27,8 +32,12 @@ sleep 1
 # Max frequencias CPU (1.5 GHz) e GPU (520 MHz max suportado pelo kernel)
 echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor >/dev/null 2>&1
 echo 1512000 | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq >/dev/null 2>&1
-echo performance | sudo tee /sys/class/devfreq/*gpu*/governor >/dev/null 2>&1
-echo 600000000 | sudo tee /sys/class/devfreq/*gpu*/min_freq >/dev/null 2>&1
+for gpu_dev in /sys/class/devfreq/*gpu*; do
+  [ -d "$gpu_dev" ] || continue
+  echo performance | sudo tee "$gpu_dev/governor" >/dev/null 2>&1
+  GPU_MAX_FREQ="$(cat "$gpu_dev/max_freq" 2>/dev/null)"
+  [ -n "$GPU_MAX_FREQ" ] && echo "$GPU_MAX_FREQ" | sudo tee "$gpu_dev/min_freq" >/dev/null 2>&1
+done  
 
 # Ativacao e configuracao do ZRAM
 sudo swapon /dev/zram0 2>/dev/null
@@ -48,7 +57,9 @@ export SOTC_TEXTURE_FILTER=1
 export PS2X_SWAP_INTERVAL=0
 export SOTC_FPS_CAP=60
 export SOTC_CAM_INVERT_X=1
-export PS2X_VU1_DUMP_MISSING="$PORT_DIR/vu1"
+# Desabilitado em producao; para capturar microprogramas VU1 ausentes, defina:
+# export PS2X_VU1_DUMP_MISSING="$PORT_DIR/vu1"
+unset PS2X_VU1_DUMP_MISSING
 export SOTC_FULLSCREEN=1
 export SOTC_RES_W=640
 export SOTC_RES_H=480
@@ -189,6 +200,14 @@ export SOTC_GL_BGSMALL87=1
 export SOTC_GL_MIRROR88=1
 export SOTC_GPU_SKIN=1
 
+export SOTC_GL_ARENA_SUBDATA=0
+export SOTC_GL_DYN_IDX16=0
+export SOTC_GL_IDX16=1
+export SOTC_GL_FRAG_FP16=1
+export SOTC_GL_FAST_LOD=1
+export SOTC_GL_SOFT_CUT=0
+export SOTC_GL_FRUSTUM_CULL=0
+export SOTC_GL_MERGE_BUDGET_US=2000
 export SOTC_FRAME_LOG=0
 export SOTC_COLL_CENSUS=0
 export SOTC_COLLISION_STATS=0
@@ -196,7 +215,9 @@ export SOTC_COLL115_LOG=0
 export SOTC_SEG123=1
 export SOTC_GL_SHOTS=0
 export SOTC_GL_SHOT_DIR=/tmp/shots
-mkdir -p /tmp/shots
+if [ "${SOTC_GL_SHOTS:-0}" != "0" ]; then
+  mkdir -p /tmp/shots
+fi  
 
 # Executa diretamente sem overhead do GDB para performance maxima nativa
 ./ps2sotc_aarch64_pie_sdl "$BOOT_ELF" > /tmp/sotc.log 2>&1

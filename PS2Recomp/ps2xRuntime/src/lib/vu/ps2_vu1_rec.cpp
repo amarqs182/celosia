@@ -58,6 +58,11 @@ namespace
 
     uint8_t laneBit(uint32_t component) { return static_cast<uint8_t>(0x8u >> component); }
 }
+static const char *vu1DumpMissingDir()
+{
+    static const char *const dir = std::getenv("PS2X_VU1_DUMP_MISSING");
+    return (dir && dir[0]) ? dir : nullptr;
+}
 
 void VU1Interpreter::registerRecompiled(uint64_t imageHash, RecompiledFn fn)
 {
@@ -68,7 +73,7 @@ void VU1Interpreter::noteRecompiledBail()
 {
     // PS2X_VU1_DUMP_MISSING also records pcs the recompiled code did not
     // cover, so the next generation includes them.
-    static const char *missingDir = std::getenv("PS2X_VU1_DUMP_MISSING");
+    const char *missingDir = vu1DumpMissingDir();
     static std::set<std::pair<uint64_t, uint32_t>> seen;
     if (!seen.insert({m_recHash, m_state.pc}).second)
         return;
@@ -89,7 +94,7 @@ VU1Interpreter::RecompiledFn VU1Interpreter::findRecompiled(const uint8_t *vuCod
     static const bool disabled = std::getenv("PS2X_VU1_EXACT") != nullptr ||
                                  std::getenv("PS2X_VU1_NOREC") != nullptr;
     // With nothing recompiled yet, only keep going to record images.
-    static const bool collecting = std::getenv("PS2X_VU1_DUMP_MISSING") != nullptr;
+    const bool collecting = vu1DumpMissingDir() != nullptr;
     if (disabled || m_unit != Unit::VU1 || !memory || vuCode != memory->getVU1Code() ||
         codeSize != 0x4000u || (registry().empty() && !collecting))
         return nullptr;
@@ -113,7 +118,7 @@ VU1Interpreter::RecompiledFn VU1Interpreter::findRecompiled(const uint8_t *vuCod
     }
     // PS2X_VU1_DUMP_MISSING=<dir>: save microcode images that have no
     // recompiled version yet, with the pcs they start at, for the generator.
-    static const char *missingDir = std::getenv("PS2X_VU1_DUMP_MISSING");
+    const char *missingDir = vu1DumpMissingDir();
     if (!m_recFn && missingDir)
     {
         static std::set<std::pair<uint64_t, uint32_t>> seen;
