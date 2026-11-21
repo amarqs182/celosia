@@ -15,7 +15,6 @@ echo "$$" > "$LOCKFILE"
 cleanup() {
   trap - INT TERM EXIT
   rm -f "$LOCKFILE"
-  nohup /bin/bash /usr/bin/emulationstation/emulationstation.sh >/tmp/es_restart.log 2>&1 &
 }
 trap cleanup INT TERM EXIT
 
@@ -24,10 +23,7 @@ if [ ! -f "$BOOT_ELF" ] && [ -f "./NICO.ELF" ]; then
   cp -fp ./NICO.ELF ./SCUS_974.72 2>/dev/null
 fi
 
-pkill -f emulationstation 2>/dev/null
-pkill -f es-status-daemon 2>/dev/null
 sudo systemctl stop batt_led.service 2>/dev/null
-sleep 1
 
 # Max frequencias CPU (1.5 GHz) e GPU (520 MHz max suportado pelo kernel)
 echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor >/dev/null 2>&1
