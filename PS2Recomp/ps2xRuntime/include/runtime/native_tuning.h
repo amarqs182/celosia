@@ -560,7 +560,7 @@ namespace native_renderer
         bool glFx94 = true;
         bool glBloom94 = true;
 #elif defined(__linux__)
-        bool glBgCopy94 = true;
+        bool glBgCopy94 = false; // avoids black/stale backgrounds in menus/transitions on GLES; opt-in via SOTC_GL_BGCOPY94=1
         bool glGlow94 = true;
         bool glFx94 = false;
         bool glBloom94 = true;
