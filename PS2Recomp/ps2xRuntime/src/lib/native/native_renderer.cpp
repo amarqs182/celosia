@@ -246,6 +246,7 @@ namespace native_renderer
                         ++c;
                 }
             d.preset = static_cast<float>(matchingPreset(d));
+           if ((!d.glSoftCut && !d.glAt98) || (!d.glMergeDraws && d.glSort87)) std::fprintf(stderr, "[native] WARNING: conflicting GL tuning (%s%s)\n", (!d.glSoftCut && !d.glAt98) ? "!glSoftCut&&!glAt98 " : "", (!d.glMergeDraws && d.glSort87) ? "!glMergeDraws&&glSort87" : "");
             return d;
         }();
         g_tuning = &t;
