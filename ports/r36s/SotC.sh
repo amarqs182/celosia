@@ -15,7 +15,6 @@ echo "$$" > "$LOCKFILE"
 cleanup() {
   trap - INT TERM EXIT
   rm -f "$LOCKFILE"
-  nohup /bin/bash /usr/bin/emulationstation/emulationstation.sh >/tmp/es_restart.log 2>&1 &
 }
 trap cleanup INT TERM EXIT
 
@@ -24,8 +23,6 @@ if [ ! -f "$BOOT_ELF" ] && [ -f "./NICO.ELF" ]; then
   cp -fp ./NICO.ELF ./SCUS_974.72 2>/dev/null
 fi
 
-pkill -f emulationstation 2>/dev/null
-pkill -f es-status-daemon 2>/dev/null
 sudo systemctl stop batt_led.service 2>/dev/null
 sleep 1
 
@@ -91,18 +88,18 @@ export SOTC_NATIVE_NOADDITIVE=0
 
 # 3. Geometria Estavel Sem Pop-in, Culling Nativo de Frustum e Meshopt
 export SOTC_PRESET=1
-export SOTC_SACRIFICES=1
-export SOTC_SAC_LOD=1
+export SOTC_SACRIFICES=0
+export SOTC_SAC_LOD=0
 export SOTC_SAC_LOD_SCALE=1.6
-export SOTC_SAC_DRAWDIST=1
+export SOTC_SAC_DRAWDIST=0
 export SOTC_SAC_DRAWDIST_SCALE=0.75
-export SOTC_SAC_FAR_TERRAIN=1
+export SOTC_SAC_FAR_TERRAIN=0
 export SOTC_SAC_FAR_TERRAIN_SCALE=0
 export SOTC_SAC_MIN_PROJECTED=0
 export SOTC_SAC_CAMCOLL=1
-export SOTC_SAC_FARCHARA=1
+export SOTC_SAC_FARCHARA=0
 export SOTC_SAC_FARCHARA_DIST=35.0
-export SOTC_SAC_FX=1
+export SOTC_SAC_FX=0
 export SOTC_GL_SORT87=1
 export SOTC_SORT_OPAQUE=1
 export SOTC_GL_TEXARRAY=1
@@ -132,7 +129,8 @@ export SOTC_FLUSH119=1
 
 # 5. Geometria Otimizada, Batching e Fast Paths do Renderizador GL
 export SOTC_GL_INSTANCING=1
-export SOTC_GL_MERGE=1
+export SOTC_GL_FAR_GUARD=0
+export SOTC_GL_MERGE=0
 export SOTC_GL_POOLS=1
 export SOTC_GL_LEAN=1
 export SOTC_GL_LEAN_DRAW=1
@@ -202,7 +200,7 @@ export SOTC_GPU_SKIN=1
 
 export SOTC_GL_ARENA_SUBDATA=0
 export SOTC_GL_DYN_IDX16=0
-export SOTC_GL_IDX16=1
+export SOTC_GL_IDX16=0
 export SOTC_GL_FRAG_FP16=1
 export SOTC_GL_FAST_LOD=1
 export SOTC_GL_SOFT_CUT=0
