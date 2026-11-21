@@ -22,27 +22,27 @@ This repository is `amarqs182/celosia`, the maintained fork for the R36S adaptat
 Before every push:
 1. Run `git remote -v` and inspect push URLs.
 2. Ensure no push URL points to `HenryKun55/celosia`.
-3. Work, commit, and push directly on `main` (`git push origin main`); do not create new topic branches unless explicitly requested.
+3. Do not push directly to `main` (GitHub branch protection blocks direct pushes to `main`). Create a temporary branch from `main`, commit, push that branch to `origin`, and open a Pull Request targeting `amarqs182/celosia:main` (wait for CI to pass, then delete the branch after merge).
 4. Keep the repository's `.githooks/pre-push` hook enabled (see `CONTRIBUTING.md`) so pushes to `HenryKun55/celosia` remain blocked.
 
-Before any PR creation or update (if a contributor submits a fork PR):
+Before any PR creation or update:
 1. Explicitly set the target repository to `amarqs182/celosia`.
 2. Explicitly set the target branch to `main`.
 3. Verify the resulting PR's base repository and branch after creation.
 4. With GitHub CLI, use `gh pr create --repo amarqs182/celosia --base main`.
 
-Maintainers work directly on `amarqs182/celosia:main` to avoid branch sprawl. External contributors may still open PRs targeting `amarqs182/celosia:main`.
+Direct pushes to `amarqs182/celosia:main` are blocked by GitHub branch protection. All changes (from maintainers and contributors alike) must go through a temporary branch and be submitted via a Pull Request targeting `amarqs182/celosia:main`, waiting for CI to pass and deleting the temporary branch after merge.
 
 Do not automatically synchronize `main` from `HenryKun55/celosia` or merge upstream changes into it. If upstream changes are needed, fetch and inspect them first, then propose a deliberate integration PR to this fork. Do not send R36S changes upstream.
 
 ## Hard rules
 
-1. **Never push to `upstream`.** Only `origin` is writable. Push directly
-   to `main` with `git push origin main`. Do not run `git push upstream` under any
+1. **Never push to `upstream`.** Only `origin` is writable. Push your temporary branch to `origin` (`git push origin <branch>`)
+   and open a Pull Request to `amarqs182/celosia:main`. Do not run `git push upstream` under any
    circumstances.
-2. **Never force-push `main`.** `main` on `origin` is the single active
-   branch for this fork. Work, commit, and push directly on `main`; do not
-   create topic branches unless explicitly asked.
+2. **Never push directly to or force-push `main`.** Direct pushes to `main` on `origin` are blocked
+   by GitHub branch protection. Always work on a temporary branch, submit changes via Pull Request
+   to `amarqs182/celosia:main`, wait for CI, and delete the branch after merge.
 3. **Do not sync `main` from upstream automatically.** `git fetch upstream` and
    read the diff first; if upstream's changes are needed here, land them
    through a deliberate integration PR (see the contribution boundary above).
