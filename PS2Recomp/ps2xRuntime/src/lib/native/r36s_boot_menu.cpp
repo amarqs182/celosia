@@ -103,6 +103,16 @@ namespace
         setEnvVar("SOTC_NATIVE", "1");
         setEnvVar("SOTC_NATIVE_GL", "1");
     }
+
+#if defined(__linux__)
+    void drawBoxOutline(int x, int y, int w, int h, Color c)
+{
+    DrawRectangle(x, y, w, 2, c);
+    DrawRectangle(x, y + h - 2, w, 2, c);
+    DrawRectangle(x, y, 2, h, c);
+    DrawRectangle(x + w - 2, y, 2, h, c);
+}
+#endif
 } // namespace
 
 void runR36sBootMenu()
@@ -238,11 +248,11 @@ void runR36sBootMenu()
             const int panelY = (screenH - panelH) / 2;
 
             DrawRectangle(panelX, panelY, panelW, panelH, Color{24, 30, 42, 255});
-            DrawRectangleLines(panelX, panelY, panelW, panelH, Color{70, 130, 180, 255});
+            drawBoxOutline(panelX, panelY, panelW, panelH, Color{70, 130, 180, 255});
 
-            DrawText("CELOSIA / SOTC - R36S BOOT MENU", panelX + 24, panelY + 22, 24, RAYWHITE);
+            DrawText("CELOSIA / SOTC - R36S BOOT MENU", panelX + 24, panelY + 22, 24, Color{245, 245, 245, 255});
             DrawText("640x480 Pre-Boot Renderer Selector", panelX + 24, panelY + 54, 16, Color{160, 185, 215, 255});
-            DrawLine(panelX + 20, panelY + 82, panelX + panelW - 20, panelY + 82, Color{58, 72, 96, 255});
+            DrawRectangle(panelX + 20, panelY + 82, panelW - 40, 1, Color{58, 72, 96, 255});
 
             for (int i = 0; i < kRowCount; ++i)
             {
@@ -251,19 +261,19 @@ void runR36sBootMenu()
                 if (isSel)
                 {
                     DrawRectangle(panelX + 20, rowY - 6, panelW - 40, 44, Color{42, 64, 96, 255});
-                    DrawRectangleLines(panelX + 20, rowY - 6, panelW - 40, 44, Color{110, 180, 255, 255});
+                    drawBoxOutline(panelX + 20, rowY - 6, panelW - 40, 44, Color{110, 180, 255, 255});
                 }
 
-                DrawText(labels[i], panelX + 32, rowY + 6, 18, isSel ? YELLOW : LIGHTGRAY);
+                DrawText(labels[i], panelX + 32, rowY + 6, 18, isSel ? Color{253, 249, 0, 255} : Color{200, 200, 200, 255});
                 const int valIdx = getOptionValue(i);
                 const char *valText = choices[i][valIdx];
                 char buf[128];
                 std::snprintf(buf, sizeof(buf), "< %s >", valText);
                 const int textW = MeasureText(buf, 18);
-                DrawText(buf, panelX + panelW - 32 - textW, rowY + 6, 18, isSel ? RAYWHITE : Color{180, 210, 240, 255});
+                DrawText(buf, panelX + panelW - 32 - textW, rowY + 6, 18, isSel ? Color{245, 245, 245, 255} : Color{180, 210, 240, 255});
             }
 
-            DrawLine(panelX + 20, panelY + 340, panelX + panelW - 20, panelY + 340, Color{58, 72, 96, 255});
+            DrawRectangle(panelX + 20, panelY + 340, panelW - 40, 1, Color{58, 72, 96, 255});
 
             if (countdownActive)
             {
@@ -277,7 +287,7 @@ void runR36sBootMenu()
                 DrawText("Contagem cancelada. Ajuste as opcoes e inicie.", panelX + 24, panelY + 354, 16, Color{140, 230, 170, 255});
             }
 
-            DrawText("A / Enter: Iniciar   |   Start: Salvar padrao e iniciar", panelX + 24, panelY + 384, 16, LIGHTGRAY);
+            DrawText("A / Enter: Iniciar   |   Start: Salvar padrao e iniciar", panelX + 24, panelY + 384, 16, Color{200, 200, 200, 255});
             DrawText("B / Esc: Forcar fallback OpenGL (gl) e iniciar", panelX + 24, panelY + 408, 16, Color{255, 160, 160, 255});
 
             EndDrawing();
