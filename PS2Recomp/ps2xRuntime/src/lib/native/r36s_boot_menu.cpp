@@ -269,9 +269,9 @@ void runR36sBootMenu()
                 {
                     if (ev.type == EV_KEY)
                     {
-                        if (ev.code == BTN_SELECT)
+                        if (ev.code == BTN_SELECT || ev.code == BTN_TRIGGER_HAPPY5)
                             evSelectDown = (ev.value != 0);
-                        else if (ev.code == BTN_START)
+                        else if (ev.code == BTN_START || ev.code == BTN_TRIGGER_HAPPY6)
                             evStartDown = (ev.value != 0);
 
                         if (evSelectDown && evStartDown)
@@ -284,17 +284,17 @@ void runR36sBootMenu()
 
                         if (ev.value == 1)
                         {
-                            if (ev.code == BTN_DPAD_UP)
+                            if (ev.code == BTN_DPAD_UP || ev.code == BTN_TRIGGER_HAPPY1)
                                 upPressed = true;
-                            else if (ev.code == BTN_DPAD_DOWN)
+                            else if (ev.code == BTN_DPAD_DOWN || ev.code == BTN_TRIGGER_HAPPY2)
                                 downPressed = true;
-                            else if (ev.code == BTN_DPAD_LEFT)
+                            else if (ev.code == BTN_DPAD_LEFT || ev.code == BTN_TRIGGER_HAPPY3)
                                 leftPressed = true;
-                            else if (ev.code == BTN_DPAD_RIGHT)
+                            else if (ev.code == BTN_DPAD_RIGHT || ev.code == BTN_TRIGGER_HAPPY4)
                                 rightPressed = true;
                             else if (ev.code == BTN_SOUTH)
                                 startOnlyPressed = true;
-                            else if (ev.code == BTN_START)
+                            else if (ev.code == BTN_START || ev.code == BTN_TRIGGER_HAPPY6)
                                 saveAndStartPressed = true;
                             else if (ev.code == BTN_EAST)
                                 fallbackGlPressed = true;
