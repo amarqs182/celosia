@@ -139,6 +139,7 @@ namespace native_renderer
     // thread (the backend's render thread; every call below comes from the
     // game thread).
     void setGlContext(std::function<void()> makeCurrent);
+    void runR36sBootMenu();
     // OpenGL backends: hands each finished picture's GL texture (y-up) to the
     // host instead of reading it back (the Vita: Vita3K's CPU reads of render
     // targets do not see the GPU's output). Called from the render thread.
