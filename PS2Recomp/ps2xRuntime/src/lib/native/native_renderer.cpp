@@ -1193,6 +1193,7 @@ namespace
     std::atomic<bool> g_shown{false};
     std::function<void()> g_glMakeCurrent;
     std::function<void(uint32_t, uint32_t, uint32_t)> g_presentHook;
+    bool g_isMali = false;
 
     bool wantGl()
     {
@@ -1218,17 +1219,17 @@ namespace
             {
                 ps2_stats::bootMark("native renderer: building");
                 const char *rendererEnv = std::getenv("SOTC_RENDERER");
-                if (rendererEnv && std::strcmp(rendererEnv, "mali") == 0)
+                if (rendererEnv && ((rendererEnv[0] == 'm' || rendererEnv[0] == 'M') && (rendererEnv[1] == 'a' || rendererEnv[1] == 'A') && (rendererEnv[2] == 'l' || rendererEnv[2] == 'L') && (rendererEnv[3] == 'i' || rendererEnv[3] == 'I') && rendererEnv[4] == '\0'))
                 {
                     g_backend = native_renderer::detail::createMaliBackend(g_glMakeCurrent);
                     std::cerr << "[native] Mali renderer " << (g_backend ? "up" : "failed, falling back to OpenGL") << std::endl;
                 }
-                if (!g_backend)
+                if (g_backend) { g_isMali = true; ps2_stats::bootMark("native renderer: built"); } else
                 {
                     g_backend = native_renderer::detail::createGlBackend(g_glMakeCurrent);
-                ps2_stats::bootMark("native renderer: built");
+                ps2_stats::bootMark("native renderer: built"); std::cerr << "[native] OpenGL renderer " << (g_backend ? "up" : "failed") << std::endl;
                 }
-                std::cerr << "[native] OpenGL renderer " << (g_backend ? "up" : "failed") << std::endl;
+                 
             }
         }
         return g_backend;
@@ -1244,7 +1245,7 @@ namespace native_renderer::detail
 
 namespace native_renderer
 {
-    const char *backendName() { return wantGl() ? "OpenGL" : "None"; }
+    const char *backendName() { return !wantGl() ? "None" : (g_isMali ? "Mali-G31 (GLES)" : "OpenGL"); }
     bool inEmulator() { return detail::g_inEmulator.load(std::memory_order_relaxed); }
     bool tuningApplies(const TuningItem &item) { return (item.backends & (wantGl() ? 2u : 1u)) != 0u; }
 
