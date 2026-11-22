@@ -495,9 +495,19 @@ namespace
     // 2D quads on GLES (vitaGL's immediate-mode client arrays do not exist
     // in GLES2/3): one program, position + uv -> texture * color, with the
     // screen transform (glOrtho(0, w, h, 0)) in the vertex shader.
+    std::atomic<int> g_envCapFps{-1};
+
+    int readEnvCapFps()
+    {
+        const char *env = std::getenv("SOTC_FPS_CAP");
+        return env ? std::atoi(env) : 60;
+    }
+
     GLuint g_quadProgram = 0;
     GLint g_quadPos = -1, g_quadUv = -1, g_quadSize = -1, g_quadTexture = -1, g_quadColor = -1;
     GLuint g_whiteTexture = 0; // 1x1 white texel: the texture-less draws
+    GLuint g_quadVbo = 0;
+    std::vector<float> g_quadVerts;
 
     GLuint compileShader(GLenum type, const char *source)
     {
@@ -568,6 +578,8 @@ namespace
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
+        if (!g_quadVbo)
+            glGenBuffers(1, &g_quadVbo);
         return true;
     }
 
@@ -579,23 +591,21 @@ namespace
             return;
         // Interleaved position + uv (uv-less draws use 0,0 with the white
         // texel, so the color comes out plain).
-        std::vector<float> verts;
-        verts.reserve(quads * 24);
+        g_quadVerts.clear();
+        g_quadVerts.reserve(static_cast<size_t>(quads) * 24);
         for (int q = 0; q < quads; ++q)
         {
             static const int order[6] = {0, 1, 2, 0, 2, 3};
             for (int k : order)
             {
-                verts.push_back(xy[q * 8 + k * 2]);
-                verts.push_back(xy[q * 8 + k * 2 + 1]);
-                verts.push_back(uv ? uv[q * 8 + k * 2] : 0.0f);
-                verts.push_back(uv ? uv[q * 8 + k * 2 + 1] : 0.0f);
+                g_quadVerts.push_back(xy[q * 8 + k * 2]);
+                g_quadVerts.push_back(xy[q * 8 + k * 2 + 1]);
+                g_quadVerts.push_back(uv ? uv[q * 8 + k * 2] : 0.0f);
+                g_quadVerts.push_back(uv ? uv[q * 8 + k * 2 + 1] : 0.0f);
             }
         }
-        GLuint vbo = 0;
-        glGenBuffers(1, &vbo);
-        glBindBuffer(GL_ARRAY_BUFFER, vbo);
-        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(verts.size() * sizeof(float)), verts.data(), GL_STATIC_DRAW);
+        glBindBuffer(GL_ARRAY_BUFFER, g_quadVbo);
+        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(g_quadVerts.size() * sizeof(float)), g_quadVerts.data(), GL_STREAM_DRAW);
         glEnableVertexAttribArray(g_quadPos);
         glVertexAttribPointer(g_quadPos, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), nullptr);
         glEnableVertexAttribArray(g_quadUv);
@@ -608,7 +618,7 @@ namespace
         glDrawArrays(GL_TRIANGLES, 0, quads * 6);
         glDisableVertexAttribArray(g_quadPos);
         glDisableVertexAttribArray(g_quadUv);
-        glDeleteBuffers(1, &vbo);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
     }
 
     void rectQuad(float *xy, float x, float y, float w, float h)
@@ -770,6 +780,10 @@ void CloseWindow(void)
             if (slot.texture)
                 glDeleteTextures(1, &slot.texture);
         g_textures.clear();
+        if (g_quadVbo)
+            glDeleteBuffers(1, &g_quadVbo);
+        g_quadVbo = 0;
+        g_quadVerts.clear();
         if (g_whiteTexture)
             glDeleteTextures(1, &g_whiteTexture);
         g_whiteTexture = 0;
@@ -860,6 +874,11 @@ void BeginDrawing(void)
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 }
 
+void ps2xLinuxRefreshFpsCap()
+{
+    g_envCapFps.store(readEnvCapFps(), std::memory_order_relaxed);
+}
+
 void EndDrawing(void)
 {
     if (g_glReady && g_window)
@@ -885,7 +904,12 @@ void EndDrawing(void)
         bootMark("first picture on screen");
     }
     ps2xLinuxGlUnlock();
-    int envCapFps = []() { const char *s = std::getenv("SOTC_FPS_CAP"); if (!s || *s == '\0') return 60; char *end = nullptr; const long v = std::strtol(s, &end, 10); return (end != s && *end == '\0' && v >= 0 && v <= 10000) ? static_cast<int>(v) : 60; }();
+    int envCapFps = g_envCapFps.load(std::memory_order_relaxed);
+    if (envCapFps < 0)
+    {
+        envCapFps = readEnvCapFps();
+        g_envCapFps.store(envCapFps, std::memory_order_relaxed);
+    }
     int targetFps = envCapFps;
     const int runtimeFps = g_targetFps.load(std::memory_order_relaxed);
     if (targetFps > 0 && runtimeFps > 0 && runtimeFps < targetFps)

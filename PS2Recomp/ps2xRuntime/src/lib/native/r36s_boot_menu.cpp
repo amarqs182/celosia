@@ -16,6 +16,10 @@
 #include <unistd.h>
 #endif
 
+#ifdef PS2X_LINUX_SDL2_SHIM
+extern void ps2xLinuxRefreshFpsCap();
+#endif
+
 namespace native_renderer
 {
 namespace
@@ -96,7 +100,7 @@ namespace
             return;
 
         out << "SOTC_RENDERER=" << (cfg.rendererIdx == 0 ? "mali" : "gl") << "\n";
-        out << "SOTC_FPS_CAP=" << (cfg.fpsIdx == 0 ? "30" : (cfg.fpsIdx == 1 ? "60") : "0") << "\n";
+        out << "SOTC_FPS_CAP=" << (cfg.fpsIdx == 0 ? "30" : (cfg.fpsIdx == 1 ? "60" : "0") )<< "\n";
         out << "SOTC_MALI_DRS=" << (cfg.drsIdx == 0 ? "1" : "0") << "\n";
         out << "SOTC_MALI_TEX16=" << (cfg.tex16Idx == 0 ? "1" : "0") << "\n";
         out << "SOTC_MALI_STATS=" << (cfg.maliStatsIdx == 1 ? "1" : "0") << "\n";
@@ -126,7 +130,10 @@ namespace
         setEnvVar("SOTC_MALI_STATS", cfg.maliStatsIdx == 1 ? "1" : "0", overwrite);
       setEnvVar("SOTC_MALI_AT_PASS2", cfg.maliAtPass2Idx == 0 ? "0" : (cfg.maliAtPass2Idx == 1 ? "1" : "2"), overwrite);
     setEnvVar("SOTC_MALI_MERGE", cfg.maliMergeIdx == 0 ? "0" : "1", overwrite);
-}
+#ifdef PS2X_LINUX_SDL2_SHIM
+        ps2xLinuxRefreshFpsCap();
+#endif
+    }
 
 #if defined(__linux__)
     void drawBoxOutline(int x, int y, int w, int h, Color c)
@@ -145,6 +152,14 @@ void runR36sBootMenu()
     return;
 #endif
     BootConfig cfg;
+    if (const char *v = std::getenv("SOTC_RENDERER"))
+        cfg.rendererIdx = (std::string(v) == "gl") ? 1 : 0;
+    if (const char *v = std::getenv("SOTC_FPS_CAP"))
+        cfg.fpsIdx = (std::atoi(v) == 0) ? 2 : (std::atoi(v) >= 60 ? 1 : 0);
+    if (const char *v = std::getenv("SOTC_MALI_DRS"))
+        cfg.drsIdx = (std::atoi(v) == 0) ? 1 : 0;
+    if (const char *v = std::getenv("SOTC_MALI_TEX16"))
+        cfg.tex16Idx = (std::atoi(v) == 0) ? 1 : 0;
     loadBootConfig(cfg);
 
     const char *skipEnv = std::getenv("SOTC_SKIP_BOOT_MENU");

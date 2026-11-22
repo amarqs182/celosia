@@ -121,14 +121,7 @@ unset SOTC_CAP20
 export SOTC_CAP30=0
 export SOTC_FRAME_INTERVAL=1
 
-# Round 119: Fast contact set & cache for collision walks and finder lists
-export SOTC_WALK119=1
-export SOTC_VIEW119=1
-export SOTC_PART119=1
-export SOTC_FLUSH119=1
-
-# 5. Geometria Otimizada, Batching e Fast Paths do Renderizador GL (Fallback SOTC_GL_*)
-# Motor Mali (SOTC_RENDERER=mali / SOTC_MALI_*): usa defaults proprios separados do fallback SOTC_GL_* (SOTC_GL_SORT87=0 com SOTC_GL_MERGE=0)
+# 5. Geometria Otimizada, Batching e Fast Paths do Renderizador GL
 export SOTC_GL_INSTANCING=1
 export SOTC_GL_MERGE=0
 export SOTC_GL_POOLS=1
@@ -165,7 +158,6 @@ export SOTC_EE_TRUST=1
 export SOTC_LIFTD1=1
 export SOTC_SORT140=1
 export SOTC_FIN138=1
-export SOTC_POSE136=1
 export SOTC_CLIP140=1
 export SOTC_PF141=0
 export SOTC_PFC141=0
@@ -191,7 +183,9 @@ export SOTC_FRAME_LOG=0
 export SOTC_COLL_CENSUS=0
 export SOTC_COLLISION_STATS=0
 export SOTC_COLL115_LOG=0
-export SOTC_SEG123=1
+export SOTC_SEG123=0
+export SOTC_RENDERER="${SOTC_RENDERER:-mali}"
+# export SOTC_MALI_STATS=1
 export SOTC_GL_SHOTS=0
 export SOTC_GL_SHOT_DIR=/tmp/shots
 if [ "${SOTC_GL_SHOTS:-0}" != "0" ]; then
