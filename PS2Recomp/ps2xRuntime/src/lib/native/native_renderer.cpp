@@ -246,7 +246,8 @@ namespace native_renderer
                         ++c;
                 }
             d.preset = static_cast<float>(matchingPreset(d));
-           if ((!d.glSoftCut && !d.glAt98) || (!d.glMergeDraws && d.glSort87)) std::fprintf(stderr, "[native] WARNING: conflicting GL tuning (%s%s)\n", (!d.glSoftCut && !d.glAt98) ? "!glSoftCut&&!glAt98 " : "", (!d.glMergeDraws && d.glSort87) ? "!glMergeDraws&&glSort87" : "");
+        const char *rendererEnv = std::getenv("SOTC_RENDERER"); const bool isMali = rendererEnv && (rendererEnv[0] == 'm' || rendererEnv[0] == 'M') && (rendererEnv[1] == 'a' || rendererEnv[1] == 'A') && (rendererEnv[2] == 'l' || rendererEnv[2] == 'L') && (rendererEnv[3] == 'i' || rendererEnv[3] == 'I') && rendererEnv[4] == '\0';
+        if (!isMali)     if ((!d.glSoftCut && !d.glAt98) || (!d.glMergeDraws && d.glSort87)) std::fprintf(stderr, "[native] WARNING: conflicting GL tuning (%s%s)\n", (!d.glSoftCut && !d.glAt98) ? "!glSoftCut&&!glAt98 " : "", (!d.glMergeDraws && d.glSort87) ? "!glMergeDraws&&glSort87" : "");
             return d;
         }();
         g_tuning = &t;
