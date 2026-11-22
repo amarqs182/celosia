@@ -2060,10 +2060,12 @@ private:
                 const uint32_t afail = (rd.state.alphaTest >> 12) & 3u;
                 if (ate && atst == 0u && afail == 0u)
                     continue;
-                const bool hasAlphaTest = ate && (atst != 1u);
-                const bool needsGuard = rd.state.background && m_fog.skyNear > 0.0f;
+                const bool hasAnyAlphaTest = ate && (atst != 1u);
+                const bool canAlphaTestBucket = ate && (atst == 5u || atst == 6u) &&
+                                                !rd.state.background && !rd.state.overlay && !rd.state.noDepthWrite &&
+                                                rd.state.blend != Blend::Additive && rd.state.blend != Blend::Subtract;
                 const bool texOpaque = !texPtr || texPtr->minAlpha >= 124u;
-                const bool isOpaque = !hasAlphaTest && !needsGuard && !rd.state.overlay && !rd.state.noDepthWrite &&
+                const bool isOpaque = !hasAnyAlphaTest && !rd.state.background && !rd.state.overlay && !rd.state.noDepthWrite &&
                                       (rd.state.blend == Blend::Opaque ||
                                        (rd.state.blend == Blend::Normal && rd.state.opacity >= 0.99f && mesh.minAlpha >= 124u && texOpaque));
                 const uint32_t opProg = q.skinned ? 3u : 0u;
@@ -2073,7 +2075,7 @@ private:
                     q.bucket = 0u;
                     q.psoKey = makePsoKey(opProg, Blend::Opaque, true, true, 0u);
                 }
-                else if (hasAlphaTest && !rd.state.overlay)
+                else if (canAlphaTestBucket)
                 {
                     q.bucket = 1u;
                     q.psoKey = makePsoKey(cutProg, rd.state.blend, true, !rd.state.noDepthWrite, 0u);
@@ -2082,7 +2084,8 @@ private:
                 {
                     q.bucket = 2u;
                     const uint32_t df = rd.state.overlay ? 2u : 0u;
-                    const bool dw = rd.state.writeDepth && !rd.state.noDepthWrite && !rd.state.overlay;
+                    const bool dw = !rd.state.overlay && !rd.state.noDepthWrite &&
+                                    (rd.state.blend != Blend::Additive || rd.state.writeDepth);
                     q.psoKey = makePsoKey(cutProg, rd.state.blend, true, dw, df);
                 }
             }
@@ -2108,7 +2111,7 @@ private:
             }
 
             const bool mergeCandidate = m_mergeEnabled && (q.bucket == 0u || q.bucket == 1u) && !mesh.dynamic && !q.skinned && !mesh.srcVerts.empty();
-            if (m_cullEnabled && mesh.hasBox && !mesh.dynamic && !mesh.skinned && !rd.state.screen && !rd.state.overlay)
+            if (m_cullEnabled && mesh.hasBox && !mesh.dynamic && !mesh.skinned && !rd.state.screen && !rd.state.overlay && !rd.state.background)
             {
                 if (mergeCandidate)
                 {
@@ -2894,7 +2897,13 @@ private:
         }
         else if (q.bucket == 2u)
         {
-            emitDrawSingle(q, pkt, true, 0.02f, 0.0f);
+            float minA = 0.02f;
+            const uint32_t at = q.state.alphaTest;
+            const uint32_t atst = (at >> 1) & 7u;
+            const uint32_t afail = (at >> 12) & 3u;
+            if ((at & 1u) && (atst == 5u || atst == 6u) && afail == 0u)
+                minA = std::max(0.02f, static_cast<float>((at >> 4) & 0xFFu) / 128.0f);
+            emitDrawSingle(q, pkt, true, minA, 0.0f);
         }
         else
         {
