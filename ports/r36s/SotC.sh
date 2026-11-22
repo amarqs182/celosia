@@ -100,7 +100,7 @@ export SOTC_SAC_CAMCOLL=1
 export SOTC_SAC_FARCHARA=0
 # export SOTC_SAC_FARCHARA_DIST=35.0
 export SOTC_SAC_FX=0
-export SOTC_GL_SORT87=1
+export SOTC_GL_SORT87=0
 export SOTC_SORT_OPAQUE=1
 export SOTC_GL_TEXARRAY=1
 export SOTC_GL_PROMOTE_128=1
@@ -127,7 +127,8 @@ export SOTC_VIEW119=1
 export SOTC_PART119=1
 export SOTC_FLUSH119=1
 
-# 5. Geometria Otimizada, Batching e Fast Paths do Renderizador GL
+# 5. Geometria Otimizada, Batching e Fast Paths do Renderizador GL (Fallback SOTC_GL_*)
+# Motor Mali (SOTC_RENDERER=mali / SOTC_MALI_*): usa defaults proprios separados do fallback SOTC_GL_* (SOTC_GL_SORT87=0 com SOTC_GL_MERGE=0)
 export SOTC_GL_INSTANCING=1
 export SOTC_GL_MERGE=0
 export SOTC_GL_POOLS=1
