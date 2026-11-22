@@ -1,15 +1,18 @@
 // Dedicated Mali-G31 (GLES 3.2 / GL 3.3 Core) native renderer backend for Celosia R36S.
 // Plugs directly into native_renderer::detail::Backend (selected via SOTC_RENDERER=mali).
 //
-// Phase 3:
-// - Phase 1+2 base: exact per-layer (state.order) rendering with intra-layer HSR
+// Phase 4 (Complete 14-pillar Mali-G31 engine):
+// - Phase 1+2+3 base: exact per-layer (state.order) rendering with intra-layer HSR
 //   (Opaque Front-to-Back -> Alpha-Test 2-pass -> Transparent/Overlay -> Screen),
 //   compact 28-byte static vertices, ASTC hardware cache loader, RGB565/RGB5_A1,
-//   disk shader binary cache, glFenceSync ring buffers, TBDR invalidate, and DRS.
-// - Phase 3A: GPU Skinning via UBO palette (canSkin(), uploadSkinnedMesh(), framePalette()).
-// - Phase 3B: Hardware Instancing via UBO (up to 64 instances/call, glDraw*Instanced).
-// - Phase 3C: Selective Z-Prepass for large opaque geometry (opt-in SOTC_MALI_ZPREPASS=1).
-// - Phase 3D: Built-in per-120-frame telemetry (SOTC_MALI_STATS=1).
+//   disk shader binary cache, glFenceSync ring buffers, TBDR invalidate,
+//   GPU skinning UBO, hardware instancing UBO, optional Z-prepass, and telemetry.
+// - Phase 4A: Single-pass fullscreen-triangle post-process (upscale + subtle 4-tap bloom
+//   + tonemap polish) controlled by SOTC_MALI_POST (default 1) / SOTC_MALI_POST_BLOOM.
+// - Phase 4B: Opt-in texture dumper (SOTC_MALI_DUMP_TEX=1) for offline PC ASTC packing
+//   via tools/astc_pack_cache.py -> /roms/ports/.SotC_Celosia/tex_cache/<id>.astc.
+// - Phase 4C: Hysteresis DRS (fast down, gentle up) + optional smooth frame pacing
+//   (SOTC_MALI_PACE=1) without glFinish.
 
 #include "native_backend.h"
 #include "runtime/native_tuning.h"
@@ -42,7 +45,9 @@ void ps2xLinuxGlUnlock();
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #if defined(__linux__)
@@ -66,7 +71,7 @@ namespace
 {
 
 constexpr uint32_t kMaxInstances = 64u;
-constexpr uint32_t kMaxSkinQwords = 256u; // 64 bones * 4 vec4s (4 KiB UBO)
+constexpr uint32_t kMaxSkinQwords = 256u;
 
 inline uint64_t nowUs()
 {
@@ -147,7 +152,6 @@ inline GLenum astcBlockToFormat(uint8_t bx, uint8_t by)
 #define MALI_FRAG_HDR "#version 330 core\n"
 #endif
 
-// World vertex shader with UBO instancing (uInstanceCount > 1 reads InstanceBlock).
 static const char *kMaliWorldVert = MALI_VERT_HDR R"(
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
@@ -162,10 +166,10 @@ uniform vec4 uClip[4];
 uniform int uInstanceCount;
 uniform vec4 uDirections[4];
 uniform vec4 uColours[4];
-uniform vec4 uMisc;   // x: lit (>0.5 lit, <-0.5 fresnel), y: opacity, zw: uvOffset
-uniform vec4 uFogB;   // z: vertexFog (>0.5), w: base
-uniform vec4 uFogC;   // x: scale, y: lodK, z: lodScale, w: maxLod
-uniform vec4 uGuard;  // x > 0: near plane cut at w < y
+uniform vec4 uMisc;
+uniform vec4 uFogB;
+uniform vec4 uFogC;
+uniform vec4 uGuard;
 
 out highp vec4 vUV;
 out mediump vec4 vColor;
@@ -211,7 +215,6 @@ void main()
 }
 )";
 
-// Phase 3A: GPU Skinning vertex shader reading bone qwords from SkinBlock UBO.
 static const char *kMaliSkinVert = MALI_VERT_HDR R"(
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
@@ -283,7 +286,6 @@ void main()
 }
 )";
 
-// Phase 3C: Minimal depth-only Z-prepass shader (zero fragment work).
 static const char *kMaliDepthVert = MALI_VERT_HDR R"(
 layout(location = 0) in vec3 aPos;
 layout(std140) uniform InstanceBlock {
@@ -429,6 +431,41 @@ void main()
 }
 )";
 
+// Phase 4A: Single-pass fullscreen triangle post-process (DRS upscale + subtle 4-tap bloom).
+static const char *kMaliPostVert = MALI_VERT_HDR R"(
+out highp vec2 vUV;
+void main()
+{
+    vec2 pos = vec2((gl_VertexID == 1) ? 3.0 : -1.0, (gl_VertexID == 2) ? 3.0 : -1.0);
+    vUV = pos * 0.5 + 0.5;
+    gl_Position = vec4(pos, 0.0, 1.0);
+}
+)";
+
+static const char *kMaliPostFrag = MALI_FRAG_HDR R"(
+in highp vec2 vUV;
+uniform sampler2D uTex;
+uniform highp vec4 uMisc; // xy: texelSize, z: bloomAmount, w: bloomThreshold
+out mediump vec4 oColor;
+void main()
+{
+    mediump vec3 c = texture(uTex, vUV).rgb;
+    if (uMisc.z > 0.001)
+    {
+        highp vec2 o = uMisc.xy * 1.75;
+        mediump vec3 b0 = texture(uTex, vUV + vec2(-o.x, -o.y)).rgb;
+        mediump vec3 b1 = texture(uTex, vUV + vec2( o.x, -o.y)).rgb;
+        mediump vec3 b2 = texture(uTex, vUV + vec2(-o.x,  o.y)).rgb;
+        mediump vec3 b3 = texture(uTex, vUV + vec2( o.x,  o.y)).rgb;
+        mediump vec3 avg = (b0 + b1 + b2 + b3) * 0.25;
+        mediump float lum = dot(avg, vec3(0.299, 0.587, 0.114));
+        mediump float soft = clamp((lum - uMisc.w) / max(1.0 - uMisc.w, 0.1), 0.0, 1.0);
+        c += avg * soft * uMisc.z;
+    }
+    oColor = vec4(clamp(c, 0.0, 1.0), 1.0);
+}
+)";
+
 struct ShaderProg
 {
     GLuint id = 0;
@@ -492,7 +529,7 @@ bool linkProgCached(ShaderProg &out, const char *name, const char *vsSrc, const 
     std::string binPath;
     if (useCache && !cacheDir.empty())
     {
-        binPath = cacheDir + "/" + name + "_v3.bin";
+        binPath = cacheDir + "/" + name + "_v4.bin";
         if (FILE *fp = std::fopen(binPath.c_str(), "rb"))
         {
             GLenum fmt = 0;
@@ -633,6 +670,7 @@ struct MaliTarget
     GLuint depth = 0;
     uint32_t width = 0;
     uint32_t height = 0;
+    bool hasDepth = true;
 };
 
 struct SkinPaletteEntry
@@ -641,7 +679,6 @@ struct SkinPaletteEntry
     uint32_t qwordCount = 0;
 };
 
-// Bucket within each state.order layer: 0=Opaque (Front-to-Back), 1=AlphaTest, 2=Transparent/Overlay, 3=Screen
 struct QueuedDraw
 {
     uint64_t meshId = 0;
@@ -654,7 +691,6 @@ struct QueuedDraw
     bool skinned = false;
 };
 
-// prog bits (0..2): 0=opaque, 1=cut, 2=screen, 3=skinOpaque, 4=skinCut, 5=depthOnly
 inline uint32_t makePsoKey(uint32_t prog, Blend blend, bool depthTest, bool depthWrite, uint32_t depthFunc)
 {
     return (prog & 7u)
@@ -727,6 +763,10 @@ public:
         m_gpuSkinEnabled = envBool("SOTC_MALI_GPU_SKIN", true);
         m_instancingEnabled = envBool("SOTC_MALI_INSTANCING", true);
         m_zPrepassEnabled = envBool("SOTC_MALI_ZPREPASS", false);
+        m_postEnabled = envBool("SOTC_MALI_POST", true);
+        m_postBloomEnabled = envBool("SOTC_MALI_POST_BLOOM", false);
+        m_dumpTexEnabled = envBool("SOTC_MALI_DUMP_TEX", false);
+        m_paceEnabled = envBool("SOTC_MALI_PACE", false);
         m_statsEnabled = envBool("SOTC_MALI_STATS", false);
         m_uploadBudgetUs = static_cast<uint64_t>(std::max(0, envInt("SOTC_MALI_UPLOAD_BUDGET_US", 1500)));
         m_bgRate = static_cast<uint32_t>(std::max(1, envInt("SOTC_MALI_BG_RATE", 2)));
@@ -736,6 +776,11 @@ public:
             m_astcCacheDir = tc;
         else if (const char *mc = std::getenv("PS2X_MEMCARD_DIR"); mc && mc[0])
             m_astcCacheDir = std::string(mc) + "/../tex_cache";
+
+        if (const char *td = std::getenv("SOTC_MALI_TEX_DUMP_DIR"); td && td[0])
+            m_texDumpDir = td;
+        else
+            m_texDumpDir = "/tmp/celosia_tex_dump";
 
         if (const char *sc = std::getenv("SOTC_MALI_SHADER_CACHE_DIR"); sc && sc[0])
             m_shaderCacheDir = sc;
@@ -754,6 +799,8 @@ public:
 #if defined(__linux__)
         if (m_shaderCacheEnabled && !m_shaderCacheDir.empty())
             ::mkdir(m_shaderCacheDir.c_str(), 0755);
+        if (m_dumpTexEnabled && !m_texDumpDir.empty())
+            ::mkdir(m_texDumpDir.c_str(), 0755);
 #endif
 
         GLint numExt = 0;
@@ -773,18 +820,19 @@ public:
             !linkProgCached(m_progScreen, "screen", kMaliScreenVert, kMaliScreenFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
             !linkProgCached(m_progSkinOpaque, "skin_opaque", kMaliSkinVert, kMaliOpaqueFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
             !linkProgCached(m_progSkinCut, "skin_cut", kMaliSkinVert, kMaliCutFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
-            !linkProgCached(m_progDepth, "depth", kMaliDepthVert, kMaliDepthFrag, m_shaderCacheDir, m_shaderCacheEnabled))
+            !linkProgCached(m_progDepth, "depth", kMaliDepthVert, kMaliDepthFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
+            !linkProgCached(m_progPost, "post", kMaliPostVert, kMaliPostFrag, m_shaderCacheDir, m_shaderCacheEnabled))
         {
             return false;
         }
 
-        // UBO binding 0: InstanceBlock (64 * 16 floats = 4 KiB)
+        glGenVertexArrays(1, &m_emptyVao);
+
         glGenBuffers(1, &m_instUbo);
         glBindBuffer(GL_UNIFORM_BUFFER, m_instUbo);
         glBufferData(GL_UNIFORM_BUFFER, static_cast<GLsizeiptr>(kMaxInstances * 16u * sizeof(float)), nullptr, GL_STREAM_DRAW);
         glBindBufferBase(GL_UNIFORM_BUFFER, 0u, m_instUbo);
 
-        // UBO binding 1: SkinBlock (256 * 4 floats = 4 KiB)
         glGenBuffers(1, &m_skinUbo);
         glBindBuffer(GL_UNIFORM_BUFFER, m_skinUbo);
         glBufferData(GL_UNIFORM_BUFFER, static_cast<GLsizeiptr>(kMaxSkinQwords * 4u * sizeof(float)), nullptr, GL_STREAM_DRAW);
@@ -808,11 +856,13 @@ public:
         }
         glBindVertexArray(0);
 
-        makeTarget(m_bgTarget, 256, 256);
+        makeTarget(m_bgTarget, 256, 256, true);
+        m_lastPresentTime = std::chrono::steady_clock::now();
         m_initialized = true;
-        std::fprintf(stderr, "[mali] Phase 3 GLES 3.2 backend up (cull=%d inst=%d skin=%d zpre=%d tex16=%d astcHw=%d drs=%d)\n",
+        std::fprintf(stderr, "[mali] Phase 4 GLES 3.2 backend up (cull=%d inst=%d skin=%d post=%d bloom=%d astcHw=%d drs=%d pace=%d)\n",
                      m_cullEnabled ? 1 : 0, m_instancingEnabled ? 1 : 0, m_gpuSkinEnabled ? 1 : 0,
-                     m_zPrepassEnabled ? 1 : 0, m_tex16Enabled ? 1 : 0, m_hasAstc ? 1 : 0, m_drsEnabled ? 1 : 0);
+                     m_postEnabled ? 1 : 0, m_postBloomEnabled ? 1 : 0, m_hasAstc ? 1 : 0,
+                     m_drsEnabled ? 1 : 0, m_paceEnabled ? 1 : 0);
         return true;
     }
 
@@ -881,7 +931,6 @@ public:
         glBindVertexArray(0);
     }
 
-    // Phase 3A: Static GPU-skinned mesh upload (poses via SkinBlock UBO).
     void uploadSkinnedMesh(uint64_t id, const SkinVertex *vertices, uint32_t count, const uint32_t *indices, uint32_t indexCount) override
     {
         if (!vertices || !count)
@@ -926,7 +975,7 @@ public:
         entry.qwordCount = clamped;
         m_skinPaletteData.insert(m_skinPaletteData.end(), qwords, qwords + clamped * 4u);
         m_skinPalettes.push_back(entry);
-        return static_cast<uint32_t>(m_skinPalettes.size()); // 1-based handle
+        return static_cast<uint32_t>(m_skinPalettes.size());
     }
 
     void rewriteFramePalette(uint32_t handle, const float *qwords, uint32_t qwordCount) override
@@ -944,6 +993,19 @@ public:
     {
         if (!rgba || !width || !height)
             return;
+
+        // Phase 4B: Opt-in raw RGBA level-0 dumper for offline PC ASTC packing.
+        if (m_dumpTexEnabled && m_dumpedTexIds.insert(id).second)
+        {
+            char fname[96];
+            std::snprintf(fname, sizeof(fname), "%s/%016llx_%ux%u.rgba",
+                          m_texDumpDir.c_str(), static_cast<unsigned long long>(id), width, height);
+            if (FILE *fp = std::fopen(fname, "wb"))
+            {
+                std::fwrite(rgba, 1, static_cast<size_t>(width) * height * 4u, fp);
+                std::fclose(fp);
+            }
+        }
 
         const uint64_t t0 = m_uploadBudgetUs ? nowUs() : 0u;
         if (m_uploadBudgetUs && m_uploadUsThisFrame >= m_uploadBudgetUs && m_textures.find(id) != m_textures.end())
@@ -1121,7 +1183,7 @@ public:
     }
 
     void setFog(const Fog &fog) override { m_fog = fog; }
-    void setBloom(const Bloom &) override {}
+    void setBloom(const Bloom &bloom) override { m_bloom = bloom; }
     void addScreenBlur(const ScreenBlur &) override {}
     void setGlowComposite(const GlowComposite &) override {}
     void setDepthOfField(const DepthOfField &) override {}
@@ -1139,12 +1201,14 @@ public:
         const uint32_t rw = std::max(320u, static_cast<uint32_t>(std::lround(width * scale)) & ~3u);
         const uint32_t rh = std::max(240u, static_cast<uint32_t>(std::lround(height * scale)) & ~3u);
         if (m_mainTarget.width != rw || m_mainTarget.height != rh)
-            makeTarget(m_mainTarget, rw, rh);
+            makeTarget(m_mainTarget, rw, rh, true);
+
+        const bool runPost = m_postEnabled && (m_postBloomEnabled || rw != width || rh != height);
+        if (runPost && (m_postTarget.width != width || m_postTarget.height != height))
+            makeTarget(m_postTarget, width, height, false);
 
         uploadDynamicArena();
 
-        // Preserve exact PS2 layer order (state.order); within each layer run
-        // Opaque (Front-to-Back, grouped for instancing) -> Alpha-Test -> Transparent -> Screen.
         std::sort(m_qAll.begin(), m_qAll.end(), [this](const QueuedDraw &a, const QueuedDraw &b)
         {
             if (a.state.order != b.state.order)
@@ -1167,7 +1231,6 @@ public:
 
         resetPsoCache();
 
-        // Background 256x256 pass with temporal amortization.
         if (!m_qBg.empty() && m_bgTarget.fbo && (m_frameNum % m_bgRate == 0u || m_frameNum <= 2u))
         {
             glBindFramebuffer(GL_FRAMEBUFFER, m_bgTarget.fbo);
@@ -1180,14 +1243,12 @@ public:
             invalidateDepth();
         }
 
-        // Main pass (TBDR: always glClear at start, glInvalidateFramebuffer depth at end).
         glBindFramebuffer(GL_FRAMEBUFFER, m_mainTarget.fbo);
         glViewport(0, 0, static_cast<GLsizei>(m_mainTarget.width), static_cast<GLsizei>(m_mainTarget.height));
         glDepthMask(GL_TRUE);
         glClearColor(m_fog.colour[0], m_fog.colour[1], m_fog.colour[2], 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        // Phase 3C: Optional selective Z-prepass for large static opaque meshes.
         if (m_zPrepassEnabled)
         {
             glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
@@ -1209,7 +1270,6 @@ public:
             glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         }
 
-        // Main layer-ordered pass with Phase 3B hardware instancing on opaque runs.
         for (size_t i = 0; i < m_qAll.size();)
         {
             const QueuedDraw &q = m_qAll[i];
@@ -1259,6 +1319,32 @@ public:
         }
 
         invalidateDepth();
+
+        // Phase 4A: Single-pass fullscreen-triangle post-process (DRS upscale + subtle 4-tap bloom).
+        GLuint outTex = m_mainTarget.color;
+        uint32_t outW = m_mainTarget.width;
+        uint32_t outH = m_mainTarget.height;
+        if (runPost && m_postTarget.fbo)
+        {
+            glBindFramebuffer(GL_FRAMEBUFFER, m_postTarget.fbo);
+            glViewport(0, 0, static_cast<GLsizei>(m_postTarget.width), static_cast<GLsizei>(m_postTarget.height));
+            glDisable(GL_DEPTH_TEST);
+            glDisable(GL_BLEND);
+            glUseProgram(m_progPost.id);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, m_mainTarget.color);
+            const float bloomAmt = (m_postBloomEnabled && m_bloom.enabled) ? 0.25f : 0.0f;
+            const float bloomThr = m_bloom.threshold > 0.05f ? std::min(m_bloom.threshold, 0.9f) : 0.65f;
+            if (m_progPost.uMisc >= 0)
+                glUniform4f(m_progPost.uMisc, 1.0f / static_cast<float>(m_mainTarget.width),
+                            1.0f / static_cast<float>(m_mainTarget.height), bloomAmt, bloomThr);
+            glBindVertexArray(m_emptyVao);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            outTex = m_postTarget.color;
+            outW = m_postTarget.width;
+            outH = m_postTarget.height;
+        }
+
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
         if (m_arenaSync[m_arenaSlot])
@@ -1266,21 +1352,54 @@ public:
         m_arenaSync[m_arenaSlot] = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
         m_arenaSlot = (m_arenaSlot + 1) % 3;
 
+        // Phase 4C: Optional smooth frame pacer (no glFinish, prevents 30 FPS micro-stutter).
+        if (m_paceEnabled && !m_holdCurrent)
+        {
+            const auto period = std::chrono::microseconds(1000000 / m_targetFps);
+            const auto target = m_lastPresentTime + period;
+            const auto now = std::chrono::steady_clock::now();
+            if (target > now + std::chrono::microseconds(600))
+                std::this_thread::sleep_until(target - std::chrono::microseconds(400));
+            m_lastPresentTime = std::chrono::steady_clock::now();
+        }
+
         if (!m_holdCurrent)
         {
             if (const auto &hook = presentHook())
-                hook(m_mainTarget.color, m_mainTarget.width, m_mainTarget.height);
+                hook(outTex, outW, outH);
         }
 
+        // Phase 4C: Hysteresis DRS (steps down after 2 over-budget windows, up after 4 under-budget windows).
         const double frameMs = static_cast<double>(nowUs() - frameStartUs) * 0.001;
         m_emaFrameMs = m_emaFrameMs > 0.0 ? (m_emaFrameMs * 0.85 + frameMs * 0.15) : frameMs;
-        if (m_drsEnabled && (m_frameNum % 15u == 0u))
+        if (m_drsEnabled && (m_frameNum % 12u == 0u))
         {
             const double budgetMs = 1000.0 / static_cast<double>(m_targetFps);
-            if (m_emaFrameMs > budgetMs * 0.92 && m_drsScale > 0.75f)
-                m_drsScale = std::max(0.75f, m_drsScale - 0.05f);
-            else if (m_emaFrameMs < budgetMs * 0.72 && m_drsScale < 1.0f)
-                m_drsScale = std::min(1.0f, m_drsScale + 0.05f);
+            if (m_emaFrameMs > budgetMs * 0.90)
+            {
+                ++m_drsOverStreak;
+                m_drsUnderStreak = 0;
+                if (m_drsOverStreak >= 2 && m_drsScale > 0.75f)
+                {
+                    m_drsScale = std::max(0.75f, m_drsScale - 0.05f);
+                    m_drsOverStreak = 0;
+                }
+            }
+            else if (m_emaFrameMs < budgetMs * 0.70)
+            {
+                ++m_drsUnderStreak;
+                m_drsOverStreak = 0;
+                if (m_drsUnderStreak >= 4 && m_drsScale < 1.0f)
+                {
+                    m_drsScale = std::min(1.0f, m_drsScale + 0.05f);
+                    m_drsUnderStreak = 0;
+                }
+            }
+            else
+            {
+                m_drsOverStreak = 0;
+                m_drsUnderStreak = 0;
+            }
         }
 
         if (m_statsEnabled && (m_frameNum % 120u == 0u))
@@ -1296,13 +1415,14 @@ public:
 
     bool latestFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height) override
     {
-        if (!m_initialized || !m_mainTarget.fbo)
+        const MaliTarget &src = (m_postEnabled && m_postTarget.fbo) ? m_postTarget : m_mainTarget;
+        if (!m_initialized || !src.fbo)
             return false;
         GlContextGuard guard;
-        width = m_mainTarget.width;
-        height = m_mainTarget.height;
+        width = src.width;
+        height = src.height;
         rgba.resize(static_cast<size_t>(width) * height * 4u);
-        glBindFramebuffer(GL_FRAMEBUFFER, m_mainTarget.fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, src.fbo);
         glReadPixels(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height), GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         return true;
@@ -1321,6 +1441,7 @@ public:
         }
         glDeleteVertexArrays(3, m_arenaVao);
         glDeleteBuffers(3, m_arenaVbo);
+        if (m_emptyVao) { glDeleteVertexArrays(1, &m_emptyVao); m_emptyVao = 0; }
         if (m_instUbo) { glDeleteBuffers(1, &m_instUbo); m_instUbo = 0; }
         if (m_skinUbo) { glDeleteBuffers(1, &m_skinUbo); m_skinUbo = 0; }
         for (auto &[id, m] : m_meshes)
@@ -1334,6 +1455,7 @@ public:
             if (t.tex) glDeleteTextures(1, &t.tex);
         m_textures.clear();
         destroyTarget(m_mainTarget);
+        destroyTarget(m_postTarget);
         destroyTarget(m_bgTarget);
         if (m_whiteTex) { glDeleteTextures(1, &m_whiteTex); m_whiteTex = 0; }
         auto delProg = [](ShaderProg &p) { if (p.id) { glDeleteProgram(p.id); p.id = 0; } };
@@ -1343,6 +1465,7 @@ public:
         delProg(m_progSkinOpaque);
         delProg(m_progSkinCut);
         delProg(m_progDepth);
+        delProg(m_progPost);
         m_initialized = false;
     }
 
@@ -1460,11 +1583,12 @@ private:
         return it != m_textures.end() && it->second.minAlpha >= 124u;
     }
 
-    static void makeTarget(MaliTarget &t, uint32_t w, uint32_t h)
+    static void makeTarget(MaliTarget &t, uint32_t w, uint32_t h, bool withDepth)
     {
         destroyTarget(t);
         t.width = w;
         t.height = h;
+        t.hasDepth = withDepth;
         glGenFramebuffers(1, &t.fbo);
         glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
 
@@ -1477,10 +1601,13 @@ private:
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t.color, 0);
 
-        glGenRenderbuffers(1, &t.depth);
-        glBindRenderbuffer(GL_RENDERBUFFER, t.depth);
-        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, static_cast<GLsizei>(w), static_cast<GLsizei>(h));
-        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, t.depth);
+        if (withDepth)
+        {
+            glGenRenderbuffers(1, &t.depth);
+            glBindRenderbuffer(GL_RENDERBUFFER, t.depth);
+            glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, static_cast<GLsizei>(w), static_cast<GLsizei>(h));
+            glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, t.depth);
+        }
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
 
@@ -1702,7 +1829,6 @@ private:
         ++m_drawCallsThisFrame;
     }
 
-    // Phase 3B: Hardware instancing batch (2..64 identical static opaque draws in 1 GL call).
     void emitDrawInstanced(size_t startIdx, uint32_t count)
     {
         const QueuedDraw &q = m_qAll[startIdx];
@@ -1763,6 +1889,10 @@ private:
     bool m_gpuSkinEnabled = true;
     bool m_instancingEnabled = true;
     bool m_zPrepassEnabled = false;
+    bool m_postEnabled = true;
+    bool m_postBloomEnabled = false;
+    bool m_dumpTexEnabled = false;
+    bool m_paceEnabled = false;
     bool m_statsEnabled = false;
     bool m_holdCurrent = false;
     uint64_t m_uploadBudgetUs = 1500;
@@ -1771,8 +1901,12 @@ private:
     int m_targetFps = 30;
     float m_drsScale = 1.0f;
     double m_emaFrameMs = 0.0;
+    int m_drsOverStreak = 0;
+    int m_drsUnderStreak = 0;
+    std::chrono::steady_clock::time_point m_lastPresentTime{};
 
     std::string m_astcCacheDir;
+    std::string m_texDumpDir;
     std::string m_shaderCacheDir;
 
     uint64_t m_frameNum = 0;
@@ -1784,11 +1918,12 @@ private:
     uint32_t m_astcHits = 0;
 
     ShaderProg m_progOpaque{}, m_progCut{}, m_progScreen{};
-    ShaderProg m_progSkinOpaque{}, m_progSkinCut{}, m_progDepth{};
+    ShaderProg m_progSkinOpaque{}, m_progSkinCut{}, m_progDepth{}, m_progPost{};
+    GLuint m_emptyVao = 0;
     GLuint m_instUbo = 0;
     GLuint m_skinUbo = 0;
     GLuint m_whiteTex = 0;
-    MaliTarget m_mainTarget{}, m_bgTarget{};
+    MaliTarget m_mainTarget{}, m_postTarget{}, m_bgTarget{};
 
     GLuint m_arenaVao[3] = {};
     GLuint m_arenaVbo[3] = {};
@@ -1803,6 +1938,7 @@ private:
     uint32_t m_lastSkinPalette = 0u;
 
     Fog m_fog{};
+    Bloom m_bloom{};
     std::vector<Vertex> m_dynVerts;
     std::vector<CompactVertex> m_compactScratch;
     std::vector<uint16_t> m_tex16Scratch;
@@ -1811,6 +1947,7 @@ private:
     std::vector<SkinPaletteEntry> m_skinPalettes;
     std::vector<float> m_skinPaletteData;
     std::vector<QueuedDraw> m_qBg, m_qAll;
+    std::unordered_set<uint64_t> m_dumpedTexIds;
     std::unordered_map<uint64_t, MaliMesh> m_meshes;
     std::unordered_map<uint64_t, MaliTex> m_textures;
 };
