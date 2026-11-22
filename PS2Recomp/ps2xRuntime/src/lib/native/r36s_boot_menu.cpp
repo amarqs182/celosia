@@ -8,6 +8,13 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <vector>
+
+#ifdef __linux__
+#include <fcntl.h>
+#include <linux/input.h>
+#include <unistd.h>
+#endif
 
 namespace native_renderer
 {
@@ -164,6 +171,22 @@ void runR36sBootMenu()
         int prevAxisDirX[4] = {0, 0, 0, 0};
         int prevAxisDirY[4] = {0, 0, 0, 0};
 
+#ifdef __linux__
+        std::vector<int> evdevFds;
+        for (int i = 0; i < 8; ++i)
+        {
+            char devPath[32];
+            std::snprintf(devPath, sizeof(devPath), "/dev/input/event%d", i);
+            const int fd = ::open(devPath, O_RDONLY | O_NONBLOCK);
+            if (fd >= 0)
+                evdevFds.push_back(fd);
+        }
+        bool evSelectDown = false;
+        bool evStartDown = false;
+        int evHatX = 0;
+        int evHatY = 0;
+#endif
+
         while (!done && !WindowShouldClose())
         {
             const double dt = static_cast<double>(GetFrameTime());
@@ -208,6 +231,10 @@ void runR36sBootMenu()
                 if ((IsGamepadButtonDown(gp, 12) && IsGamepadButtonDown(gp, 13)) ||
                     (IsGamepadButtonDown(gp, GAMEPAD_BUTTON_MIDDLE_LEFT) && IsGamepadButtonDown(gp, GAMEPAD_BUTTON_MIDDLE_RIGHT)))
                 {
+#ifdef __linux__
+                    for (int fd : evdevFds)
+                        ::close(fd);
+#endif
                     CloseWindow();
                     std::exit(0);
                 }
@@ -233,6 +260,76 @@ void runR36sBootMenu()
                     prevAxisDirX[gp] = dirX;
                 }
             }
+
+#ifdef __linux__
+            for (int fd : evdevFds)
+            {
+                struct input_event ev;
+                while (::read(fd, &ev, sizeof(ev)) == static_cast<ssize_t>(sizeof(ev)))
+                {
+                    if (ev.type == EV_KEY)
+                    {
+                        if (ev.code == BTN_SELECT || ev.code == BTN_TRIGGER_HAPPY5)
+                            evSelectDown = (ev.value != 0);
+                        else if (ev.code == BTN_START || ev.code == BTN_TRIGGER_HAPPY6)
+                            evStartDown = (ev.value != 0);
+
+                        if (evSelectDown && evStartDown)
+                        {
+                            for (int cfd : evdevFds)
+                                ::close(cfd);
+                            CloseWindow();
+                            std::exit(0);
+                        }
+
+                        if (ev.value == 1)
+                        {
+                            if (ev.code == BTN_DPAD_UP || ev.code == BTN_TRIGGER_HAPPY1)
+                                upPressed = true;
+                            else if (ev.code == BTN_DPAD_DOWN || ev.code == BTN_TRIGGER_HAPPY2)
+                                downPressed = true;
+                            else if (ev.code == BTN_DPAD_LEFT || ev.code == BTN_TRIGGER_HAPPY3)
+                                leftPressed = true;
+                            else if (ev.code == BTN_DPAD_RIGHT || ev.code == BTN_TRIGGER_HAPPY4)
+                                rightPressed = true;
+                            else if (ev.code == BTN_SOUTH)
+                                startOnlyPressed = true;
+                            else if (ev.code == BTN_START || ev.code == BTN_TRIGGER_HAPPY6)
+                                saveAndStartPressed = true;
+                            else if (ev.code == BTN_EAST)
+                                fallbackGlPressed = true;
+                        }
+                    }
+                    else if (ev.type == EV_ABS)
+                    {
+                        if (ev.code == ABS_HAT0X)
+                        {
+                            const int d = (ev.value > 0) ? 1 : ((ev.value < 0) ? -1 : 0);
+                            if (d != evHatX)
+                            {
+                                if (d < 0)
+                                    leftPressed = true;
+                                else if (d > 0)
+                                    rightPressed = true;
+                                evHatX = d;
+                            }
+                        }
+                        else if (ev.code == ABS_HAT0Y)
+                        {
+                            const int d = (ev.value > 0) ? 1 : ((ev.value < 0) ? -1 : 0);
+                            if (d != evHatY)
+                            {
+                                if (d < 0)
+                                    upPressed = true;
+                                else if (d > 0)
+                                    downPressed = true;
+                                evHatY = d;
+                            }
+                        }
+                    }
+                }
+            }
+#endif
 
             if (upPressed || downPressed || leftPressed || rightPressed ||
                 startOnlyPressed || saveAndStartPressed || fallbackGlPressed)
