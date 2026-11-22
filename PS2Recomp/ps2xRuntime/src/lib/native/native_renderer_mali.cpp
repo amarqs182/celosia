@@ -1,16 +1,18 @@
 // Dedicated Mali-G31 (GLES 3.2 / GL 3.3 Core) native renderer backend for Celosia R36S.
 // Plugs directly into native_renderer::detail::Backend (selected via SOTC_RENDERER=mali).
 //
-// Phase 6 (Draw-Call Elimination — targeting 2,617 -> ~400-700 GL draws on R36S):
-// - Preserves all Phase 5.1 fixes (6a20f0f): uBones[192] via glUniform4fv (no T-pose),
-//   per-texture wrapClamp cache + pre-resolved MaliTex*, uClip shadow cache, m_postTarget
-//   skip when bloom=0, mailbox handover preserving uploads, reusable FramePacket.
-// - Phase 6A: Skip m_qBg -> m_bgTarget pass completely when !m_fog.enabled (ZFOG=0).
-// - Phase 6B: Smart Alpha-Test Pass-2 elision (SOTC_MALI_AT_PASS2=0|1|2, default 1=auto:
-//   skips Pass 2 when texture & vertices have only binary alpha — zero visual change).
-// - Phase 6C: Safe Static Geometry Merging in GL_UNSIGNED_INT (SOTC_MALI_MERGE=1) over
-//   28-byte CompactVertex with 1.5 ms/frame build budget and >=16-frame eviction grace.
-// - Telemetry [mali:stats] reports draws, mergeSaved, pass2Skip, culled, texWrap, drop, drs, renderMs.
+// Phase 6.1 (Step 1 Polish + T-pose hardening — stabilizing Host FPS & native 640x480 DRS):
+// - Preserves all Phase 5.1 fixes (6a20f0f): uBones[192] via glUniform4fv, per-texture
+//   wrapClamp cache + pre-resolved MaliTex*, uClip shadow cache, m_postTarget skip when
+//   bloom=0, mailbox handover preserving uploads, reusable FramePacket.
+// - Camera-invariant Merge-First + Fixed-Chunk Sub-Runs + Group Union-AABB Culling:
+//   merges compatible static chunks deterministically into <=24-mesh sub-runs (24 MiB cache
+//   cap, stale srcVerts eviction, 2500 us/frame budget) and culls each sub-run as one AABB,
+//   eliminating camera-pan merge collapse spikes (mergeSaved 820 -> 71 -> 65-78 ms).
+// - DRS target FPS decoupled from SOTC_FPS_CAP (SOTC_MALI_DRS_TARGET_FPS=30, climbing back
+//   to native 640x480 at <=34 ms) + pre-present drawMs vs post-vsync renderMs split.
+// - Branchless unrolled 3-bone uBones[b].xyz vertex skinning + _v8.bin shader cache +
+//   palette-grouped sort + GL skin error & [mali:stats] skin=gpu/cpu/maxQ telemetry.
 
 #include "native_backend.h"
 #include "runtime/native_tuning.h"
@@ -75,7 +77,7 @@ namespace
 
 constexpr uint32_t kMaxSkinQwords = native_renderer::kSkinPaletteQwords; // 48 bones * 4 vec4s via glUniform4fv (libMali r13p0 safe)
 constexpr uint64_t kMaxMergeSrcBytes = 24ull * 1024ull * 1024ull;
-constexpr uint64_t kMaxMergeRunBytes = 16ull * 1024ull * 1024ull;
+constexpr uint64_t kMaxMergeRunBytes = 24ull * 1024ull * 1024ull;
 
 inline uint64_t nowUs()
 {
@@ -216,7 +218,7 @@ void main()
 }
 )";
 
-// Phase 5.1 fix preserved: uniform highp vec4 uBones[192] via glUniform4fv (no T-pose on libMali r13p0).
+// Phase 6.1: Branchless unrolled 3-bone uBones[b].xyz skinning matching GL backend + clamp bounds.
 static const char *kMaliSkinVert = MALI_VERT_HDR R"(
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
@@ -241,27 +243,15 @@ out highp float vLogW;
 
 void main()
 {
-    vec3 pos = vec3(0.0);
-    vec3 nrm = vec3(0.0);
-    float wSum = 0.0;
-    for (int i = 0; i < 3; ++i)
-    {
-        float w = aWeight[i];
-        if (w > 1e-5)
-        {
-            int b = clamp(int(aBone[i] + 0.5), 0, 188);
-            vec4 bp = uBones[b] * aPos.x + uBones[b + 1] * aPos.y + uBones[b + 2] * aPos.z + uBones[b + 3];
-            vec3 bn = uBones[b].xyz * aNormal.x + uBones[b + 1].xyz * aNormal.y + uBones[b + 2].xyz * aNormal.z;
-            pos += bp.xyz * w;
-            nrm += bn * w;
-            wSum += w;
-        }
-    }
-    if (wSum < 1e-5)
-    {
-        pos = aPos;
-        nrm = aNormal;
-    }
+    int b0 = clamp(int(aBone.x + 0.5), 0, 188);
+    int b1 = clamp(int(aBone.y + 0.5), 0, 188);
+    int b2 = clamp(int(aBone.z + 0.5), 0, 188);
+    vec3 pos = aWeight.x * (uBones[b0].xyz * aPos.x + uBones[b0 + 1].xyz * aPos.y + uBones[b0 + 2].xyz * aPos.z + uBones[b0 + 3].xyz)
+             + aWeight.y * (uBones[b1].xyz * aPos.x + uBones[b1 + 1].xyz * aPos.y + uBones[b1 + 2].xyz * aPos.z + uBones[b1 + 3].xyz)
+             + aWeight.z * (uBones[b2].xyz * aPos.x + uBones[b2 + 1].xyz * aPos.y + uBones[b2 + 2].xyz * aPos.z + uBones[b2 + 3].xyz);
+    vec3 nrm = aWeight.x * (uBones[b0].xyz * aNormal.x + uBones[b0 + 1].xyz * aNormal.y + uBones[b0 + 2].xyz * aNormal.z)
+             + aWeight.y * (uBones[b1].xyz * aNormal.x + uBones[b1 + 1].xyz * aNormal.y + uBones[b1 + 2].xyz * aNormal.z)
+             + aWeight.z * (uBones[b2].xyz * aNormal.x + uBones[b2 + 1].xyz * aNormal.y + uBones[b2 + 2].xyz * aNormal.z);
 
     vec4 c = uClip[0] * pos.x + uClip[1] * pos.y + uClip[2] * pos.z + uClip[3];
     gl_Position = vec4(c.x, c.y, c.w - 0.2, c.w);
@@ -548,7 +538,7 @@ bool linkProgCached(ShaderProg &out, const char *name, const char *vsSrc, const 
     std::string binPath;
     if (useCache && !cacheDir.empty())
     {
-        binPath = cacheDir + "/" + name + "_v7.bin";
+        binPath = cacheDir + "/" + name + "_v8.bin";
         if (FILE *fp = std::fopen(binPath.c_str(), "rb"))
         {
             GLenum fmt = 0;
@@ -763,6 +753,7 @@ struct QueuedDraw
     uint32_t psoKey = 0;
     uint8_t bucket = 0;
     bool skinned = false;
+    bool deferredCull = false;
 };
 
 struct FramePacket
@@ -871,7 +862,8 @@ public:
         m_shaderCacheEnabled = envBool("SOTC_MALI_SHADER_CACHE", true);
         m_gpuSkinEnabled = envBool("SOTC_MALI_GPU_SKIN", true);
         m_mergeEnabled = envBool("SOTC_MALI_MERGE", true);
-        m_mergeBudgetUs = static_cast<uint64_t>(std::max(0, envInt("SOTC_MALI_MERGE_BUDGET_US", 1500)));
+        m_mergeBudgetUs = static_cast<uint64_t>(std::max(0, envInt("SOTC_MALI_MERGE_BUDGET_US", 2500)));
+        m_mergeChunkMax = static_cast<uint32_t>(std::clamp(envInt("SOTC_MALI_MERGE_CHUNK", 24), 4, 128));
         m_atPass2Mode = std::clamp(envInt("SOTC_MALI_AT_PASS2", 1), 0, 2); // 0=off, 1=smart auto, 2=always
         m_zPrepassEnabled = envBool("SOTC_MALI_ZPREPASS", false);
         m_postEnabled = envBool("SOTC_MALI_POST", true);
@@ -883,6 +875,7 @@ public:
         m_uploadBudgetUs = static_cast<uint64_t>(std::max(0, envInt("SOTC_MALI_UPLOAD_BUDGET_US", 1500)));
         m_bgRate = static_cast<uint32_t>(std::max(1, envInt("SOTC_MALI_BG_RATE", 2)));
         m_targetFps = std::max(20, envInt("SOTC_FPS_CAP", 30));
+        m_drsTargetFps = std::max(15, envInt("SOTC_MALI_DRS_TARGET_FPS", 30));
 
         if (const char *tc = std::getenv("SOTC_MALI_TEX_CACHE"); tc && tc[0])
             m_astcCacheDir = tc;
@@ -1283,9 +1276,10 @@ private:
         makeTarget(m_bgTarget, 256, 256, true);
         m_lastPresentTime = std::chrono::steady_clock::now();
         m_initialized = true;
-        std::fprintf(stderr, "[mali] Phase 6 GLES 3.2 backend up (async=%d mailbox=%d merge=%d atPass2=%d cull=%d skin=%d astcHw=%d drs=%d)\n",
-                     m_asyncEnabled ? 1 : 0, m_mailboxEnabled ? 1 : 0, m_mergeEnabled ? 1 : 0, m_atPass2Mode,
-                     m_cullEnabled ? 1 : 0, m_gpuSkinEnabled ? 1 : 0, m_hasAstc ? 1 : 0, m_drsEnabled ? 1 : 0);
+        std::fprintf(stderr, "[mali] Phase 6.1 GLES 3.2 backend up (async=%d mailbox=%d merge=%d chunk=%u atPass2=%d cull=%d skin=%d astcHw=%d drs=%d@%dfps)\n",
+                     m_asyncEnabled ? 1 : 0, m_mailboxEnabled ? 1 : 0, m_mergeEnabled ? 1 : 0, m_mergeChunkMax,
+                     m_atPass2Mode, m_cullEnabled ? 1 : 0, m_gpuSkinEnabled ? 1 : 0, m_hasAstc ? 1 : 0,
+                     m_drsEnabled ? 1 : 0, m_drsTargetFps);
         return true;
     }
 
@@ -1392,6 +1386,8 @@ private:
                     mesh.srcVerts.clear();
                     mesh.srcIndices.clear();
                     mesh.srcBytes = 0;
+                    if (m_mergeSrcBytes + needBytes > kMaxMergeSrcBytes)
+                        evictOldMergeSrc(pkt.frameNum, 30u, needBytes);
                     if (m_mergeSrcBytes + needBytes <= kMaxMergeSrcBytes)
                     {
                         mesh.srcVerts = cmd.compactVerts;
@@ -1698,6 +1694,9 @@ private:
         m_mergeSavedThisFrame = 0;
         m_pass2SkipThisFrame = 0;
         m_texWrapThisFrame = 0;
+        m_skinGpuDrawsThisFrame = 0;
+        m_skinCpuDrawsThisFrame = 0;
+        m_skinMaxQwordsThisFrame = 0;
         uint64_t mergeUsThisFrame = 0;
 
         processUploads(pkt);
@@ -1710,6 +1709,7 @@ private:
         }
 
         // Build draw queues, pre-resolving MaliMesh* and MaliTex* once per draw.
+        // Merge-eligible static draws defer culling so MergeRun keys stay camera-invariant across pans.
         m_qBg.clear();
         m_qAll.clear();
         m_qAll.reserve(pkt.draws.size());
@@ -1720,16 +1720,6 @@ private:
                 continue;
             MaliMesh &mesh = it->second;
             mesh.lastUsed = m_frameNum;
-
-            float minW = 0.0f;
-            if (m_cullEnabled && mesh.hasBox && !mesh.dynamic && !mesh.skinned && !rd.state.screen && !rd.state.overlay)
-            {
-                if (cullAabb(rd.clip, mesh.lo, mesh.hi, minW))
-                {
-                    ++m_culledThisFrame;
-                    continue;
-                }
-            }
 
             MaliTex *texPtr = nullptr;
             if (rd.state.texture)
@@ -1749,9 +1739,14 @@ private:
             std::memcpy(q.clip, rd.clip, 16 * sizeof(float));
             q.clipHash = fnv1aHash(rd.clip, 16u * sizeof(float));
             q.state = rd.state;
-            q.minW = minW;
+            q.minW = 0.0f;
             q.seq = rd.seq;
             q.skinned = mesh.skinned && rd.state.skinPalette != 0u;
+
+            if (q.skinned)
+                ++m_skinGpuDrawsThisFrame;
+            else if (mesh.dynamic && ((rd.meshId >> 63) & 1ull))
+                ++m_skinCpuDrawsThisFrame;
 
             if (rd.state.screen || rd.state.screenDepthTest)
             {
@@ -1787,13 +1782,36 @@ private:
                 }
             }
 
+            const bool mergeCandidate = m_mergeEnabled && (q.bucket == 0u || q.bucket == 1u) && !mesh.dynamic && !q.skinned && !mesh.srcVerts.empty();
+            if (m_cullEnabled && mesh.hasBox && !mesh.dynamic && !mesh.skinned && !rd.state.screen && !rd.state.overlay)
+            {
+                if (mergeCandidate)
+                {
+                    q.deferredCull = true;
+                }
+                else
+                {
+                    float minW = 0.0f;
+                    if (cullAabb(rd.clip, mesh.lo, mesh.hi, minW))
+                    {
+                        ++m_culledThisFrame;
+                        continue;
+                    }
+                    q.minW = minW;
+                }
+            }
+
             if (rd.state.background && m_fog.enabled)
-                m_qBg.push_back(q);
+            {
+                float bgMinW = 0.0f;
+                if (!q.deferredCull || !cullAabb(rd.clip, mesh.lo, mesh.hi, bgMinW))
+                    m_qBg.push_back(q);
+            }
             m_qAll.push_back(q);
         }
 
-        // Sort per-layer; within Opaque and Alpha-Test buckets, group by state+texture+clipHash
-        // so Phase 6C merges contiguous static chunks cleanly while keeping Front-to-Back order.
+        // Sort per-layer; within Opaque and Alpha-Test buckets, group skinned draws by palette
+        // and static draws deterministically by state+texture+clamp+clipHash+alphaTest+meshId.
         std::sort(m_qAll.begin(), m_qAll.end(), [](const QueuedDraw &a, const QueuedDraw &b)
         {
             if (a.state.order != b.state.order)
@@ -1803,6 +1821,9 @@ private:
             if (a.bucket == 0u || a.bucket == 1u)
             {
                 if (a.psoKey != b.psoKey) return a.psoKey < b.psoKey;
+                const uint32_t aPal = a.skinned ? a.state.skinPalette : 0u;
+                const uint32_t bPal = b.skinned ? b.state.skinPalette : 0u;
+                if (aPal != bPal) return aPal < bPal;
                 if (a.state.texture != b.state.texture) return a.state.texture < b.state.texture;
                 if (a.state.clamp != b.state.clamp) return a.state.clamp < b.state.clamp;
                 if (a.clipHash != b.clipHash) return a.clipHash < b.clipHash;
@@ -1853,6 +1874,9 @@ private:
             {
                 if (q.bucket != 0u || q.skinned || q.state.background || !q.mesh || q.mesh->dynamic)
                     continue;
+                float dummyW = 0.0f;
+                if (q.deferredCull && m_cullEnabled && cullAabb(q.clip, q.mesh->lo, q.mesh->hi, dummyW))
+                    continue;
                 const uint32_t tris = q.mesh->indexed ? q.mesh->indexCount : q.mesh->vertexCount;
                 if (tris < 300u)
                     continue;
@@ -1867,72 +1891,92 @@ private:
         {
             const QueuedDraw &q = m_qAll[i];
 
-            // Phase 6C: Try safe GL_UNSIGNED_INT static merge for contiguous compatible draws.
+            // Phase 6.1: Camera-invariant static merge sliced into fixed sub-runs + union-AABB group cull.
             if (m_mergeEnabled && (q.bucket == 0u || q.bucket == 1u) && q.mesh && !q.mesh->dynamic && !q.skinned && !q.mesh->srcVerts.empty())
             {
-                size_t end = i + 1u;
-                while (end < m_qAll.size() && canMergeStatic(q, m_qAll[end]))
-                    ++end;
-                if (end - i >= 2u)
+                size_t groupEnd = i + 1u;
+                while (groupEnd < m_qAll.size() && canMergeStatic(q, m_qAll[groupEnd]))
+                    ++groupEnd;
+
+                for (size_t s = i; s < groupEnd;)
                 {
-                    if (MergeRun *run = getOrBuildMergeRun(i, end, mergeUsThisFrame))
+                    const size_t e = std::min(s + static_cast<size_t>(m_mergeChunkMax), groupEnd);
+                    const QueuedDraw &sq = m_qAll[s];
+                    if (e - s >= 2u)
                     {
-                        if (q.bucket == 0u)
+                        float runLo[3] = {1e30f, 1e30f, 1e30f};
+                        float runHi[3] = {-1e30f, -1e30f, -1e30f};
+                        bool allBox = true;
+                        for (size_t j = s; j < e; ++j)
                         {
-                            emitMergedRun(q, *run, pkt, true, 0.0f, 0.0f);
-                        }
-                        else
-                        {
-                            const float aref = static_cast<float>((q.state.alphaTest >> 4) & 0xFFu) / 128.0f;
-                            emitMergedRun(q, *run, pkt, true, std::max(0.02f, aref), 0.0f);
-                            bool anyNeedPass2 = false;
-                            for (size_t j = i; j < end; ++j)
-                                if (needsAlphaTestPass2(m_qAll[j], aref)) { anyNeedPass2 = true; break; }
-                            if (anyNeedPass2)
+                            const MaliMesh *jm = m_qAll[j].mesh;
+                            if (!jm || !jm->hasBox)
                             {
-                                QueuedDraw p2 = q;
-                                p2.psoKey = makePsoKey(1u, q.state.blend, true, false, 1u);
-                                emitMergedRun(p2, *run, pkt, true, 0.02f, aref);
+                                allBox = false;
+                                break;
                             }
-                            else if (((q.state.alphaTest >> 12) & 3u) == 1u || ((q.state.alphaTest >> 12) & 3u) == 3u)
+                            for (int a = 0; a < 3; ++a)
                             {
-                                m_pass2SkipThisFrame += static_cast<uint32_t>(end - i);
+                                if (jm->lo[a] < runLo[a]) runLo[a] = jm->lo[a];
+                                if (jm->hi[a] > runHi[a]) runHi[a] = jm->hi[a];
                             }
                         }
-                        m_mergeSavedThisFrame += static_cast<uint32_t>(end - i - 1u);
-                        i = end;
-                        continue;
+                        float dummyW = 0.0f;
+                        if (m_cullEnabled && allBox && cullAabb(sq.clip, runLo, runHi, dummyW))
+                        {
+                            m_culledThisFrame += static_cast<uint32_t>(e - s);
+                            s = e;
+                            continue;
+                        }
+                        if (MergeRun *run = getOrBuildMergeRun(s, e, mergeUsThisFrame))
+                        {
+                            if (sq.bucket == 0u)
+                            {
+                                emitMergedRun(sq, *run, pkt, true, 0.0f, 0.0f);
+                            }
+                            else
+                            {
+                                const float aref = static_cast<float>((sq.state.alphaTest >> 4) & 0xFFu) / 128.0f;
+                                emitMergedRun(sq, *run, pkt, true, std::max(0.02f, aref), 0.0f);
+                                bool anyNeedPass2 = false;
+                                for (size_t j = s; j < e; ++j)
+                                    if (needsAlphaTestPass2(m_qAll[j], aref)) { anyNeedPass2 = true; break; }
+                                if (anyNeedPass2)
+                                {
+                                    QueuedDraw p2 = sq;
+                                    p2.psoKey = makePsoKey(1u, sq.state.blend, true, false, 1u);
+                                    emitMergedRun(p2, *run, pkt, true, 0.02f, aref);
+                                }
+                                else if (((sq.state.alphaTest >> 12) & 3u) == 1u || ((sq.state.alphaTest >> 12) & 3u) == 3u)
+                                {
+                                    m_pass2SkipThisFrame += static_cast<uint32_t>(e - s);
+                                }
+                            }
+                            m_mergeSavedThisFrame += static_cast<uint32_t>(e - s - 1u);
+                            s = e;
+                            continue;
+                        }
                     }
+
+                    for (size_t j = s; j < e; ++j)
+                    {
+                        const QueuedDraw &jq = m_qAll[j];
+                        float dummyW = 0.0f;
+                        if (m_cullEnabled && jq.deferredCull && jq.mesh && cullAabb(jq.clip, jq.mesh->lo, jq.mesh->hi, dummyW))
+                        {
+                            ++m_culledThisFrame;
+                            continue;
+                        }
+                        emitBucketSingle(jq, pkt);
+                    }
+                    s = e;
                 }
+
+                i = groupEnd;
+                continue;
             }
 
-            if (q.bucket == 0u)
-            {
-                emitDrawSingle(q, pkt, true, 0.0f, 0.0f);
-            }
-            else if (q.bucket == 1u)
-            {
-                const float aref = static_cast<float>((q.state.alphaTest >> 4) & 0xFFu) / 128.0f;
-                emitDrawSingle(q, pkt, true, std::max(0.02f, aref), 0.0f);
-                if (needsAlphaTestPass2(q, aref))
-                {
-                    QueuedDraw pass2 = q;
-                    pass2.psoKey = makePsoKey(q.skinned ? 4u : 1u, q.state.blend, true, false, 1u);
-                    emitDrawSingle(pass2, pkt, true, 0.02f, aref);
-                }
-                else if (((q.state.alphaTest >> 12) & 3u) == 1u || ((q.state.alphaTest >> 12) & 3u) == 3u)
-                {
-                    ++m_pass2SkipThisFrame;
-                }
-            }
-            else if (q.bucket == 2u)
-            {
-                emitDrawSingle(q, pkt, true, 0.02f, 0.0f);
-            }
-            else
-            {
-                emitDrawSingle(q, pkt, false, 0.01f, 0.0f);
-            }
+            emitBucketSingle(q, pkt);
             ++i;
         }
 
@@ -1977,6 +2021,9 @@ private:
             m_lastPresentTime = std::chrono::steady_clock::now();
         }
 
+        const double drawMs = static_cast<double>(nowUs() - frameStartUs) * 0.001;
+        m_emaDrawMs = m_emaDrawMs > 0.0 ? (m_emaDrawMs * 0.85 + drawMs * 0.15) : drawMs;
+
         if (!pkt.hold)
         {
             if (const auto &hook = presentHook())
@@ -1987,8 +2034,8 @@ private:
         m_emaFrameMs = m_emaFrameMs > 0.0 ? (m_emaFrameMs * 0.85 + frameMs * 0.15) : frameMs;
         if (m_drsEnabled && (m_frameNum % 12u == 0u))
         {
-            const double budgetMs = 1000.0 / static_cast<double>(m_targetFps);
-            if (m_emaFrameMs > budgetMs * 0.90)
+            const double budgetMs = 1000.0 / static_cast<double>(m_drsTargetFps);
+            if (m_emaFrameMs > budgetMs * 1.10)
             {
                 ++m_drsOverStreak;
                 m_drsUnderStreak = 0;
@@ -1998,7 +2045,7 @@ private:
                     m_drsOverStreak = 0;
                 }
             }
-            else if (m_emaFrameMs < budgetMs * 0.70)
+            else if (m_emaFrameMs < budgetMs * 1.02)
             {
                 ++m_drsUnderStreak;
                 m_drsOverStreak = 0;
@@ -2017,11 +2064,12 @@ private:
 
         if (m_statsEnabled && (m_frameNum % 120u == 0u))
         {
-            std::fprintf(stderr, "[mali:stats] frame=%llu draws=%u mergeSaved=%u pass2Skip=%u culled=%u texWrap=%u drop=%llu drs=%.2f renderMs=%.2f\n",
+            std::fprintf(stderr, "[mali:stats] frame=%llu draws=%u mergeSaved=%u pass2Skip=%u culled=%u texWrap=%u drop=%llu drs=%.2f drawMs=%.2f renderMs=%.2f skin=%u/%u/%u\n",
                          static_cast<unsigned long long>(m_frameNum), m_drawCallsThisFrame,
                          m_mergeSavedThisFrame, m_pass2SkipThisFrame, m_culledThisFrame,
                          m_texWrapThisFrame, static_cast<unsigned long long>(m_droppedFrames.load(std::memory_order_relaxed)),
-                         m_drsScale, m_emaFrameMs);
+                         m_drsScale, m_emaDrawMs, m_emaFrameMs,
+                         m_skinGpuDrawsThisFrame, m_skinCpuDrawsThisFrame, m_skinMaxQwordsThisFrame);
         }
 
         if (m_frameNum % 300u == 0u)
@@ -2302,7 +2350,20 @@ private:
             const uint32_t qwords = std::min(pe.qwordCount, kMaxSkinQwords);
             if (qwords > 0u && static_cast<size_t>(pe.offsetFloats) + static_cast<size_t>(qwords) * 4u <= pkt.skinPaletteData.size())
             {
+                if (qwords > m_skinMaxQwordsThisFrame)
+                    m_skinMaxQwordsThisFrame = qwords;
                 glUniform4fv(prog.uBones, static_cast<GLsizei>(qwords), pkt.skinPaletteData.data() + pe.offsetFloats);
+                if (m_statsEnabled && !m_skinErrLogged)
+                {
+                    const GLenum err = glGetError();
+                    if (err != GL_NO_ERROR)
+                    {
+                        std::fprintf(stderr, "[mali:skin:err] frame=%llu glErr=0x%x uBonesLoc=%d qwords=%u pal=%u\n",
+                                     static_cast<unsigned long long>(m_frameNum), static_cast<unsigned>(err),
+                                     prog.uBones, qwords, q.state.skinPalette);
+                        m_skinErrLogged = true;
+                    }
+                }
                 sh.lastSkinPalette = q.state.skinPalette;
             }
         }
@@ -2373,6 +2434,68 @@ private:
         ++m_drawCallsThisFrame;
     }
 
+    void emitBucketSingle(const QueuedDraw &q, const FramePacket &pkt)
+    {
+        if (q.bucket == 0u)
+        {
+            emitDrawSingle(q, pkt, true, 0.0f, 0.0f);
+        }
+        else if (q.bucket == 1u)
+        {
+            const float aref = static_cast<float>((q.state.alphaTest >> 4) & 0xFFu) / 128.0f;
+            emitDrawSingle(q, pkt, true, std::max(0.02f, aref), 0.0f);
+            if (needsAlphaTestPass2(q, aref))
+            {
+                QueuedDraw pass2 = q;
+                pass2.psoKey = makePsoKey(q.skinned ? 4u : 1u, q.state.blend, true, false, 1u);
+                emitDrawSingle(pass2, pkt, true, 0.02f, aref);
+            }
+            else if (((q.state.alphaTest >> 12) & 3u) == 1u || ((q.state.alphaTest >> 12) & 3u) == 3u)
+            {
+                ++m_pass2SkipThisFrame;
+            }
+        }
+        else if (q.bucket == 2u)
+        {
+            emitDrawSingle(q, pkt, true, 0.02f, 0.0f);
+        }
+        else
+        {
+            emitDrawSingle(q, pkt, false, 0.01f, 0.0f);
+        }
+    }
+
+    void evictOldMergeSrc(uint64_t frameNum, uint64_t ageThreshold, uint64_t needBytes)
+    {
+        m_evictRunsScratch.clear();
+        for (const auto &[id, m] : m_meshes)
+        {
+            if (!m.dynamic && !m.skinned && m.srcBytes > 0u && m.lastUsed + ageThreshold < frameNum)
+                m_evictRunsScratch.push_back({m.lastUsed, id});
+        }
+        std::sort(m_evictRunsScratch.begin(), m_evictRunsScratch.end());
+        for (const auto &[used, id] : m_evictRunsScratch)
+        {
+            (void)used;
+            auto it = m_meshes.find(id);
+            if (it == m_meshes.end())
+                continue;
+            MaliMesh &m = it->second;
+            if (!m.dynamic && !m.skinned && m.srcBytes > 0u)
+            {
+                std::vector<CompactVertex>().swap(m.srcVerts);
+                std::vector<uint32_t>().swap(m.srcIndices);
+                if (m_mergeSrcBytes >= m.srcBytes)
+                    m_mergeSrcBytes -= m.srcBytes;
+                else
+                    m_mergeSrcBytes = 0;
+                m.srcBytes = 0;
+            }
+            if (needBytes > 0u && m_mergeSrcBytes + needBytes <= kMaxMergeSrcBytes)
+                break;
+        }
+    }
+
     void evictStale()
     {
         for (auto it = m_meshes.begin(); it != m_meshes.end();)
@@ -2387,6 +2510,7 @@ private:
                 ++it;
             }
         }
+        evictOldMergeSrc(m_frameNum, 600u, 0u);
         for (auto it = m_mergeRuns.begin(); it != m_mergeRuns.end();)
         {
             if (it->second.lastUsed + 120u < m_frameNum)
@@ -2430,10 +2554,13 @@ private:
     bool m_statsEnabled = false;
     uint64_t m_uploadBudgetUs = 1500;
     uint64_t m_uploadUsThisFrame = 0;
-    uint64_t m_mergeBudgetUs = 1500;
+    uint64_t m_mergeBudgetUs = 2500;
+    uint32_t m_mergeChunkMax = 24u;
     uint32_t m_bgRate = 2;
     int m_targetFps = 30;
+    int m_drsTargetFps = 30;
     float m_drsScale = 1.0f;
+    double m_emaDrawMs = 0.0;
     double m_emaFrameMs = 0.0;
     int m_drsOverStreak = 0;
     int m_drsUnderStreak = 0;
@@ -2475,6 +2602,10 @@ private:
     uint32_t m_pass2SkipThisFrame = 0;
     uint32_t m_texWrapThisFrame = 0;
     uint32_t m_astcHits = 0;
+    uint32_t m_skinGpuDrawsThisFrame = 0;
+    uint32_t m_skinCpuDrawsThisFrame = 0;
+    uint32_t m_skinMaxQwordsThisFrame = 0;
+    bool m_skinErrLogged = false;
     uint64_t m_mergeSrcBytes = 0;
     uint64_t m_mergeRunBytes = 0;
 
