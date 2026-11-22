@@ -75,6 +75,18 @@ Auditoria técnica completa em [`r36s_native_audit.md`](r36s_native_audit.md) e 
 | **D-5** | Remover módulos, shaders e flags exclusivos de Vita/macOS | **todo** | `Metal`, `vitaGL`, Cg, caminhos `#if defined(__vita__)` / `__APPLE__` | Manutenção/limpeza pura (baixo ganho direto em FPS, mas simplifica build e código) |
 | **D-6** | Reavaliar a necessidade de cada camada do `PS2Recomp` | **todo** | `PS2_GUEST_MEM_TRAMP` (baixa prioridade salvo evidência em perfil), dispatcher, camadas de compatibilidade | Manter apenas o mínimo necessário onde código do jogo ainda não foi reescrito |
 
+## Fase E — Aprimoramentos Visuais Leves no Motor Mali-G31 (Rumo à Limpeza do PS3)
+
+O renderizador dedicado `native_renderer_mali.cpp` reproduz fielmente a estética de PS2, mas herda serrilhado, granulação de texturas baixas, *shimmering* e borramento em ângulos rasos. Os itens abaixo atacam esses pontos dentro do orçamento da Mali-G31 MP2 (GLES 3.2) e dos 895 MiB de RAM do R36S:
+
+| ID | Item | Status | Onde / Observação | Validação / Viabilidade Mali-G31 |
+|---|---|---|---|---|
+| **E-1** | Filtragem Trilinear (`GL_LINEAR_MIPMAP_LINEAR`) + Filtro Anisotrópico `2×/4×` (`SOTC_MALI_ANISO=2\|4`) | **todo** | [`native_renderer_mali.cpp`](../PS2Recomp/ps2xRuntime/src/lib/native/native_renderer_mali.cpp) no upload de texturas/mipmaps (verificando `GL_EXT_texture_filter_anisotropic` na `libMali.so`) | Reduz *shimmering* e borramento em terreno/pisos/pedras vistos em ângulo raso com impacto baixo na Mali-G31 |
+| **E-2** | Anti-aliasing leve pós-processado (FXAA simplificado em `mediump`/FP16) | **todo** | Integrar no passe único `progPost` (`SOTC_MALI_FXAA=1`), evitando MSAA que pressiona *tile memory* e banda | Suaviza serrilhado de silhuetas, colossos e vegetação mantendo 1 passe de tela cheia |
+| **E-3** | AMD FSR 1.0 espacial em GLES 3.2 (`RCAS` 5-tap em `mediump`/FP16 e avaliação A/B de `EASU` 12-tap para DRS) | **todo** | **FSR 1.0 (espacial) é suportado** pela Mali-G31 (GLES 3.2): `RCAS` 5-tap cabe no passe único `progPost` (`SOTC_MALI_FSR_RCAS=1`, `<1 ms` estimado); `EASU` 12-tap é mais pesado e exige A/B para DRS (`0.75×–0.85× → 640×480`). **FSR 2 e FSR 3 (temporais) não são viáveis** neste hardware (exigem *motion vectors*, histórico temporal e banda incompatíveis com Mali-G31 MP2) | Medir custo em `ms` e nitidez visual no R36S comparando bilinear vs `RCAS` vs `EASU+RCAS` |
+| **E-4** | Redução de granulação e *banding* em texturas (`SOTC_MALI_TEX16=0` seletivo / ASTC `4×4`/`6×6`) | **todo** | Avaliar RGB565/RGB5_A1 vs RGBA8 em superfícies com gradientes suaves (pele, céu, pelos) + cache via `tools/astc_pack_cache.py` | Comparar captura/visual e uso de RAM dentro dos ~726 MiB disponíveis no R36S |
+| **E-5** | Controle de *shimmering* em *fur shells* e folhagem (*alpha-test*) | **todo** | Avaliar transição alfa controlada (`fwidth`/recorte suave opt-in em `kMaliCutFrag` ou `alpha-to-coverage` se suportado) | Validar pixel a pixel nos pelos dos colossos e vegetação sem degradar *early-Z* na Mali-G31 |
+
 ---
 
 ## Histórico — Concluído no R36S (Fases 1–6B)
