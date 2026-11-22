@@ -33,6 +33,7 @@
 #if defined(PS2X_LINUX_SDL2_SHIM)
 void ps2xLinuxGlLock();
 void ps2xLinuxGlUnlock();
+bool ps2xLinuxGlHasWaiter();
 #endif
 #endif
 
@@ -76,6 +77,7 @@ namespace
 {
 
 constexpr uint32_t kMaxSkinQwords = native_renderer::kSkinPaletteQwords; // 48 bones * 4 vec4s via glUniform4fv (libMali r13p0 safe)
+constexpr uint32_t kMaxInstances = 16u;
 constexpr uint64_t kMaxMergeSrcBytes = 24ull * 1024ull * 1024ull;
 constexpr uint64_t kMaxMergeRunBytes = 24ull * 1024ull * 1024ull;
 
@@ -176,6 +178,8 @@ layout(location = 2) in vec4 aColor;
 layout(location = 3) in vec2 aUV;
 
 uniform vec4 uClip[4];
+uniform vec4 uInstanceClips[64];
+uniform int uInstanceCount;
 uniform vec4 uDirections[4];
 uniform vec4 uColours[4];
 uniform vec4 uMisc;
@@ -190,7 +194,16 @@ out highp float vLogW;
 
 void main()
 {
-    vec4 c = uClip[0] * aPos.x + uClip[1] * aPos.y + uClip[2] * aPos.z + uClip[3];
+    vec4 c0 = uClip[0], c1 = uClip[1], c2 = uClip[2], c3 = uClip[3];
+    if (uInstanceCount > 1)
+    {
+        int b = gl_InstanceID * 4;
+        c0 = uInstanceClips[b + 0];
+        c1 = uInstanceClips[b + 1];
+        c2 = uInstanceClips[b + 2];
+        c3 = uInstanceClips[b + 3];
+    }
+    vec4 c = c0 * aPos.x + c1 * aPos.y + c2 * aPos.z + c3;
     gl_Position = vec4(c.x, c.y, c.w - 0.2, c.w);
 
     float wSafe = max(c.w, 1e-3);
@@ -263,7 +276,13 @@ void main()
 
     vec4 col = aColor * (1.0 / 128.0);
     col.a *= uMisc.y;
-    if (uMisc.x > 0.5)
+    if (uMisc.x < -0.5)
+    {
+        vec4 p = uDirections[0] * pos.x + uDirections[1] * pos.y + uDirections[2] * pos.z + uDirections[3];
+        float ndv = dot(normalize(p.xyz), uDirections[1].xyz);
+        col.a *= 0.2 + 0.8 * (1.0 - abs(ndv));
+    }
+    else if (uMisc.x > 0.5)
     {
         vec4 d = max(uDirections[0] * nrm.x + uDirections[1] * nrm.y + uDirections[2] * nrm.z + uDirections[3], 0.0);
         d.w = 1.0;
@@ -345,7 +364,7 @@ void main()
     highp float depth = vUV.z;
     highp float lod = uFogC.w > 0.0 ? clamp(vLogW * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
     mediump vec4 t = uFogCol.w > 0.5 ? textureLod(uTex, vUV.xy, lod) : vec4(vec3(128.0 / 255.0), 1.0);
-    mediump float alpha = clamp(t.a * (uFogCol.w > 0.5 ? 2.0 : 1.0) * vColor.a, 0.0, 1.0);
+    mediump float alpha = clamp(t.a * max(uFogCol.w, 1.0) * vColor.a, 0.0, 1.0);
     if (alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y))
         discard;
     mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
@@ -399,7 +418,7 @@ out mediump vec4 oColor;
 void main()
 {
     mediump vec4 t = uFogCol.w > 0.5 ? texture(uTex, vUV) : vec4(vec3(128.0 / 255.0), 1.0);
-    mediump float alpha = clamp(t.a * (uFogCol.w > 0.5 ? 2.0 : 1.0) * vColor.a, 0.0, 1.0);
+    mediump float alpha = clamp(t.a * max(uFogCol.w, 1.0) * vColor.a, 0.0, 1.0);
     if (alpha < 0.01)
         discard;
     mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
@@ -447,6 +466,7 @@ struct UniformShadow
     bool clipValid = false;
     bool lightValid = false;
     uint32_t lastSkinPalette = 0u;
+    int instCount = -1;
     float clip[16] = {};
     float misc[4] = {};
     float fogA[4] = {};
@@ -463,13 +483,15 @@ struct UniformShadow
         clipValid = false;
         lightValid = false;
         lastSkinPalette = 0u;
+        instCount = -1;
     }
 };
 
 struct ShaderProg
 {
     GLuint id = 0;
-    GLint uClip = -1, uBones = -1, uDirections = -1, uColours = -1, uMisc = -1;
+    GLint uClip = -1, uInstanceClips = -1, uInstanceCount = -1;
+    GLint uBones = -1, uDirections = -1, uColours = -1, uMisc = -1;
     GLint uFogA = -1, uFogB = -1, uFogC = -1, uFogCol = -1, uGuard = -1, uAlpha = -1;
     GLint uTex = -1, uBackground = -1;
     mutable UniformShadow shadow{};
@@ -512,6 +534,8 @@ void bindProgUniforms(ShaderProg &out, GLuint p)
 {
     out.id = p;
     out.uClip = glGetUniformLocation(p, "uClip");
+    out.uInstanceClips = glGetUniformLocation(p, "uInstanceClips");
+    out.uInstanceCount = glGetUniformLocation(p, "uInstanceCount");
     out.uBones = glGetUniformLocation(p, "uBones");
     out.uDirections = glGetUniformLocation(p, "uDirections");
     out.uColours = glGetUniformLocation(p, "uColours");
@@ -538,7 +562,7 @@ bool linkProgCached(ShaderProg &out, const char *name, const char *vsSrc, const 
     std::string binPath;
     if (useCache && !cacheDir.empty())
     {
-        binPath = cacheDir + "/" + name + "_v8.bin";
+        binPath = cacheDir + "/" + name + "_v9.bin";
         if (FILE *fp = std::fopen(binPath.c_str(), "rb"))
         {
             GLenum fmt = 0;
@@ -628,18 +652,22 @@ bool linkProgCached(ShaderProg &out, const char *name, const char *vsSrc, const 
 
 struct GlContextGuard
 {
-    GlContextGuard()
+    explicit GlContextGuard(bool alreadyHeld = false)
+        : m_locked(!alreadyHeld)
     {
 #if defined(PS2X_LINUX_SDL2_SHIM)
-        ps2xLinuxGlLock();
+        if (m_locked)
+            ps2xLinuxGlLock();
 #endif
     }
     ~GlContextGuard()
     {
 #if defined(PS2X_LINUX_SDL2_SHIM)
-        ps2xLinuxGlUnlock();
+        if (m_locked)
+            ps2xLinuxGlUnlock();
 #endif
     }
+    bool m_locked = false;
 };
 
 struct MaliMesh
@@ -658,6 +686,9 @@ struct MaliMesh
     float lo[3] = {};
     float hi[3] = {};
     uint8_t minAlpha = 0;
+    uint8_t maxAlpha = 0xFF;
+    bool pendingEvict = false;
+    uint64_t gpuBytes = 0;
     uint64_t lastUsed = 0;
     // Phase 6C: Optional CPU source copy for safe GL_UNSIGNED_INT static run merging.
     std::vector<CompactVertex> srcVerts;
@@ -672,10 +703,13 @@ struct MaliTex
     uint32_t height = 0;
     uint32_t levels = 1;
     uint8_t minAlpha = 0;
+    uint8_t maxAlpha = 0xFF;
     uint8_t wrapClamp = 0xFF; // Phase 5.1: cached GL_TEXTURE_WRAP_S/T state
     bool binaryAlpha = false; // Phase 6B: true when every level-0 texel is <=4 or >=124
+    bool pendingEvict = false;
     bool astc = false;
     bool tex16 = false;
+    uint64_t gpuBytes = 0;
     uint64_t lastUsed = 0;
 };
 
@@ -717,6 +751,7 @@ struct UploadCmd
     bool hasIntermediateAlpha = false;
     float lo[3] = {}, hi[3] = {};
     uint8_t minAlpha = 0xFF;
+    uint8_t maxAlpha = 0xFF;
     std::vector<CompactVertex> compactVerts;
     std::vector<SkinVertex> skinVerts;
     std::vector<uint32_t> indices;
@@ -729,6 +764,7 @@ struct DynMeshRec
     uint32_t firstVertex = 0;
     uint32_t vertexCount = 0;
     uint8_t minAlpha = 0;
+    uint8_t maxAlpha = 0xFF;
     bool hasIntermediateAlpha = false;
 };
 
@@ -747,6 +783,7 @@ struct QueuedDraw
     MaliTex *tex = nullptr; // Phase 5.1: pre-resolved once during queue build
     float clip[16] = {};
     uint64_t clipHash = 0;
+    uint64_t stateHash = 0;
     DrawState state{};
     float minW = 0.0f;
     uint32_t seq = 0;
@@ -769,11 +806,15 @@ struct FramePacket
     std::vector<SkinPaletteEntry> skinPalettes;
     std::vector<float> skinPaletteData;
     std::vector<RawDraw> draws;
+    std::vector<uint64_t> confirmEvictMeshes;
+    std::vector<uint64_t> cancelEvictMeshes;
+    std::vector<uint64_t> confirmEvictTex;
+    std::vector<uint64_t> cancelEvictTex;
 
     void clearPerFrame()
     {
-        // Note: uploads are intentionally preserved across beginFrame() so asyncBuilds().takeUp()
-        // uploads queued before beginFrame() are never dropped!
+        // Note: uploads and eviction decisions are intentionally preserved across beginFrame()
+        // so asyncBuilds().takeUp() uploads and 2-phase evictions are never dropped.
         dynMeshes.clear();
         dynVerts.clear();
         skinPalettes.clear();
@@ -845,7 +886,35 @@ inline bool canMergeStatic(const QueuedDraw &a, const QueuedDraw &b)
            a.state.lodK == b.state.lodK &&
            a.state.lodScale == b.state.lodScale &&
            a.state.maxLod == b.state.maxLod &&
-           (!a.state.lit || std::memcmp(a.state.light, b.state.light, sizeof(a.state.light)) == 0);
+           ((!a.state.lit && !a.state.fresnel) || std::memcmp(a.state.light, b.state.light, sizeof(a.state.light)) == 0);
+}
+
+inline bool canInstanceStatic(const QueuedDraw &a, const QueuedDraw &b)
+{
+    return a.bucket == b.bucket &&
+           (a.bucket == 0u || a.bucket == 1u) &&
+           a.mesh && b.mesh &&
+           a.mesh == b.mesh &&
+           !a.mesh->dynamic && !b.mesh->dynamic &&
+           !a.skinned && !b.skinned &&
+           a.stateHash == b.stateHash &&
+           a.state.order == b.state.order &&
+           a.psoKey == b.psoKey &&
+           a.state.texture == b.state.texture &&
+           a.state.clamp == b.state.clamp &&
+           a.state.alphaTest == b.state.alphaTest &&
+           a.state.lit == b.state.lit &&
+           a.state.fresnel == b.state.fresnel &&
+           a.state.fogged == b.state.fogged &&
+           a.state.background == b.state.background &&
+           a.state.backgroundFge == b.state.backgroundFge &&
+           a.state.opacity == b.state.opacity &&
+           a.state.uvOffset[0] == b.state.uvOffset[0] &&
+           a.state.uvOffset[1] == b.state.uvOffset[1] &&
+           a.state.lodK == b.state.lodK &&
+           a.state.lodScale == b.state.lodScale &&
+           a.state.maxLod == b.state.maxLod &&
+           ((!a.state.lit && !a.state.fresnel) || std::memcmp(a.state.light, b.state.light, sizeof(a.state.light)) == 0);
 }
 
 class MaliBackend final : public Backend
@@ -862,8 +931,12 @@ public:
         m_shaderCacheEnabled = envBool("SOTC_MALI_SHADER_CACHE", true);
         m_gpuSkinEnabled = envBool("SOTC_MALI_GPU_SKIN", true);
         m_mergeEnabled = envBool("SOTC_MALI_MERGE", true);
+        m_instancingEnabled = envBool("SOTC_MALI_INSTANCING", true);
+        m_keepCurrentEnabled = envBool("SOTC_MALI_KEEP_CURRENT", true);
+        m_drsDrawOnly = envBool("SOTC_MALI_DRS_DRAW_ONLY", true);
         m_mergeBudgetUs = static_cast<uint64_t>(std::max(0, envInt("SOTC_MALI_MERGE_BUDGET_US", 2500)));
         m_mergeChunkMax = static_cast<uint32_t>(std::clamp(envInt("SOTC_MALI_MERGE_CHUNK", 24), 4, 128));
+        m_cacheBudgetBytes = static_cast<uint64_t>(std::max(16, envInt("SOTC_MALI_CACHE_BUDGET_MB", 128))) * 1024ull * 1024ull;
         m_atPass2Mode = std::clamp(envInt("SOTC_MALI_AT_PASS2", 1), 0, 2); // 0=off, 1=smart auto, 2=always
         m_zPrepassEnabled = envBool("SOTC_MALI_ZPREPASS", false);
         m_postEnabled = envBool("SOTC_MALI_POST", true);
@@ -1069,6 +1142,10 @@ public:
         {
             executeFrame(m_rec);
             m_rec.uploads.clear();
+            m_rec.confirmEvictMeshes.clear();
+            m_rec.cancelEvictMeshes.clear();
+            m_rec.confirmEvictTex.clear();
+            m_rec.cancelEvictTex.clear();
             return;
         }
 
@@ -1078,9 +1155,64 @@ public:
             m_cvDone.wait(lk, [this] { return !m_hasPendingFrame || m_stopRequested; });
         if (m_stopRequested)
             return;
+
+        if (!m_pendingEvictMeshes.empty() || !m_pendingEvictTex.empty())
+        {
+            auto isMeshInUse = [&](uint64_t id) {
+                for (const auto &d : m_rec.draws)
+                    if (d.meshId == id) return true;
+                for (const auto &u : m_rec.uploads)
+                    if (u.kind != UploadCmd::Texture && u.id == id) return true;
+                if (m_hasPendingFrame)
+                {
+                    for (const auto &d : m_pending.draws)
+                        if (d.meshId == id) return true;
+                    for (const auto &u : m_pending.uploads)
+                        if (u.kind != UploadCmd::Texture && u.id == id) return true;
+                }
+                return false;
+            };
+            auto isTexInUse = [&](uint64_t id) {
+                for (const auto &d : m_rec.draws)
+                    if (d.state.texture == id) return true;
+                for (const auto &u : m_rec.uploads)
+                    if (u.kind == UploadCmd::Texture && u.id == id) return true;
+                if (m_hasPendingFrame)
+                {
+                    for (const auto &d : m_pending.draws)
+                        if (d.state.texture == id) return true;
+                    for (const auto &u : m_pending.uploads)
+                        if (u.kind == UploadCmd::Texture && u.id == id) return true;
+                }
+                return false;
+            };
+            for (uint64_t id : m_pendingEvictMeshes)
+            {
+                if (isMeshInUse(id))
+                    m_rec.cancelEvictMeshes.push_back(id);
+                else
+                {
+                    m_knownMeshes.erase(id);
+                    m_rec.confirmEvictMeshes.push_back(id);
+                }
+            }
+            for (uint64_t id : m_pendingEvictTex)
+            {
+                if (isTexInUse(id))
+                    m_rec.cancelEvictTex.push_back(id);
+                else
+                {
+                    m_knownTextures.erase(id);
+                    m_rec.confirmEvictTex.push_back(id);
+                }
+            }
+            m_pendingEvictMeshes.clear();
+            m_pendingEvictTex.clear();
+        }
+
         if (m_hasPendingFrame)
         {
-            // Merge unconsumed uploads from m_pending ahead of m_rec.uploads before dropping old frame.
+            // Merge unconsumed uploads and eviction decisions from m_pending ahead of m_rec before dropping old frame.
             if (!m_pending.uploads.empty())
             {
                 m_pending.uploads.insert(m_pending.uploads.end(),
@@ -1089,10 +1221,26 @@ public:
                 m_rec.uploads.swap(m_pending.uploads);
                 m_pending.uploads.clear();
             }
+            auto prependIds = [](std::vector<uint64_t> &pending, std::vector<uint64_t> &rec) {
+                if (!pending.empty())
+                {
+                    pending.insert(pending.end(), rec.begin(), rec.end());
+                    rec.swap(pending);
+                    pending.clear();
+                }
+            };
+            prependIds(m_pending.confirmEvictMeshes, m_rec.confirmEvictMeshes);
+            prependIds(m_pending.cancelEvictMeshes, m_rec.cancelEvictMeshes);
+            prependIds(m_pending.confirmEvictTex, m_rec.confirmEvictTex);
+            prependIds(m_pending.cancelEvictTex, m_rec.cancelEvictTex);
             m_droppedFrames.fetch_add(1u, std::memory_order_relaxed);
         }
         std::swap(m_pending, m_rec);
         m_rec.uploads.clear();
+        m_rec.confirmEvictMeshes.clear();
+        m_rec.cancelEvictMeshes.clear();
+        m_rec.confirmEvictTex.clear();
+        m_rec.cancelEvictTex.clear();
         m_hasPendingFrame = true;
         lk.unlock();
         m_cvWork.notify_one();
@@ -1164,6 +1312,18 @@ private:
         if (!ok)
             return;
 
+        bool glHeld = false;
+        auto releaseHeld = [&]
+        {
+            if (glHeld)
+            {
+#if defined(PS2X_LINUX_SDL2_SHIM)
+                ps2xLinuxGlUnlock();
+#endif
+                glHeld = false;
+            }
+        };
+
         FramePacket local; // Reused across frames to avoid vector reallocations
         for (;;)
         {
@@ -1171,12 +1331,43 @@ private:
             bool doReadback = false;
             {
                 std::unique_lock<std::mutex> lk(m_mtx);
+#if defined(PS2X_LINUX_SDL2_SHIM)
+                if (glHeld && (m_stopRequested || (!m_hasPendingFrame && !m_readbackReq) || ps2xLinuxGlHasWaiter()))
+                {
+                    lk.unlock();
+                    releaseHeld();
+                    lk.lock();
+                }
+#endif
                 m_cvWork.wait(lk, [this] { return m_hasPendingFrame || m_readbackReq || m_stopRequested; });
                 if (m_stopRequested && !m_hasPendingFrame)
+                {
+                    lk.unlock();
+                    releaseHeld();
                     break;
+                }
+#if defined(PS2X_LINUX_SDL2_SHIM)
+                if (m_keepCurrentEnabled && !glHeld)
+                {
+                    lk.unlock();
+                    ps2xLinuxGlLock();
+                    glHeld = true;
+                    lk.lock();
+                    if (m_stopRequested && !m_hasPendingFrame)
+                    {
+                        lk.unlock();
+                        releaseHeld();
+                        break;
+                    }
+                }
+#endif
                 if (m_hasPendingFrame)
                 {
                     local.uploads.clear();
+                    local.confirmEvictMeshes.clear();
+                    local.cancelEvictMeshes.clear();
+                    local.confirmEvictTex.clear();
+                    local.cancelEvictTex.clear();
                     std::swap(local, m_pending);
                     m_hasPendingFrame = false;
                     m_renderingActive = true;
@@ -1191,8 +1382,12 @@ private:
 
             if (doFrame)
             {
-                executeFrame(local);
+                executeFrame(local, glHeld);
                 local.uploads.clear();
+                local.confirmEvictMeshes.clear();
+                local.cancelEvictMeshes.clear();
+                local.confirmEvictTex.clear();
+                local.cancelEvictTex.clear();
                 {
                     std::lock_guard<std::mutex> lk(m_mtx);
                     m_renderingActive = false;
@@ -1203,7 +1398,7 @@ private:
             {
                 std::vector<uint8_t> tmp;
                 uint32_t rw = 0, rh = 0;
-                readbackOnGlThread(tmp, rw, rh);
+                readbackOnGlThread(tmp, rw, rh, glHeld);
                 {
                     std::lock_guard<std::mutex> lk(m_mtx);
                     m_readbackRgba.swap(tmp);
@@ -1215,6 +1410,7 @@ private:
                 m_cvDone.notify_all();
             }
         }
+        releaseHeld();
         shutdownGlOnCurrentThread();
     }
 
@@ -1276,10 +1472,12 @@ private:
         makeTarget(m_bgTarget, 256, 256, true);
         m_lastPresentTime = std::chrono::steady_clock::now();
         m_initialized = true;
-        std::fprintf(stderr, "[mali] Phase 6.1 GLES 3.2 backend up (async=%d mailbox=%d merge=%d chunk=%u atPass2=%d cull=%d skin=%d astcHw=%d drs=%d@%dfps)\n",
-                     m_asyncEnabled ? 1 : 0, m_mailboxEnabled ? 1 : 0, m_mergeEnabled ? 1 : 0, m_mergeChunkMax,
-                     m_atPass2Mode, m_cullEnabled ? 1 : 0, m_gpuSkinEnabled ? 1 : 0, m_hasAstc ? 1 : 0,
-                     m_drsEnabled ? 1 : 0, m_drsTargetFps);
+        std::fprintf(stderr, "[mali] Phase 6.2 GLES 3.2 backend up (async=%d mailbox=%d keepCur=%d merge=%d inst=%d atPass2=%d cull=%d skin=%d drs=%d@%dfps drawOnly=%d budget=%lluM)\n",
+                     m_asyncEnabled ? 1 : 0, m_mailboxEnabled ? 1 : 0, m_keepCurrentEnabled ? 1 : 0,
+                     m_mergeEnabled ? 1 : 0, m_instancingEnabled ? 1 : 0,
+                     m_atPass2Mode, m_cullEnabled ? 1 : 0, m_gpuSkinEnabled ? 1 : 0,
+                     m_drsEnabled ? 1 : 0, m_drsTargetFps, m_drsDrawOnly ? 1 : 0,
+                     static_cast<unsigned long long>(m_cacheBudgetBytes >> 20));
         return true;
     }
 
@@ -1307,9 +1505,11 @@ private:
         }
         m_meshes.clear();
         m_mergeSrcBytes = 0;
+        m_gpuMeshBytes = 0;
         for (auto &[id, t] : m_textures)
             if (t.tex) glDeleteTextures(1, &t.tex);
         m_textures.clear();
+        m_gpuTexBytes = 0;
         destroyTarget(m_mainTarget);
         destroyTarget(m_postTarget);
         destroyTarget(m_bgTarget);
@@ -1325,12 +1525,12 @@ private:
         m_initialized = false;
     }
 
-    bool readbackOnGlThread(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height)
+    bool readbackOnGlThread(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height, bool glAlreadyHeld = false)
     {
         const MaliTarget &src = (m_postTarget.fbo && m_lastPresentedPost) ? m_postTarget : m_mainTarget;
         if (!m_initialized || !src.fbo)
             return false;
-        GlContextGuard guard;
+        GlContextGuard guard(glAlreadyHeld);
         width = src.width;
         height = src.height;
         rgba.resize(static_cast<size_t>(width) * height * 4u);
@@ -1340,14 +1540,77 @@ private:
         return true;
     }
 
+    void deleteMeshGpu(MaliMesh &m)
+    {
+        if (m_lastVao == m.vao && m.vao != 0u)
+            m_lastVao = ~0u;
+        if (m.vao) glDeleteVertexArrays(1, &m.vao);
+        if (m.vbo) glDeleteBuffers(1, &m.vbo);
+        if (m.ibo) glDeleteBuffers(1, &m.ibo);
+        if (m_gpuMeshBytes >= m.gpuBytes)
+            m_gpuMeshBytes -= m.gpuBytes;
+        else
+            m_gpuMeshBytes = 0;
+        if (m_mergeSrcBytes >= m.srcBytes)
+            m_mergeSrcBytes -= m.srcBytes;
+        else
+            m_mergeSrcBytes = 0;
+        m.vao = m.vbo = m.ibo = 0;
+        m.gpuBytes = 0;
+        m.srcBytes = 0;
+    }
+
     void processUploads(const FramePacket &pkt)
     {
         m_uploadUsThisFrame = 0;
+
+        for (uint64_t id : pkt.cancelEvictMeshes)
+        {
+            if (auto it = m_meshes.find(id); it != m_meshes.end())
+            {
+                it->second.pendingEvict = false;
+                it->second.lastUsed = pkt.frameNum;
+            }
+        }
+        for (uint64_t id : pkt.confirmEvictMeshes)
+        {
+            if (auto it = m_meshes.find(id); it != m_meshes.end())
+            {
+                deleteMeshGpu(it->second);
+                m_meshes.erase(it);
+                m_evictions.fetch_add(1u, std::memory_order_relaxed);
+            }
+        }
+        for (uint64_t id : pkt.cancelEvictTex)
+        {
+            if (auto it = m_textures.find(id); it != m_textures.end())
+            {
+                it->second.pendingEvict = false;
+                it->second.lastUsed = pkt.frameNum;
+            }
+        }
+        for (uint64_t id : pkt.confirmEvictTex)
+        {
+            if (auto it = m_textures.find(id); it != m_textures.end())
+            {
+                if (m_lastTex == it->second.tex && it->second.tex != 0u)
+                    m_lastTex = ~0u;
+                if (it->second.tex) glDeleteTextures(1, &it->second.tex);
+                if (m_gpuTexBytes >= it->second.gpuBytes)
+                    m_gpuTexBytes -= it->second.gpuBytes;
+                else
+                    m_gpuTexBytes = 0;
+                m_textures.erase(it);
+                m_evictions.fetch_add(1u, std::memory_order_relaxed);
+            }
+        }
+
         for (const UploadCmd &cmd : pkt.uploads)
         {
             if (cmd.kind == UploadCmd::StaticMesh || cmd.kind == UploadCmd::IndexedMesh)
             {
                 MaliMesh &mesh = m_meshes[cmd.id];
+                mesh.pendingEvict = false;
                 mesh.lastUsed = pkt.frameNum;
                 mesh.indexed = (cmd.kind == UploadCmd::IndexedMesh);
                 mesh.dynamic = false;
@@ -1359,6 +1622,13 @@ private:
                 std::memcpy(mesh.lo, cmd.lo, sizeof(mesh.lo));
                 std::memcpy(mesh.hi, cmd.hi, sizeof(mesh.hi));
                 mesh.minAlpha = cmd.minAlpha;
+
+                const uint64_t newGpuBytes = static_cast<uint64_t>(cmd.compactVerts.size()) * sizeof(CompactVertex) +
+                                             (mesh.indexed ? static_cast<uint64_t>(cmd.indices.size()) * sizeof(uint32_t) : 0ull);
+                if (m_gpuMeshBytes >= mesh.gpuBytes)
+                    m_gpuMeshBytes -= mesh.gpuBytes;
+                mesh.gpuBytes = newGpuBytes;
+                m_gpuMeshBytes += newGpuBytes;
 
                 if (!mesh.vbo) glGenBuffers(1, &mesh.vbo);
                 if (mesh.indexed && !mesh.ibo) glGenBuffers(1, &mesh.ibo);
@@ -1409,6 +1679,7 @@ private:
             else if (cmd.kind == UploadCmd::SkinnedMesh)
             {
                 MaliMesh &mesh = m_meshes[cmd.id];
+                mesh.pendingEvict = false;
                 mesh.lastUsed = pkt.frameNum;
                 mesh.dynamic = false;
                 mesh.skinned = true;
@@ -1418,6 +1689,12 @@ private:
                 mesh.hasBox = false;
                 mesh.hasIntermediateAlpha = cmd.hasIntermediateAlpha;
                 mesh.minAlpha = cmd.minAlpha;
+                const uint64_t newGpuBytes = static_cast<uint64_t>(cmd.skinVerts.size()) * sizeof(SkinVertex) +
+                                             (mesh.indexed ? static_cast<uint64_t>(cmd.indices.size()) * sizeof(uint32_t) : 0ull);
+                if (m_gpuMeshBytes >= mesh.gpuBytes)
+                    m_gpuMeshBytes -= mesh.gpuBytes;
+                mesh.gpuBytes = newGpuBytes;
+                m_gpuMeshBytes += newGpuBytes;
                 if (!mesh.vbo) glGenBuffers(1, &mesh.vbo);
                 if (mesh.indexed && !mesh.ibo) glGenBuffers(1, &mesh.ibo);
                 if (!mesh.vao) glGenVertexArrays(1, &mesh.vao);
@@ -1485,15 +1762,18 @@ private:
 
         const size_t pxCount = static_cast<size_t>(cmd.width) * cmd.height;
         uint8_t minA = 0xFF;
+        uint8_t maxA = 0;
         bool allBinaryAlpha = true;
         const uint8_t *rgba = cmd.rgba.data();
         for (size_t i = 0; i < pxCount; ++i)
         {
             const uint8_t a = rgba[i * 4 + 3];
             if (a < minA) minA = a;
+            if (a > maxA) maxA = a;
             if (a > 4u && a < 124u) allBinaryAlpha = false;
         }
         tx.minAlpha = minA;
+        tx.maxAlpha = maxA;
         tx.binaryAlpha = allBinaryAlpha;
 
         if (m_hasAstc && !m_astcCacheDir.empty() && tryUploadAstcFromCache(cmd.id, tx))
@@ -1510,6 +1790,22 @@ private:
         const bool use565 = m_tex16Enabled && minA >= 124u;
         const bool use5551 = m_tex16Enabled && !use565 && allBinaryAlpha;
         tx.tex16 = use565 || use5551;
+        tx.pendingEvict = false;
+        uint64_t newTexBytes = 0;
+        {
+            uint32_t bw = cmd.width, bh = cmd.height;
+            const uint64_t bpp = tx.tex16 ? 2ull : 4ull;
+            for (uint32_t lv = 0; lv < tx.levels; ++lv)
+            {
+                newTexBytes += static_cast<uint64_t>(bw) * bh * bpp;
+                bw = std::max(1u, bw >> 1);
+                bh = std::max(1u, bh >> 1);
+            }
+        }
+        if (m_gpuTexBytes >= tx.gpuBytes)
+            m_gpuTexBytes -= tx.gpuBytes;
+        tx.gpuBytes = newTexBytes;
+        m_gpuTexBytes += newTexBytes;
 
         const uint8_t *ptr = rgba;
         uint32_t lw = cmd.width, lh = cmd.height;
@@ -1666,6 +1962,9 @@ private:
     {
         if (m_atPass2Mode == 0 || aref <= 0.02f)
             return false;
+        const uint32_t atst = (q.state.alphaTest >> 1) & 7u;
+        if (atst != 5u && atst != 6u)
+            return false;
         const uint32_t afail = (q.state.alphaTest >> 12) & 3u;
         if (afail != 1u && afail != 3u)
             return false;
@@ -1681,10 +1980,10 @@ private:
         return false;
     }
 
-    void executeFrame(FramePacket &pkt)
+    void executeFrame(FramePacket &pkt, bool glAlreadyHeld = false)
     {
         const uint64_t frameStartUs = nowUs();
-        GlContextGuard guard;
+        GlContextGuard guard(glAlreadyHeld);
 
         m_frameNum = pkt.frameNum;
         m_fog = pkt.fog;
@@ -1692,6 +1991,7 @@ private:
         m_culledThisFrame = 0;
         m_drawCallsThisFrame = 0;
         m_mergeSavedThisFrame = 0;
+        m_instSavedThisFrame = 0;
         m_pass2SkipThisFrame = 0;
         m_texWrapThisFrame = 0;
         m_skinGpuDrawsThisFrame = 0;
@@ -1755,7 +2055,12 @@ private:
             }
             else
             {
-                const bool hasAlphaTest = (rd.state.alphaTest & 1u) != 0u;
+                const bool ate = (rd.state.alphaTest & 1u) != 0u;
+                const uint32_t atst = (rd.state.alphaTest >> 1) & 7u;
+                const uint32_t afail = (rd.state.alphaTest >> 12) & 3u;
+                if (ate && atst == 0u && afail == 0u)
+                    continue;
+                const bool hasAlphaTest = ate && (atst != 1u);
                 const bool needsGuard = rd.state.background && m_fog.skyNear > 0.0f;
                 const bool texOpaque = !texPtr || texPtr->minAlpha >= 124u;
                 const bool isOpaque = !hasAlphaTest && !needsGuard && !rd.state.overlay && !rd.state.noDepthWrite &&
@@ -1780,6 +2085,26 @@ private:
                     const bool dw = rd.state.writeDepth && !rd.state.noDepthWrite && !rd.state.overlay;
                     q.psoKey = makePsoKey(cutProg, rd.state.blend, true, dw, df);
                 }
+            }
+
+            if (q.bucket == 0u || q.bucket == 1u)
+            {
+                uint64_t sh = fnv1aHash(&q.psoKey, sizeof(q.psoKey));
+                sh = fnv1aHash(&q.state.texture, sizeof(q.state.texture), sh);
+                sh = fnv1aHash(&q.state.clamp, sizeof(q.state.clamp), sh);
+                sh = fnv1aHash(&q.state.alphaTest, sizeof(q.state.alphaTest), sh);
+                const uint8_t flags = (q.state.lit ? 1u : 0u) | (q.state.fresnel ? 2u : 0u) |
+                                      (q.state.fogged ? 4u : 0u) | (q.state.background ? 8u : 0u) |
+                                      (q.state.backgroundFge ? 16u : 0u);
+                sh = fnv1aHash(&flags, sizeof(flags), sh);
+                sh = fnv1aHash(&q.state.opacity, sizeof(q.state.opacity), sh);
+                sh = fnv1aHash(q.state.uvOffset, sizeof(q.state.uvOffset), sh);
+                sh = fnv1aHash(&q.state.lodK, sizeof(q.state.lodK), sh);
+                sh = fnv1aHash(&q.state.lodScale, sizeof(q.state.lodScale), sh);
+                sh = fnv1aHash(&q.state.maxLod, sizeof(q.state.maxLod), sh);
+                if (q.state.lit || q.state.fresnel)
+                    sh = fnv1aHash(q.state.light, sizeof(q.state.light), sh);
+                q.stateHash = sh;
             }
 
             const bool mergeCandidate = m_mergeEnabled && (q.bucket == 0u || q.bucket == 1u) && !mesh.dynamic && !q.skinned && !mesh.srcVerts.empty();
@@ -1824,11 +2149,12 @@ private:
                 const uint32_t aPal = a.skinned ? a.state.skinPalette : 0u;
                 const uint32_t bPal = b.skinned ? b.state.skinPalette : 0u;
                 if (aPal != bPal) return aPal < bPal;
+                if (a.stateHash != b.stateHash) return a.stateHash < b.stateHash;
                 if (a.state.texture != b.state.texture) return a.state.texture < b.state.texture;
                 if (a.state.clamp != b.state.clamp) return a.state.clamp < b.state.clamp;
-                if (a.clipHash != b.clipHash) return a.clipHash < b.clipHash;
                 if (a.state.alphaTest != b.state.alphaTest) return a.state.alphaTest < b.state.alphaTest;
                 if (a.meshId != b.meshId) return a.meshId < b.meshId;
+                if (a.clipHash != b.clipHash) return a.clipHash < b.clipHash;
             }
             return a.seq < b.seq;
         });
@@ -1892,9 +2218,10 @@ private:
             const QueuedDraw &q = m_qAll[i];
 
             // Phase 6.1: Camera-invariant static merge sliced into fixed sub-runs + union-AABB group cull.
-            if (m_mergeEnabled && (q.bucket == 0u || q.bucket == 1u) && q.mesh && !q.mesh->dynamic && !q.skinned && !q.mesh->srcVerts.empty())
+            if (m_mergeEnabled && (q.bucket == 0u || q.bucket == 1u) && q.mesh && !q.mesh->dynamic && !q.skinned && !q.mesh->srcVerts.empty() &&
+                i + 1u < m_qAll.size() && canMergeStatic(q, m_qAll[i + 1u]))
             {
-                size_t groupEnd = i + 1u;
+                size_t groupEnd = i + 2u;
                 while (groupEnd < m_qAll.size() && canMergeStatic(q, m_qAll[groupEnd]))
                     ++groupEnd;
 
@@ -1976,6 +2303,71 @@ private:
                 continue;
             }
 
+            if (m_instancingEnabled && (q.bucket == 0u || q.bucket == 1u) && q.mesh && !q.mesh->dynamic && !q.skinned)
+            {
+                size_t instEnd = i + 1u;
+                while (instEnd < m_qAll.size() && (instEnd - i) < kMaxInstances && canInstanceStatic(q, m_qAll[instEnd]))
+                    ++instEnd;
+                if (instEnd - i >= 2u)
+                {
+                    const QueuedDraw *inst[kMaxInstances];
+                    uint32_t count = 0u;
+                    for (size_t j = i; j < instEnd; ++j)
+                    {
+                        const QueuedDraw &jq = m_qAll[j];
+                        float dummyW = 0.0f;
+                        if (m_cullEnabled && jq.deferredCull && jq.mesh && cullAabb(jq.clip, jq.mesh->lo, jq.mesh->hi, dummyW))
+                        {
+                            ++m_culledThisFrame;
+                            continue;
+                        }
+                        inst[count++] = &jq;
+                    }
+                    if (count >= 2u)
+                    {
+                        const QueuedDraw &iq = *inst[0];
+                        if (iq.bucket == 0u)
+                        {
+                            emitInstanced(inst, count, pkt, true, 0.0f, 0.0f, iq.psoKey);
+                        }
+                        else
+                        {
+                            const float aref = static_cast<float>((iq.state.alphaTest >> 4) & 0xFFu) / 128.0f;
+                            emitInstanced(inst, count, pkt, true, std::max(0.02f, aref), 0.0f, iq.psoKey);
+                            bool anyPass2 = false;
+                            for (uint32_t k = 0; k < count; ++k)
+                                if (needsAlphaTestPass2(*inst[k], aref)) { anyPass2 = true; break; }
+                            if (anyPass2)
+                            {
+                                const uint32_t p2Pso = makePsoKey(1u, iq.state.blend, true, false, 1u);
+                                emitInstanced(inst, count, pkt, true, 0.02f, aref, p2Pso);
+                            }
+                            else if (((iq.state.alphaTest >> 12) & 3u) == 1u || ((iq.state.alphaTest >> 12) & 3u) == 3u)
+                            {
+                                m_pass2SkipThisFrame += count;
+                            }
+                        }
+                        m_instSavedThisFrame += count - 1u;
+                    }
+                    else if (count == 1u)
+                    {
+                        emitBucketSingle(*inst[0], pkt);
+                    }
+                    i = instEnd;
+                    continue;
+                }
+            }
+
+            if (m_cullEnabled && q.deferredCull && q.mesh)
+            {
+                float dummyW = 0.0f;
+                if (cullAabb(q.clip, q.mesh->lo, q.mesh->hi, dummyW))
+                {
+                    ++m_culledThisFrame;
+                    ++i;
+                    continue;
+                }
+            }
             emitBucketSingle(q, pkt);
             ++i;
         }
@@ -2034,8 +2426,9 @@ private:
         m_emaFrameMs = m_emaFrameMs > 0.0 ? (m_emaFrameMs * 0.85 + frameMs * 0.15) : frameMs;
         if (m_drsEnabled && (m_frameNum % 12u == 0u))
         {
-            const double budgetMs = 1000.0 / static_cast<double>(m_drsTargetFps);
-            if (m_emaFrameMs > budgetMs * 1.10)
+            const double metricMs = m_drsDrawOnly ? m_emaDrawMs : m_emaFrameMs;
+            const double budgetMs = (1000.0 / static_cast<double>(m_drsTargetFps)) * (m_drsDrawOnly ? 0.85 : 1.0);
+            if (metricMs > budgetMs * 1.10)
             {
                 ++m_drsOverStreak;
                 m_drsUnderStreak = 0;
@@ -2045,7 +2438,7 @@ private:
                     m_drsOverStreak = 0;
                 }
             }
-            else if (m_emaFrameMs < budgetMs * 1.02)
+            else if (metricMs < budgetMs * 1.02)
             {
                 ++m_drsUnderStreak;
                 m_drsOverStreak = 0;
@@ -2064,11 +2457,13 @@ private:
 
         if (m_statsEnabled && (m_frameNum % 120u == 0u))
         {
-            std::fprintf(stderr, "[mali:stats] frame=%llu draws=%u mergeSaved=%u pass2Skip=%u culled=%u texWrap=%u drop=%llu drs=%.2f drawMs=%.2f renderMs=%.2f skin=%u/%u/%u\n",
+            const double gpuMb = static_cast<double>(m_gpuMeshBytes + m_gpuTexBytes) / (1024.0 * 1024.0);
+            const double budMb = static_cast<double>(m_cacheBudgetBytes) / (1024.0 * 1024.0);
+            std::fprintf(stderr, "[mali:stats] frame=%llu draws=%u mergeSaved=%u instSaved=%u pass2Skip=%u culled=%u texWrap=%u drop=%llu drs=%.2f drawMs=%.2f renderMs=%.2f mem=%.1f/%.1fM skin=%u/%u/%u\n",
                          static_cast<unsigned long long>(m_frameNum), m_drawCallsThisFrame,
-                         m_mergeSavedThisFrame, m_pass2SkipThisFrame, m_culledThisFrame,
+                         m_mergeSavedThisFrame, m_instSavedThisFrame, m_pass2SkipThisFrame, m_culledThisFrame,
                          m_texWrapThisFrame, static_cast<unsigned long long>(m_droppedFrames.load(std::memory_order_relaxed)),
-                         m_drsScale, m_emaDrawMs, m_emaFrameMs,
+                         m_drsScale, m_emaDrawMs, m_emaFrameMs, gpuMb, budMb,
                          m_skinGpuDrawsThisFrame, m_skinCpuDrawsThisFrame, m_skinMaxQwordsThisFrame);
         }
 
@@ -2317,7 +2712,7 @@ private:
     }
 
     void bindCommonUniforms(const ShaderProg &prog, const QueuedDraw &q, const FramePacket &pkt,
-                            bool allowBgFog, float minAlpha, float maxAlpha)
+                            bool allowBgFog, float minAlpha, float maxAlpha, int instCount = 1)
     {
         // Phase 5.1: Pre-resolved MaliTex* + per-texture wrapClamp cache (eliminates glTexParameteri storm).
         const GLuint glTex = q.tex ? q.tex->tex : m_whiteTex;
@@ -2341,6 +2736,11 @@ private:
             std::memcpy(sh.clip, q.clip, sizeof(sh.clip));
             sh.clipValid = true;
             glUniform4fv(prog.uClip, 4, q.clip);
+        }
+        if (instCount == 1 && prog.uInstanceCount >= 0 && sh.instCount != 1)
+        {
+            sh.instCount = 1;
+            glUniform1i(prog.uInstanceCount, 1);
         }
 
         if (q.skinned && prog.uBones >= 0 && q.state.skinPalette &&
@@ -2386,7 +2786,8 @@ private:
         const bool vfog = m_fog.vertexFog && (!q.state.background || q.state.backgroundFge);
         setCached4f(prog.uFogB, sh.fogB, v, 0.0f, 0.0f, vfog ? 1.0f : 0.0f, m_fog.base);
         setCached4f(prog.uFogC, sh.fogC, v, m_fog.scale, q.state.lodK, q.state.lodScale, q.state.maxLod);
-        setCached4f(prog.uFogCol, sh.fogCol, v, m_fog.colour[0], m_fog.colour[1], m_fog.colour[2], hasTex ? 1.0f : 0.0f);
+        const float texAlphaScale = !hasTex ? 0.0f : (q.tex->tex16 ? 1.0f : 2.0f);
+        setCached4f(prog.uFogCol, sh.fogCol, v, m_fog.colour[0], m_fog.colour[1], m_fog.colour[2], texAlphaScale);
 
         const bool bgFog = allowBgFog && m_fog.enabled && q.state.fogged && !q.state.background;
         setCached4f(prog.uFogA, sh.fogA, v, m_fog.start, m_fog.width, static_cast<float>(m_fog.steps), bgFog ? 1.0f : 0.0f);
@@ -2431,6 +2832,42 @@ private:
             m_lastVao = run.vao;
         }
         glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(run.indexCount), GL_UNSIGNED_INT, nullptr);
+        ++m_drawCallsThisFrame;
+    }
+
+    void emitInstanced(const QueuedDraw *const *draws, uint32_t count, const FramePacket &pkt,
+                       bool allowBgFog, float minAlpha, float maxAlpha, uint32_t psoKey)
+    {
+        if (!count || !draws[0]->mesh)
+            return;
+        const QueuedDraw &q0 = *draws[0];
+        const MaliMesh &mesh = *q0.mesh;
+        const ShaderProg &prog = applyPso(psoKey);
+        bindCommonUniforms(prog, q0, pkt, allowBgFog, minAlpha, maxAlpha, static_cast<int>(count));
+
+        if (prog.uInstanceClips >= 0 && prog.uInstanceCount >= 0)
+        {
+            float clips[kMaxInstances * 16];
+            for (uint32_t k = 0; k < count; ++k)
+                std::memcpy(clips + k * 16u, draws[k]->clip, 16u * sizeof(float));
+            glUniform4fv(prog.uInstanceClips, static_cast<GLsizei>(count * 4u), clips);
+            if (prog.shadow.instCount != static_cast<int>(count))
+            {
+                prog.shadow.instCount = static_cast<int>(count);
+                glUniform1i(prog.uInstanceCount, static_cast<GLint>(count));
+            }
+        }
+
+        const GLuint targetVao = mesh.vao;
+        if (targetVao != m_lastVao)
+        {
+            glBindVertexArray(targetVao);
+            m_lastVao = targetVao;
+        }
+        if (mesh.indexed)
+            glDrawElementsInstanced(GL_TRIANGLES, static_cast<GLsizei>(mesh.indexCount), GL_UNSIGNED_INT, nullptr, static_cast<GLsizei>(count));
+        else
+            glDrawArraysInstanced(GL_TRIANGLES, 0, static_cast<GLsizei>(mesh.vertexCount), static_cast<GLsizei>(count));
         ++m_drawCallsThisFrame;
     }
 
@@ -2530,6 +2967,117 @@ private:
                 ++it;
             }
         }
+
+        // Phase 1 of 2-phase tombstone eviction: select stale or over-budget meshes & textures.
+        std::vector<uint64_t> candMeshes;
+        std::vector<uint64_t> candTex;
+        uint64_t projectedBytes = m_gpuMeshBytes + m_gpuTexBytes;
+
+        for (auto &[id, m] : m_meshes)
+        {
+            if (!m.dynamic && !m.pendingEvict && m.lastUsed + 1800u < m_frameNum)
+            {
+                m.pendingEvict = true;
+                candMeshes.push_back(id);
+                projectedBytes = (projectedBytes >= m.gpuBytes) ? (projectedBytes - m.gpuBytes) : 0ull;
+            }
+        }
+        for (auto &[id, t] : m_textures)
+        {
+            if (!t.pendingEvict && t.lastUsed + 1800u < m_frameNum)
+            {
+                t.pendingEvict = true;
+                candTex.push_back(id);
+                projectedBytes = (projectedBytes >= t.gpuBytes) ? (projectedBytes - t.gpuBytes) : 0ull;
+            }
+        }
+
+        if (projectedBytes > m_cacheBudgetBytes)
+        {
+            struct BudgetCand
+            {
+                uint64_t lastUsed;
+                uint64_t id;
+                uint64_t bytes;
+                bool isMesh;
+            };
+            std::vector<BudgetCand> cands;
+            for (const auto &[id, m] : m_meshes)
+            {
+                if (!m.dynamic && !m.pendingEvict && m.lastUsed + 180u < m_frameNum)
+                    cands.push_back({m.lastUsed, id, m.gpuBytes, true});
+            }
+            for (const auto &[id, t] : m_textures)
+            {
+                if (!t.pendingEvict && t.lastUsed + 180u < m_frameNum)
+                    cands.push_back({t.lastUsed, id, t.gpuBytes, false});
+            }
+            std::sort(cands.begin(), cands.end(), [](const BudgetCand &a, const BudgetCand &b) {
+                return a.lastUsed < b.lastUsed;
+            });
+            const uint64_t targetBytes = (m_cacheBudgetBytes * 7ull) / 8ull;
+            for (const BudgetCand &c : cands)
+            {
+                if (projectedBytes <= targetBytes)
+                    break;
+                if (c.isMesh)
+                {
+                    if (auto it = m_meshes.find(c.id); it != m_meshes.end())
+                    {
+                        it->second.pendingEvict = true;
+                        candMeshes.push_back(c.id);
+                    }
+                }
+                else
+                {
+                    if (auto it = m_textures.find(c.id); it != m_textures.end())
+                    {
+                        it->second.pendingEvict = true;
+                        candTex.push_back(c.id);
+                    }
+                }
+                projectedBytes = (projectedBytes >= c.bytes) ? (projectedBytes - c.bytes) : 0ull;
+            }
+        }
+
+        if (!candMeshes.empty() || !candTex.empty())
+        {
+            if (m_asyncEnabled)
+            {
+                std::lock_guard<std::mutex> lk(m_mtx);
+                m_pendingEvictMeshes.insert(m_pendingEvictMeshes.end(), candMeshes.begin(), candMeshes.end());
+                m_pendingEvictTex.insert(m_pendingEvictTex.end(), candTex.begin(), candTex.end());
+            }
+            else
+            {
+                for (uint64_t id : candMeshes)
+                {
+                    m_knownMeshes.erase(id);
+                    if (auto it = m_meshes.find(id); it != m_meshes.end())
+                    {
+                        deleteMeshGpu(it->second);
+                        m_meshes.erase(it);
+                        m_evictions.fetch_add(1u, std::memory_order_relaxed);
+                    }
+                }
+                for (uint64_t id : candTex)
+                {
+                    m_knownTextures.erase(id);
+                    if (auto it = m_textures.find(id); it != m_textures.end())
+                    {
+                        if (m_lastTex == it->second.tex && it->second.tex != 0u)
+                            m_lastTex = ~0u;
+                        if (it->second.tex) glDeleteTextures(1, &it->second.tex);
+                        if (m_gpuTexBytes >= it->second.gpuBytes)
+                            m_gpuTexBytes -= it->second.gpuBytes;
+                        else
+                            m_gpuTexBytes = 0;
+                        m_textures.erase(it);
+                        m_evictions.fetch_add(1u, std::memory_order_relaxed);
+                    }
+                }
+            }
+        }
     }
 
     std::function<void()> m_makeCurrent;
@@ -2543,6 +3091,9 @@ private:
     bool m_shaderCacheEnabled = true;
     bool m_gpuSkinEnabled = true;
     bool m_mergeEnabled = true;
+    bool m_instancingEnabled = true;
+    bool m_keepCurrentEnabled = true;
+    bool m_drsDrawOnly = true;
     int m_atPass2Mode = 1;
     bool m_zPrepassEnabled = false;
     bool m_postEnabled = true;
@@ -2556,6 +3107,7 @@ private:
     uint64_t m_uploadUsThisFrame = 0;
     uint64_t m_mergeBudgetUs = 2500;
     uint32_t m_mergeChunkMax = 24u;
+    uint64_t m_cacheBudgetBytes = 128ull * 1024ull * 1024ull;
     uint32_t m_bgRate = 2;
     int m_targetFps = 30;
     int m_drsTargetFps = 30;
@@ -2599,6 +3151,7 @@ private:
     uint32_t m_culledThisFrame = 0;
     uint32_t m_drawCallsThisFrame = 0;
     uint32_t m_mergeSavedThisFrame = 0;
+    uint32_t m_instSavedThisFrame = 0;
     uint32_t m_pass2SkipThisFrame = 0;
     uint32_t m_texWrapThisFrame = 0;
     uint32_t m_astcHits = 0;
@@ -2608,6 +3161,10 @@ private:
     bool m_skinErrLogged = false;
     uint64_t m_mergeSrcBytes = 0;
     uint64_t m_mergeRunBytes = 0;
+    uint64_t m_gpuMeshBytes = 0;
+    uint64_t m_gpuTexBytes = 0;
+    std::vector<uint64_t> m_pendingEvictMeshes;
+    std::vector<uint64_t> m_pendingEvictTex;
 
     ShaderProg m_progOpaque{}, m_progCut{}, m_progScreen{};
     ShaderProg m_progSkinOpaque{}, m_progSkinCut{}, m_progDepth{}, m_progPost{};

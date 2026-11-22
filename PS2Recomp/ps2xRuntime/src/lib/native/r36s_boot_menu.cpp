@@ -16,6 +16,10 @@
 #include <unistd.h>
 #endif
 
+#ifdef PS2X_LINUX_SDL2_SHIM
+extern void ps2xLinuxRefreshFpsCap();
+#endif
+
 namespace native_renderer
 {
 namespace
@@ -109,6 +113,9 @@ namespace
         setEnvVar("SOTC_MALI_TEX16", cfg.tex16Idx == 0 ? "1" : "0");
         setEnvVar("SOTC_NATIVE", "1");
         setEnvVar("SOTC_NATIVE_GL", "1");
+#ifdef PS2X_LINUX_SDL2_SHIM
+        ps2xLinuxRefreshFpsCap();
+#endif
     }
 
 #if defined(__linux__)
@@ -125,6 +132,14 @@ namespace
 void runR36sBootMenu()
 {
     BootConfig cfg;
+    if (const char *v = std::getenv("SOTC_RENDERER"))
+        cfg.rendererIdx = (std::string(v) == "gl") ? 1 : 0;
+    if (const char *v = std::getenv("SOTC_FPS_CAP"))
+        cfg.fpsIdx = (std::atoi(v) >= 60 || std::atoi(v) == 0) ? 1 : 0;
+    if (const char *v = std::getenv("SOTC_MALI_DRS"))
+        cfg.drsIdx = (std::atoi(v) == 0) ? 1 : 0;
+    if (const char *v = std::getenv("SOTC_MALI_TEX16"))
+        cfg.tex16Idx = (std::atoi(v) == 0) ? 1 : 0;
     loadBootConfig(cfg);
 
     const char *skipEnv = std::getenv("SOTC_SKIP_BOOT_MENU");
