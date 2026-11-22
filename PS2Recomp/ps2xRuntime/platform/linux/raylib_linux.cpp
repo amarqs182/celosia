@@ -885,7 +885,7 @@ void EndDrawing(void)
         bootMark("first picture on screen");
     }
     ps2xLinuxGlUnlock();
-    static const int envCapFps = std::getenv("SOTC_FPS_CAP") ? std::atoi(std::getenv("SOTC_FPS_CAP")) : 60;
+    int envCapFps = []() { const char *s = std::getenv("SOTC_FPS_CAP"); if (!s || *s == '\0') return 60; char *end = nullptr; const long v = std::strtol(s, &end, 10); return (end != s && *end == '\0' && v >= 0 && v <= 10000) ? static_cast<int>(v) : 60; }();
     int targetFps = envCapFps;
     const int runtimeFps = g_targetFps.load(std::memory_order_relaxed);
     if (targetFps > 0 && runtimeFps > 0 && runtimeFps < targetFps)
