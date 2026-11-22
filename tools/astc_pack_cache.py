@@ -57,6 +57,7 @@ def main() -> int:
     ap.add_argument("--block-small", default="4x4", help="ASTC block size for textures < 128x128 (default: 4x4)")
     ap.add_argument("--block-large", default="6x6", help="ASTC block size for textures >= 128x128 (default: 6x6)")
     ap.add_argument("--quality", default="-medium", help="astcenc quality preset (default: -medium)")
+    ap.add_argument("--force", action="store_true", help="Re-encode existing .astc files")
     args = ap.parse_args()
 
     in_dir = Path(args.in_dir)
@@ -70,6 +71,8 @@ def main() -> int:
 
     ok = 0
     skipped = 0
+    total_rgba_bytes = 0
+    total_astc_bytes = 0
     with tempfile.TemporaryDirectory() as tmp:
         tmp_png = Path(tmp) / "in.png"
         for f in files:
@@ -86,21 +89,36 @@ def main() -> int:
                 continue
 
             out_astc = out_dir / f"{tex_id}.astc"
-            if out_astc.exists():
+            if out_astc.exists() and not args.force:
                 skipped += 1
                 continue
+            tmp_astc = out_dir / f"{tex_id}.astc.tmp"
 
             write_png(tmp_png, w, h, rgba)
             block = choose_block(w, h, args.block_small, args.block_large)
-            cmd = [args.astcenc, "-cl", str(tmp_png), str(out_astc), block, args.quality, "-silent"]
+            cmd = [args.astcenc, "-cl", str(tmp_png), str(tmp_astc), block, args.quality, "-silent"]
             res = subprocess.run(cmd, capture_output=True, text=True)
             if res.returncode != 0:
+                tmp_astc.unlink(missing_ok=True)
                 print(f"[err] {f.name}: {res.stderr.strip()}", file=sys.stderr)
                 skipped += 1
                 continue
+            os.replace(tmp_astc, out_astc)
+            total_rgba_bytes += len(rgba)
+            total_astc_bytes += out_astc.stat().st_size
             ok += 1
 
     print(f"Packed {ok} ASTC textures into {out_dir} (skipped {skipped}).")
+    if total_astc_bytes > 0:
+        ratio = total_rgba_bytes / total_astc_bytes
+        pct = (total_astc_bytes / total_rgba_bytes) * 100.0
+        print(
+            f"Size: rgba={total_rgba_bytes} bytes ({total_rgba_bytes / (1024 * 1024):.2f} MiB) "
+            f"-> astc={total_astc_bytes} bytes ({total_astc_bytes / (1024 * 1024):.2f} MiB) "
+            f"({ratio:.2f}x, {pct:.1f}%)"
+        )
+    else:
+        print(f"Size: rgba={total_rgba_bytes} bytes -> astc={total_astc_bytes} bytes")
     return 0
 
 
