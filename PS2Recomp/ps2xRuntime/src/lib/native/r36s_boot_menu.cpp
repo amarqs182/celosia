@@ -27,7 +27,7 @@ namespace
         int drsIdx = 0;      // 0 = 1 (Auto), 1 = 0 (Desligado)
         int tex16Idx = 0;    // 0 = 1 (Ligado), 1 = 0 (Desligado)
         int maliStatsIdx = 0;   // 0 = Off, 1 = On
-        int maliAtPass2Idx = 2; // 0 = Off, 1 = Full, 2 = Smart
+        int maliAtPass2Idx = 1; // 0 = Off, 1 = Smart, 2 = Full
         int maliMergeIdx = 1;   // 0 = Off, 1 = On
     };
 
@@ -83,7 +83,7 @@ namespace
             else if (key == "SOTC_MALI_STATS")
                 cfg.maliStatsIdx = (val == "1") ? 1 : 0;
             else if (key == "SOTC_MALI_AT_PASS2")
-                cfg.maliAtPass2Idx = (val == "0") ? 0 : (val == "1" ? 1 : 2);
+                cfg.maliAtPass2Idx = (val == "0") ? 0 : (val == "2" ? 2 : 1);
             else if (key == "SOTC_MALI_MERGE")
                 cfg.maliMergeIdx = (val == "0") ? 0 : 1;
         }
@@ -201,7 +201,7 @@ void runR36sBootMenu()
             {"Auto (0.75-1.00)", "Off (1.00)", nullptr},
             {"On", "Off (RGBA8)", nullptr},
             {"Off", "On", nullptr},
-            {"Off", "Full", "Smart"},
+            {"Off", "Smart", "Full"},
             {"Off", "On", nullptr},
         };
 
