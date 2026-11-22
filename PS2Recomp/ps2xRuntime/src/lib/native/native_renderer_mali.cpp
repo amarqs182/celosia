@@ -1,16 +1,19 @@
 // Dedicated Mali-G31 (GLES 3.2 / GL 3.3 Core) native renderer backend for Celosia R36S.
 // Plugs directly into native_renderer::detail::Backend (selected via SOTC_RENDERER=mali).
 //
-// Phase 5 (Performance — attacking all 3 bottlenecks measured on R36S in c3a29a9):
+// Phase 5 (Performance — attacking all 3 bottlenecks measured on R36S in c3a29a9 + T-pose/Mali fixes):
 // - Phase 5A: Dedicated asynchronous render thread (pinned to Cores 2-3 on Linux) with
-//   double-buffered FramePacket + queued mesh/texture uploads so Game Thread (Core 0)
-//   and Mali Render Thread run 100% in parallel (timesItself() = false; sync end -> <1 ms).
-// - Phase 5B: Zero mid-frame glBufferSubData on UBOs — all skin palettes and instance
-//   clip batches for a frame are packed once and uploaded via 3-slot ring UBOs with
-//   single-call glBufferData(..., GL_STREAM_DRAW) orphaning + glBindBufferRange().
-// - Phase 5C: Per-program shadow uniform cache (uMisc, uFogA, uFogB, uFogC, uFogCol,
-//   uGuard, uAlpha, uInstanceCount) eliminating ~80% of redundant glUniform* driver calls.
-// - Phase 5D: Single-call glBufferData(..., GL_STREAM_DRAW) orphaning for dynamic arena.
+//   double-buffered FramePacket + queued mesh/texture uploads and upload-preserving mailbox
+//   hand-over (SOTC_MALI_MAILBOX=1) so Game Thread (Core 0) never stalls on slow frames.
+// - Phase 5B: Zero mid-frame glBufferSubData on instancing UBO — instance clip batches are
+//   packed once per frame via 3-slot ring UBO + glBindBufferRange(). Skin palettes use
+//   uniform highp vec4 uBones[192] + per-program UniformShadow::lastSkinPalette cache to avoid
+//   libmali r13p0 glBindBufferRange UBO offset glitches (fixing Phase 5 T-pose regression).
+// - Phase 5C: Per-program shadow uniform cache (uClip, uMisc, uFog*, uGuard, uAlpha,
+//   uInstanceCount, uBones palette) + per-texture cached wrap mode eliminating per-draw
+//   glTexParameteri storms and redundant glUniform* driver calls.
+// - Phase 5D: Single-call glBufferData(..., GL_STREAM_DRAW) orphaning for dynamic arena, and
+//   skipping the redundant fullscreen m_postTarget pass unless post bloom/upscale is active.
 
 #include "native_backend.h"
 #include "runtime/native_tuning.h"
@@ -74,7 +77,7 @@ namespace
 {
 
 constexpr uint32_t kMaxInstances = 64u;
-constexpr uint32_t kMaxSkinQwords = 256u;
+constexpr uint32_t kMaxSkinQwords = native_renderer::kSkinPaletteQwords;
 
 inline uint64_t nowUs()
 {
@@ -231,9 +234,7 @@ layout(location = 3) in vec2 aUV;
 layout(location = 4) in vec3 aBone;
 layout(location = 5) in vec3 aWeight;
 
-layout(std140) uniform SkinBlock {
-    highp vec4 uBones[256];
-};
+uniform highp vec4 uBones[192];
 
 uniform vec4 uClip[4];
 uniform vec4 uDirections[4];
@@ -258,10 +259,10 @@ void main()
         float w = aWeight[i];
         if (w > 1e-5)
         {
-            int b = clamp(int(aBone[i] + 0.5), 0, 252);
-            vec4 bp = uBones[b] * aPos.x + uBones[b + 1] * aPos.y + uBones[b + 2] * aPos.z + uBones[b + 3];
+            int b = clamp(int(aBone[i] + 0.5), 0, 188);
+            vec3 bp = uBones[b].xyz * aPos.x + uBones[b + 1].xyz * aPos.y + uBones[b + 2].xyz * aPos.z + uBones[b + 3].xyz;
             vec3 bn = uBones[b].xyz * aNormal.x + uBones[b + 1].xyz * aNormal.y + uBones[b + 2].xyz * aNormal.z;
-            pos += bp.xyz * w;
+            pos += bp * w;
             nrm += bn * w;
             wSum += w;
         }
@@ -473,11 +474,14 @@ void main()
 }
 )";
 
-// Phase 5C: Per-program shadow uniform cache to eliminate ~80% of redundant glUniform* calls.
+// Phase 5C: Per-program shadow uniform cache to eliminate redundant glUniform* calls.
 struct UniformShadow
 {
     bool valid = false;
     int instCount = -1;
+    uint32_t lastSkinPalette = 0u;
+    bool clipValid = false;
+    float clip[16] = {};
     float misc[4] = {};
     float fogA[4] = {};
     float fogB[4] = {};
@@ -492,6 +496,8 @@ struct UniformShadow
     {
         valid = false;
         lightValid = false;
+        clipValid = false;
+        lastSkinPalette = 0u;
         instCount = -1;
     }
 };
@@ -501,7 +507,7 @@ struct ShaderProg
     GLuint id = 0;
     GLint uClip = -1, uInstanceCount = -1, uDirections = -1, uColours = -1, uMisc = -1;
     GLint uFogA = -1, uFogB = -1, uFogC = -1, uFogCol = -1, uGuard = -1, uAlpha = -1;
-    GLint uTex = -1, uBackground = -1;
+    GLint uBones = -1, uTex = -1, uBackground = -1;
     mutable UniformShadow shadow{};
 };
 
@@ -552,15 +558,13 @@ void bindProgUniforms(ShaderProg &out, GLuint p)
     out.uFogCol = glGetUniformLocation(p, "uFogCol");
     out.uGuard = glGetUniformLocation(p, "uGuard");
     out.uAlpha = glGetUniformLocation(p, "uAlpha");
+    out.uBones = glGetUniformLocation(p, "uBones");
     out.uTex = glGetUniformLocation(p, "uTex");
     out.uBackground = glGetUniformLocation(p, "uBackground");
 
     const GLuint instIdx = glGetUniformBlockIndex(p, "InstanceBlock");
     if (instIdx != GL_INVALID_INDEX)
         glUniformBlockBinding(p, instIdx, 0u);
-    const GLuint skinIdx = glGetUniformBlockIndex(p, "SkinBlock");
-    if (skinIdx != GL_INVALID_INDEX)
-        glUniformBlockBinding(p, skinIdx, 1u);
 
     glUseProgram(p);
     if (out.uTex >= 0) glUniform1i(out.uTex, 0);
@@ -576,7 +580,7 @@ bool linkProgCached(ShaderProg &out, const char *name, const char *vsSrc, const 
     std::string binPath;
     if (useCache && !cacheDir.empty())
     {
-        binPath = cacheDir + "/" + name + "_v5.bin";
+        binPath = cacheDir + "/" + name + "_v6.bin";
         if (FILE *fp = std::fopen(binPath.c_str(), "rb"))
         {
             GLenum fmt = 0;
@@ -705,6 +709,7 @@ struct MaliTex
     uint32_t height = 0;
     uint32_t levels = 1;
     uint8_t minAlpha = 0;
+    uint8_t wrapClamp = 0xFF;
     bool astc = false;
     bool tex16 = false;
     uint64_t lastUsed = 0;
@@ -724,8 +729,6 @@ struct SkinPaletteEntry
 {
     uint32_t offsetFloats = 0;
     uint32_t qwordCount = 0;
-    size_t uboByteOffset = 0; // Phase 5B: aligned byte offset in frame's skin UBO ring
-    size_t uboByteSize = 0;
 };
 
 struct UploadCmd
@@ -763,6 +766,7 @@ struct QueuedDraw
 {
     uint64_t meshId = 0;
     const MaliMesh *mesh = nullptr;
+    MaliTex *tex = nullptr;
     float clip[16] = {};
     DrawState state{};
     float minW = 0.0f;
@@ -878,6 +882,7 @@ public:
         : m_makeCurrent(std::move(makeCurrent))
     {
         m_asyncEnabled = envBool("SOTC_MALI_ASYNC", true);
+        m_mailboxEnabled = envBool("SOTC_MALI_MAILBOX", true);
         m_cullEnabled = envBool("SOTC_MALI_CULL", true);
         m_tex16Enabled = envBool("SOTC_MALI_TEX16", true);
         m_drsEnabled = envBool("SOTC_MALI_DRS", true);
@@ -887,6 +892,7 @@ public:
         m_zPrepassEnabled = envBool("SOTC_MALI_ZPREPASS", false);
         m_postEnabled = envBool("SOTC_MALI_POST", true);
         m_postBloomEnabled = envBool("SOTC_MALI_POST_BLOOM", false);
+        m_postUpscaleEnabled = envBool("SOTC_MALI_POST_UPSCALE", false);
         m_dumpTexEnabled = envBool("SOTC_MALI_DUMP_TEX", false);
         m_paceEnabled = envBool("SOTC_MALI_PACE", false);
         m_statsEnabled = envBool("SOTC_MALI_STATS", false);
@@ -1078,11 +1084,29 @@ public:
             return;
         }
 
-        // Phase 5A: Hand off m_rec to dedicated Render Thread (waits only if previous frame still pending).
+        // Phase 5A: Hand off m_rec to dedicated Render Thread (mailbox mode merges pending uploads instead of stalling Game Thread).
         std::unique_lock<std::mutex> lk(m_mtx);
-        m_cvDone.wait(lk, [this] { return !m_hasPendingFrame || m_stopRequested; });
+        if (!m_mailboxEnabled)
+            m_cvDone.wait(lk, [this] { return !m_hasPendingFrame || m_stopRequested; });
         if (m_stopRequested)
             return;
+        if (m_hasPendingFrame)
+        {
+            if (!m_pending.uploads.empty())
+            {
+                if (!m_rec.uploads.empty())
+                {
+                    m_pending.uploads.insert(
+                        m_pending.uploads.end(),
+                        std::make_move_iterator(m_rec.uploads.begin()),
+                        std::make_move_iterator(m_rec.uploads.end()));
+                    m_rec.uploads.clear();
+                }
+                m_rec.uploads.swap(m_pending.uploads);
+            }
+            m_pending.clearPerFrame();
+            m_mailboxDropped.fetch_add(1u, std::memory_order_relaxed);
+        }
         std::swap(m_pending, m_rec);
         m_hasPendingFrame = true;
         lk.unlock();
@@ -1252,7 +1276,6 @@ private:
 
         glGenVertexArrays(1, &m_emptyVao);
         glGenBuffers(3, m_instUbo);
-        glGenBuffers(3, m_skinUbo);
 
         glGenTextures(1, &m_whiteTex);
         glBindTexture(GL_TEXTURE_2D, m_whiteTex);
@@ -1260,6 +1283,7 @@ private:
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        m_whiteTexClamp = 0xFF;
 
         glGenVertexArrays(3, m_arenaVao);
         glGenBuffers(3, m_arenaVbo);
@@ -1274,9 +1298,9 @@ private:
         makeTarget(m_bgTarget, 256, 256, true);
         m_lastPresentTime = std::chrono::steady_clock::now();
         m_initialized = true;
-        std::fprintf(stderr, "[mali] Phase 5 GLES 3.2 backend up (async=%d uboAlign=%zu cull=%d inst=%d skin=%d post=%d astcHw=%d drs=%d)\n",
-                     m_asyncEnabled ? 1 : 0, m_uboAlign, m_cullEnabled ? 1 : 0, m_instancingEnabled ? 1 : 0,
-                     m_gpuSkinEnabled ? 1 : 0, m_postEnabled ? 1 : 0, m_hasAstc ? 1 : 0, m_drsEnabled ? 1 : 0);
+        std::fprintf(stderr, "[mali] Phase 5.1 GLES 3.2 backend up (async=%d mailbox=%d skin=uniform192 uboAlign=%zu cull=%d inst=%d post=%d astcHw=%d drs=%d)\n",
+                     m_asyncEnabled ? 1 : 0, m_mailboxEnabled ? 1 : 0, m_uboAlign, m_cullEnabled ? 1 : 0,
+                     m_instancingEnabled ? 1 : 0, m_postEnabled ? 1 : 0, m_hasAstc ? 1 : 0, m_drsEnabled ? 1 : 0);
         return true;
     }
 
@@ -1288,7 +1312,6 @@ private:
         glDeleteVertexArrays(3, m_arenaVao);
         glDeleteBuffers(3, m_arenaVbo);
         glDeleteBuffers(3, m_instUbo);
-        glDeleteBuffers(3, m_skinUbo);
         if (m_emptyVao) { glDeleteVertexArrays(1, &m_emptyVao); m_emptyVao = 0; }
         for (auto &[id, m] : m_meshes)
         {
@@ -1317,7 +1340,7 @@ private:
 
     bool readbackOnGlThread(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height)
     {
-        const MaliTarget &src = (m_postEnabled && m_postTarget.fbo) ? m_postTarget : m_mainTarget;
+        const MaliTarget &src = (m_lastFrameUsedPost && m_postTarget.fbo) ? m_postTarget : m_mainTarget;
         if (!m_initialized || !src.fbo)
             return false;
         GlContextGuard guard;
@@ -1452,6 +1475,7 @@ private:
         tx.height = cmd.height;
         tx.levels = cmd.levels;
         tx.lastUsed = frameNum;
+        tx.wrapClamp = 0xFF;
         tx.astc = false;
         tx.tex16 = false;
         if (!tx.tex)
@@ -1545,6 +1569,7 @@ private:
         m_culledThisFrame = 0;
         m_drawCallsThisFrame = 0;
         m_instSavedThisFrame = 0;
+        m_texWrapCallsThisFrame = 0;
 
         processUploads(pkt);
 
@@ -1556,28 +1581,7 @@ private:
                          pkt.dynVerts.data(), GL_STREAM_DRAW);
         }
 
-        // Phase 5B: Pack and upload ALL skin palettes for the frame ONCE into m_skinUbo[m_arenaSlot].
-        if (!pkt.skinPalettes.empty())
-        {
-            m_skinUboStaging.clear();
-            for (SkinPaletteEntry &pe : pkt.skinPalettes)
-            {
-                const size_t off = alignUp(m_skinUboStaging.size(), m_uboAlign);
-                const size_t sz = static_cast<size_t>(std::min(pe.qwordCount, kMaxSkinQwords)) * 16u;
-                pe.uboByteOffset = off;
-                pe.uboByteSize = std::max<size_t>(sz, 16u);
-                m_skinUboStaging.resize(off + pe.uboByteSize, 0u);
-                if (sz > 0u)
-                    std::memcpy(m_skinUboStaging.data() + off, pkt.skinPaletteData.data() + pe.offsetFloats, sz);
-            }
-            constexpr size_t kSkinBlockBytes = static_cast<size_t>(kMaxSkinQwords) * 16u;
-            m_skinUboStaging.resize(m_skinUboStaging.size() + kSkinBlockBytes, 0u);
-            glBindBuffer(GL_UNIFORM_BUFFER, m_skinUbo[m_arenaSlot]);
-            glBufferData(GL_UNIFORM_BUFFER, static_cast<GLsizeiptr>(m_skinUboStaging.size()),
-                         m_skinUboStaging.data(), GL_STREAM_DRAW);
-        }
-
-        // Build draw queues, pre-resolving MaliMesh* and running clean AABB frustum culling.
+        // Build draw queues, pre-resolving MaliMesh* and MaliTex* once, and running AABB frustum culling.
         m_qBg.clear();
         m_qAll.clear();
         m_qAll.reserve(pkt.draws.size());
@@ -1599,9 +1603,21 @@ private:
                 }
             }
 
+            MaliTex *tex = nullptr;
+            if (rd.state.texture)
+            {
+                auto tit = m_textures.find(rd.state.texture);
+                if (tit != m_textures.end() && tit->second.tex)
+                {
+                    tex = &tit->second;
+                    tex->lastUsed = m_frameNum;
+                }
+            }
+
             QueuedDraw q{};
             q.meshId = rd.meshId;
             q.mesh = &mesh;
+            q.tex = tex;
             std::memcpy(q.clip, rd.clip, 16 * sizeof(float));
             q.state = rd.state;
             q.minW = minW;
@@ -1619,7 +1635,7 @@ private:
                 const bool needsGuard = rd.state.background && m_fog.skyNear > 0.0f;
                 const bool isOpaque = !hasAlphaTest && !needsGuard && !rd.state.overlay && !rd.state.noDepthWrite &&
                                       (rd.state.blend == Blend::Opaque ||
-                                       (rd.state.blend == Blend::Normal && rd.state.opacity >= 0.99f && mesh.minAlpha >= 124u && textureIsOpaque(rd.state.texture)));
+                                       (rd.state.blend == Blend::Normal && rd.state.opacity >= 0.99f && mesh.minAlpha >= 124u && (!tex || tex->minAlpha >= 124u)));
                 const uint32_t opProg = q.skinned ? 3u : 0u;
                 const uint32_t cutProg = q.skinned ? 4u : 1u;
                 if (isOpaque)
@@ -1715,7 +1731,9 @@ private:
         if (m_mainTarget.width != rw || m_mainTarget.height != rh)
             makeTarget(m_mainTarget, rw, rh, true);
 
-        const bool runPost = m_postEnabled && (m_postBloomEnabled || rw != pkt.width || rh != pkt.height);
+        const bool runPost = m_postEnabled &&
+                             ((m_postBloomEnabled && m_bloom.enabled) ||
+                              (m_postUpscaleEnabled && (rw != pkt.width || rh != pkt.height)));
         if (runPost && (m_postTarget.width != pkt.width || m_postTarget.height != pkt.height))
             makeTarget(m_postTarget, pkt.width, pkt.height, false);
 
@@ -1729,7 +1747,7 @@ private:
             glClearColor(m_fog.colour[0], m_fog.colour[1], m_fog.colour[2], 1.0f);
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             for (const QueuedDraw &q : m_qBg)
-                emitDrawSingle(q, pkt.skinPalettes, false, 0.02f, 0.0f);
+                emitDrawSingle(q, pkt.skinPalettes, pkt.skinPaletteData, false, 0.02f, 0.0f);
             invalidateDepth();
         }
 
@@ -1752,7 +1770,7 @@ private:
                     continue;
                 QueuedDraw zq = q;
                 zq.psoKey = zPso;
-                emitDrawSingle(zq, pkt.skinPalettes, false, 0.0f, 0.0f);
+                emitDrawSingle(zq, pkt.skinPalettes, pkt.skinPaletteData, false, 0.0f, 0.0f);
             }
             glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         }
@@ -1763,7 +1781,7 @@ private:
             if (batchIdx >= 0)
             {
                 const InstBatch &b = m_instBatches[static_cast<size_t>(batchIdx)];
-                emitDrawInstanced(b, pkt.skinPalettes);
+                emitDrawInstanced(b, pkt.skinPalettes, pkt.skinPaletteData);
                 m_instSavedThisFrame += (b.count - 1u);
                 i += b.count;
                 continue;
@@ -1771,28 +1789,28 @@ private:
             const QueuedDraw &q = m_qAll[i];
             if (q.bucket == 0u)
             {
-                emitDrawSingle(q, pkt.skinPalettes, true, 0.0f, 0.0f);
+                emitDrawSingle(q, pkt.skinPalettes, pkt.skinPaletteData, true, 0.0f, 0.0f);
             }
             else if (q.bucket == 1u)
             {
                 const uint32_t at = q.state.alphaTest;
                 const float aref = static_cast<float>((at >> 4) & 0xFFu) / 128.0f;
                 const uint32_t afail = (at >> 12) & 3u;
-                emitDrawSingle(q, pkt.skinPalettes, true, std::max(0.02f, aref), 0.0f);
+                emitDrawSingle(q, pkt.skinPalettes, pkt.skinPaletteData, true, std::max(0.02f, aref), 0.0f);
                 if ((afail == 1u || afail == 3u) && aref > 0.02f)
                 {
                     QueuedDraw pass2 = q;
                     pass2.psoKey = makePsoKey(q.skinned ? 4u : 1u, q.state.blend, true, false, 1u);
-                    emitDrawSingle(pass2, pkt.skinPalettes, true, 0.02f, aref);
+                    emitDrawSingle(pass2, pkt.skinPalettes, pkt.skinPaletteData, true, 0.02f, aref);
                 }
             }
             else if (q.bucket == 2u)
             {
-                emitDrawSingle(q, pkt.skinPalettes, true, 0.02f, 0.0f);
+                emitDrawSingle(q, pkt.skinPalettes, pkt.skinPaletteData, true, 0.02f, 0.0f);
             }
             else
             {
-                emitDrawSingle(q, pkt.skinPalettes, false, 0.01f, 0.0f);
+                emitDrawSingle(q, pkt.skinPalettes, pkt.skinPaletteData, false, 0.01f, 0.0f);
             }
             ++i;
         }
@@ -1802,6 +1820,7 @@ private:
         GLuint outTex = m_mainTarget.color;
         uint32_t outW = m_mainTarget.width;
         uint32_t outH = m_mainTarget.height;
+        bool usedPost = false;
         if (runPost && m_postTarget.fbo)
         {
             glBindFramebuffer(GL_FRAMEBUFFER, m_postTarget.fbo);
@@ -1821,7 +1840,9 @@ private:
             outTex = m_postTarget.color;
             outW = m_postTarget.width;
             outH = m_postTarget.height;
+            usedPost = true;
         }
+        m_lastFrameUsedPost = usedPost;
 
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         m_arenaSlot = (m_arenaSlot + 1) % 3;
@@ -1876,9 +1897,11 @@ private:
 
         if (m_statsEnabled && (m_frameNum % 120u == 0u))
         {
-            std::fprintf(stderr, "[mali:stats] frame=%llu draws=%u instSaved=%u culled=%u astc=%u drs=%.2f renderMs=%.2f\n",
+            std::fprintf(stderr, "[mali:stats] frame=%llu draws=%u instSaved=%u culled=%u texWrap=%u astc=%u drop=%llu drs=%.2f renderMs=%.2f\n",
                          static_cast<unsigned long long>(m_frameNum), m_drawCallsThisFrame,
-                         m_instSavedThisFrame, m_culledThisFrame, m_astcHits, m_drsScale, m_emaFrameMs);
+                         m_instSavedThisFrame, m_culledThisFrame, m_texWrapCallsThisFrame, m_astcHits,
+                         static_cast<unsigned long long>(m_mailboxDropped.load(std::memory_order_relaxed)),
+                         m_drsScale, m_emaFrameMs);
         }
 
         if (m_frameNum % 300u == 0u)
@@ -1988,14 +2011,6 @@ private:
         hasBox = std::isfinite(lo[0] + lo[1] + lo[2] + hi[0] + hi[1] + hi[2]);
     }
 
-    bool textureIsOpaque(uint64_t texId) const
-    {
-        if (!texId)
-            return true;
-        auto it = m_textures.find(texId);
-        return it != m_textures.end() && it->second.minAlpha >= 124u;
-    }
-
     static void makeTarget(MaliTarget &t, uint32_t w, uint32_t h, bool withDepth)
     {
         destroyTarget(t);
@@ -2044,9 +2059,7 @@ private:
     {
         m_lastPso = ~0u;
         m_lastTex = ~0u;
-        m_lastClamp = 0xFF;
         m_lastVao = ~0u;
-        m_lastSkinPalette = 0u;
         m_progOpaque.shadow.reset();
         m_progCut.shadow.reset();
         m_progScreen.shadow.reset();
@@ -2134,37 +2147,36 @@ private:
 
     void bindCommonUniforms(const ShaderProg &prog, const QueuedDraw &q,
                             const std::vector<SkinPaletteEntry> &skinPalettes,
+                            const std::vector<float> &skinPaletteData,
                             bool allowBgFog, float minAlpha, float maxAlpha)
     {
-        GLuint glTex = m_whiteTex;
-        bool hasTex = false;
-        if (q.state.texture)
-        {
-            auto tit = m_textures.find(q.state.texture);
-            if (tit != m_textures.end() && tit->second.tex)
-            {
-                glTex = tit->second.tex;
-                tit->second.lastUsed = m_frameNum;
-                hasTex = true;
-            }
-        }
-        if (glTex != m_lastTex || q.state.clamp != m_lastClamp)
+        const bool hasTex = (q.tex != nullptr && q.tex->tex != 0);
+        const GLuint glTex = hasTex ? q.tex->tex : m_whiteTex;
+        uint8_t &cachedClamp = hasTex ? q.tex->wrapClamp : m_whiteTexClamp;
+        if (glTex != m_lastTex)
         {
             glBindTexture(GL_TEXTURE_2D, glTex);
+            m_lastTex = glTex;
+        }
+        if (cachedClamp != q.state.clamp)
+        {
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, (q.state.clamp & 1u) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, (q.state.clamp & 2u) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
-            m_lastTex = glTex;
-            m_lastClamp = q.state.clamp;
+            cachedClamp = q.state.clamp;
+            ++m_texWrapCallsThisFrame;
         }
 
-        // Phase 5B: Zero mid-frame glBufferSubData — just glBindBufferRange into the frame's skin UBO ring!
-        if (q.skinned && q.state.skinPalette && q.state.skinPalette != m_lastSkinPalette && q.state.skinPalette <= skinPalettes.size())
+        // Skinning palette via per-program uniform array uBones[192] + per-program palette shadow cache.
+        if (q.skinned && q.state.skinPalette && q.state.skinPalette != prog.shadow.lastSkinPalette &&
+            q.state.skinPalette <= skinPalettes.size() && prog.uBones >= 0)
         {
             const SkinPaletteEntry &pe = skinPalettes[q.state.skinPalette - 1u];
-            constexpr size_t kSkinBlockBytes = static_cast<size_t>(kMaxSkinQwords) * 16u;
-            glBindBufferRange(GL_UNIFORM_BUFFER, 1u, m_skinUbo[m_arenaSlot],
-                              static_cast<GLintptr>(pe.uboByteOffset), static_cast<GLsizeiptr>(kSkinBlockBytes));
-            m_lastSkinPalette = q.state.skinPalette;
+            const uint32_t qwords = std::min(pe.qwordCount, kMaxSkinQwords);
+            if (qwords > 0u && static_cast<size_t>(pe.offsetFloats) + static_cast<size_t>(qwords) * 4u <= skinPaletteData.size())
+            {
+                glUniform4fv(prog.uBones, static_cast<GLsizei>(qwords), skinPaletteData.data() + pe.offsetFloats);
+                prog.shadow.lastSkinPalette = q.state.skinPalette;
+            }
         }
 
         // Phase 5C: Shadow-cached uniform uploads.
@@ -2199,6 +2211,7 @@ private:
     }
 
     void emitDrawSingle(const QueuedDraw &q, const std::vector<SkinPaletteEntry> &skinPalettes,
+                        const std::vector<float> &skinPaletteData,
                         bool allowBgFog, float minAlpha, float maxAlpha)
     {
         if (!q.mesh)
@@ -2211,9 +2224,13 @@ private:
             glUniform1i(prog.uInstanceCount, 1);
             prog.shadow.instCount = 1;
         }
-        if (prog.uClip >= 0)
+        if (prog.uClip >= 0 && (!prog.shadow.clipValid || std::memcmp(prog.shadow.clip, q.clip, sizeof(prog.shadow.clip)) != 0))
+        {
+            std::memcpy(prog.shadow.clip, q.clip, sizeof(prog.shadow.clip));
+            prog.shadow.clipValid = true;
             glUniform4fv(prog.uClip, 4, q.clip);
-        bindCommonUniforms(prog, q, skinPalettes, allowBgFog, minAlpha, maxAlpha);
+        }
+        bindCommonUniforms(prog, q, skinPalettes, skinPaletteData, allowBgFog, minAlpha, maxAlpha);
 
         const GLuint targetVao = mesh.dynamic ? m_arenaVao[m_arenaSlot] : mesh.vao;
         if (targetVao != m_lastVao)
@@ -2229,7 +2246,8 @@ private:
     }
 
     // Phase 5B: Zero mid-frame glBufferSubData — bind pre-uploaded slice via glBindBufferRange!
-    void emitDrawInstanced(const InstBatch &b, const std::vector<SkinPaletteEntry> &skinPalettes)
+    void emitDrawInstanced(const InstBatch &b, const std::vector<SkinPaletteEntry> &skinPalettes,
+                           const std::vector<float> &skinPaletteData)
     {
         const QueuedDraw &q = m_qAll[b.startIdx];
         if (!q.mesh)
@@ -2246,7 +2264,7 @@ private:
             glUniform1i(prog.uInstanceCount, static_cast<GLint>(b.count));
             prog.shadow.instCount = static_cast<int>(b.count);
         }
-        bindCommonUniforms(prog, q, skinPalettes, true, 0.0f, 0.0f);
+        bindCommonUniforms(prog, q, skinPalettes, skinPaletteData, true, 0.0f, 0.0f);
 
         const GLuint targetVao = mesh.dynamic ? m_arenaVao[m_arenaSlot] : mesh.vao;
         if (targetVao != m_lastVao)
@@ -2281,6 +2299,7 @@ private:
     std::function<void()> m_makeCurrent;
     bool m_initialized = false;
     bool m_asyncEnabled = true;
+    bool m_mailboxEnabled = true;
     bool m_hasAstc = false;
     bool m_cullEnabled = true;
     bool m_tex16Enabled = true;
@@ -2291,6 +2310,8 @@ private:
     bool m_zPrepassEnabled = false;
     bool m_postEnabled = true;
     bool m_postBloomEnabled = false;
+    bool m_postUpscaleEnabled = false;
+    bool m_lastFrameUsedPost = false;
     bool m_dumpTexEnabled = false;
     bool m_paceEnabled = false;
     bool m_statsEnabled = false;
@@ -2334,17 +2355,19 @@ private:
     // Render-thread GL state
     uint64_t m_frameNum = 0;
     std::atomic<uint64_t> m_evictions{0};
+    std::atomic<uint64_t> m_mailboxDropped{0};
     uint32_t m_culledThisFrame = 0;
     uint32_t m_drawCallsThisFrame = 0;
     uint32_t m_instSavedThisFrame = 0;
+    uint32_t m_texWrapCallsThisFrame = 0;
     uint32_t m_astcHits = 0;
 
     ShaderProg m_progOpaque{}, m_progCut{}, m_progScreen{};
     ShaderProg m_progSkinOpaque{}, m_progSkinCut{}, m_progDepth{}, m_progPost{};
     GLuint m_emptyVao = 0;
     GLuint m_instUbo[3] = {};
-    GLuint m_skinUbo[3] = {};
     GLuint m_whiteTex = 0;
+    uint8_t m_whiteTexClamp = 0xFF;
     MaliTarget m_mainTarget{}, m_postTarget{}, m_bgTarget{};
 
     GLuint m_arenaVao[3] = {};
@@ -2353,15 +2376,12 @@ private:
 
     uint32_t m_lastPso = ~0u;
     GLuint m_lastTex = ~0u;
-    uint8_t m_lastClamp = 0xFF;
     GLuint m_lastVao = ~0u;
-    uint32_t m_lastSkinPalette = 0u;
 
     Fog m_fog{};
     Bloom m_bloom{};
     std::vector<uint16_t> m_tex16Scratch;
     std::vector<uint8_t> m_astcScratch;
-    std::vector<uint8_t> m_skinUboStaging;
     std::vector<uint8_t> m_instUboStaging;
     std::vector<InstBatch> m_instBatches;
     std::vector<int> m_instBatchByStart;
