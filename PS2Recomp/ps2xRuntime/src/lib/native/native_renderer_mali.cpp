@@ -1991,7 +1991,7 @@ private:
         makeTarget(m_bgTarget, 256, 256, true);
         m_lastPresentTime = std::chrono::steady_clock::now();
         m_initialized = true;
-        std::fprintf(stderr, "[mali] Phase 7D GLES 3.2 backend up (async=%d mailbox=%d keepCur=%d direct=%d fastSh=%d texArr=%d(maxL=%u,bud=%lluM) merge=%d(chunk=%u) inst=%d atPass2=%d cull=%d skin=%d drs=%d@%dfps[%.2f..%.2f] drawOnly=%d budget=%lluM)\n",
+        std::fprintf(stderr, "[mali] Phase 7E GLES 3.2 backend up (async=%d mailbox=%d keepCur=%d direct=%d fastSh=%d texArr=%d(maxL=%u,bud=%lluM) merge=%d(chunk=%u) inst=%d atPass2=%d cull=%d skin=%d drs=%d@%dfps[%.2f..%.2f] drawOnly=%d budget=%lluM)\n",
                      m_asyncEnabled ? 1 : 0, m_mailboxEnabled ? 1 : 0, m_keepCurrentEnabled ? 1 : 0,
                      m_directScanoutEnabled ? 1 : 0, m_fastShadersEnabled ? 1 : 0,
                      m_texArrayEnabled ? 1 : 0, m_maxArrayLayers,
@@ -2385,7 +2385,7 @@ private:
         }
 
         const uint32_t maxDim = std::max(w, h);
-        const uint32_t tierCap = (maxDim >= 256u) ? 4u : ((maxDim >= 128u) ? 16u : 32u);
+        const uint32_t tierCap = (maxDim >= 256u) ? 16u : ((maxDim >= 128u) ? 32u : 64u);
         const uint32_t cap = std::min(m_maxArrayLayers, tierCap);
         uint64_t mipBytes = 0;
         {
@@ -3368,13 +3368,55 @@ private:
                 if (arr.tex != 0u)
                     ++liveArrays;
             }
-            std::fprintf(stderr, "[mali:stats] frame=%llu draws=%u mergeSaved=%u instSaved=%u pass2Skip=%u culled=%u direct=%d drop=%llu drs=%.2f drawMs=%.2f swapMs=%.2f capMs=%.2f renderMs=%.2f mem=%.1f/%.1fM arr=%u arrMiss=%u/%llu skin=%u/%u/%u\n",
+            uint32_t bCnt[4] = {0, 0, 0, 0};
+            uint32_t brkClip = 0, brkArr = 0, brkState = 0, brkDyn = 0, brkSkin = 0, brkNoSrc = 0;
+            const QueuedDraw *prevStatic = nullptr;
+            for (const QueuedDraw &q : m_qAll)
+            {
+                if (q.bucket < 4u)
+                    ++bCnt[q.bucket];
+                if (q.bucket != 0u && q.bucket != 1u)
+                    continue;
+                if (q.skinned)
+                {
+                    ++brkSkin;
+                    prevStatic = nullptr;
+                    continue;
+                }
+                if (!q.mesh || q.mesh->dynamic)
+                {
+                    ++brkDyn;
+                    prevStatic = nullptr;
+                    continue;
+                }
+                if (q.mesh->srcVerts.empty())
+                {
+                    ++brkNoSrc;
+                    prevStatic = nullptr;
+                    continue;
+                }
+                if (prevStatic && !canMergeStatic(*prevStatic, q))
+                {
+                    if (prevStatic->state.order != q.state.order || prevStatic->bucket != q.bucket || prevStatic->psoKey != q.psoKey)
+                        ++brkState;
+                    else if (prevStatic->texArrayId != q.texArrayId || (prevStatic->texArrayId < 0 && prevStatic->state.texture != q.state.texture))
+                        ++brkArr;
+                    else if (prevStatic->state.clamp != q.state.clamp || prevStatic->state.alphaTest != q.state.alphaTest || prevStatic->stateHash != q.stateHash)
+                        ++brkState;
+                    else
+                        ++brkClip;
+                }
+                prevStatic = &q;
+            }
+            std::fprintf(stderr, "[mali:stats] frame=%llu draws=%u mergeSaved=%u instSaved=%u pass2Skip=%u culled=%u direct=%d drop=%llu drs=%.2f drawMs=%.2f swapMs=%.2f capMs=%.2f renderMs=%.2f mem=%.1f/%.1fM arr=%u arrMiss=%u/%llu b=%u/%u/%u/%u brk=%u/%u/%u/%u/%u/%u skin=%u/%u/%u\n",
                          static_cast<unsigned long long>(m_frameNum), m_drawCallsThisFrame,
                          m_mergeSavedThisFrame, m_instSavedThisFrame, m_pass2SkipThisFrame, m_culledThisFrame,
                          m_lastPresentedDirect ? 1 : 0,
                          static_cast<unsigned long long>(m_droppedFrames.load(std::memory_order_relaxed)),
                          m_drsScale, m_emaDrawMs, m_emaSwapMs, m_emaCapMs, m_emaFrameMs, gpuMb, budMb, liveArrays,
                          m_arrMissDrawsThisFrame, static_cast<unsigned long long>(m_arrMissUploads),
+                         bCnt[0], bCnt[1], bCnt[2], bCnt[3],
+                         brkClip, brkArr, brkState, brkDyn, brkSkin, brkNoSrc,
                          m_skinGpuDrawsThisFrame, m_skinCpuDrawsThisFrame, m_skinMaxQwordsThisFrame);
         }
 
