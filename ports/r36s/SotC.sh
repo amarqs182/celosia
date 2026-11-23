@@ -55,7 +55,12 @@ echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null 2>&1
 export SDL_GAMECONTROLLERCONFIG="1900bb3e4b4800000011000000010000,GO-Super Gamepad,a:b0,b:b1,back:b12,dpdown:b9,dpleft:b10,dpright:b11,dpup:b8,guide:b16,leftshoulder:b4,leftstick:b14,lefttrigger:b6,leftx:a0,lefty:a1,rightshoulder:b5,rightstick:b15,righttrigger:b7,rightx:a2,righty:a3,start:b13,x:b2,y:b3,platform:Linux,"
 unset PS2X_INPUT_SCRIPT PS2X_INPUT_CLOCK PS2X_INPUT_RECORD SOTC_INPUT_RECORD SOTC_INPUT_REPLAY PS2X_SNAPSHOT_DIR
 export PS2X_MEMCARD_DIR="$PORT_DIR/memcards"
-mkdir -p "$PORT_DIR/memcards"
+mkdir -p "$PORT_DIR/memcards" "$PORT_DIR/shader_cache" "$PORT_DIR/tex_cache" "$PORT_DIR/mesh_cache"
+export SOTC_MALI_SHADER_CACHE_DIR="$PORT_DIR/shader_cache"
+export SOTC_MALI_TEX_CACHE="$PORT_DIR/tex_cache"
+export SOTC_MESH_CACHE=1
+export SOTC_MESH_CACHE_DIR="$PORT_DIR/mesh_cache"
+export SOTC_MESH_CACHE_MB=96
 
 # 1. Renderizador Nativo OpenGL ES 3.2 na GPU Mali-G31 (Resolucao Nativa 100% 640x480 & Audio Mono)
 export SOTC_NATIVE=1
@@ -76,13 +81,13 @@ export SOTC_SCREEN_MODE=1
 export SOTC_CROP_LETTERBOX=0
 export SOTC_AUDIO_MONO=1
 
-# 2. Desligamento TOTAL dos Efeitos Pesados Multipass do PS2
-export SOTC_BLOOM_SCALE=0
+# 2. Efeitos Multipass do PS2 (Bloom, ScreenBlur e DoF alimentam o pos-processamento leve da Fase 9)
+export SOTC_BLOOM_SCALE=1
 export PS2X_AUDIO_FRAMES=4096
 export SOTC_NATIVE_NOGLOW=1
 export SOTC_NATIVE_NOFEEDBACK=1
-export SOTC_NATIVE_NOSBLUR=1
-export SOTC_NATIVE_NODOF=1
+export SOTC_NATIVE_NOSBLUR=0
+export SOTC_NATIVE_NODOF=0
 export SOTC_NATIVE_NOHAZE=1
 export SOTC_NATIVE_NOSHADOWS=1
 export SOTC_BODY_SHADOWS=0
@@ -193,6 +198,14 @@ export SOTC_COLLISION_STATS=0
 export SOTC_COLL115_LOG=0
 export SOTC_SEG123=0
 export SOTC_RENDERER="${SOTC_RENDERER:-mali}"
+# Mali-G31 Team ICO Pseudo-HDR & Post-FX (Fase 9 — alternar 0/1 para testar custo/visual)
+export SOTC_MALI_BLOOM=1
+export SOTC_MALI_EXPOSURE=1
+export SOTC_MALI_DOF=1
+export SOTC_MALI_MOTION_BLUR=1
+export SOTC_MALI_CA=1
+export SOTC_MALI_LENS_FLARE=1
+export SOTC_MALI_AO=1
 # export SOTC_MALI_STATS=1
 export SOTC_GL_SHOTS=0
 export SOTC_GL_SHOT_DIR=/tmp/shots
