@@ -34,6 +34,9 @@
 void ps2xLinuxGlLock();
 void ps2xLinuxGlUnlock();
 bool ps2xLinuxGlHasWaiter();
+void ps2xLinuxGetDrawableSize(uint32_t &w, uint32_t &h);
+double ps2xLinuxLastSwapMs();
+double ps2xLinuxLastCapSleepMs();
 #endif
 #endif
 
@@ -933,7 +936,20 @@ public:
         m_mergeEnabled = envBool("SOTC_MALI_MERGE", true);
         m_instancingEnabled = envBool("SOTC_MALI_INSTANCING", true);
         m_keepCurrentEnabled = envBool("SOTC_MALI_KEEP_CURRENT", true);
+        m_directScanoutEnabled = envBool("SOTC_MALI_DIRECT_SCANOUT", true);
         m_drsDrawOnly = envBool("SOTC_MALI_DRS_DRAW_ONLY", true);
+        if (const char *sm = std::getenv("SOTC_SCREEN_MODE"); sm && sm[0])
+            m_screenMode = std::atoi(sm);
+        else if (std::getenv("SOTC_STRETCH"))
+            m_screenMode = 1;
+        {
+            float cropRatio = 0.0f;
+            if (const char *cr = std::getenv("SOTC_CROP_LETTERBOX"); cr && cr[0])
+                cropRatio = std::clamp(std::strtof(cr, nullptr), 0.0f, 0.25f);
+            else if (m_screenMode == 1 || std::getenv("SOTC_STRETCH"))
+                cropRatio = 0.115f;
+            m_hasLetterboxCrop = (cropRatio > 0.001f);
+        }
         m_mergeBudgetUs = static_cast<uint64_t>(std::max(0, envInt("SOTC_MALI_MERGE_BUDGET_US", 2500)));
         m_mergeChunkMax = static_cast<uint32_t>(std::clamp(envInt("SOTC_MALI_MERGE_CHUNK", 24), 4, 128));
         m_cacheBudgetBytes = static_cast<uint64_t>(std::max(16, envInt("SOTC_MALI_CACHE_BUDGET_MB", 128))) * 1024ull * 1024ull;
@@ -1472,9 +1488,9 @@ private:
         makeTarget(m_bgTarget, 256, 256, true);
         m_lastPresentTime = std::chrono::steady_clock::now();
         m_initialized = true;
-        std::fprintf(stderr, "[mali] Phase 6.2 GLES 3.2 backend up (async=%d mailbox=%d keepCur=%d merge=%d inst=%d atPass2=%d cull=%d skin=%d drs=%d@%dfps drawOnly=%d budget=%lluM)\n",
+        std::fprintf(stderr, "[mali] Phase 7A GLES 3.2 backend up (async=%d mailbox=%d keepCur=%d direct=%d merge=%d inst=%d atPass2=%d cull=%d skin=%d drs=%d@%dfps drawOnly=%d budget=%lluM)\n",
                      m_asyncEnabled ? 1 : 0, m_mailboxEnabled ? 1 : 0, m_keepCurrentEnabled ? 1 : 0,
-                     m_mergeEnabled ? 1 : 0, m_instancingEnabled ? 1 : 0,
+                     m_directScanoutEnabled ? 1 : 0, m_mergeEnabled ? 1 : 0, m_instancingEnabled ? 1 : 0,
                      m_atPass2Mode, m_cullEnabled ? 1 : 0, m_gpuSkinEnabled ? 1 : 0,
                      m_drsEnabled ? 1 : 0, m_drsTargetFps, m_drsDrawOnly ? 1 : 0,
                      static_cast<unsigned long long>(m_cacheBudgetBytes >> 20));
@@ -1510,7 +1526,8 @@ private:
             if (t.tex) glDeleteTextures(1, &t.tex);
         m_textures.clear();
         m_gpuTexBytes = 0;
-        destroyTarget(m_mainTarget);
+        destroyTarget(m_mainTarget[0]);
+        destroyTarget(m_mainTarget[1]);
         destroyTarget(m_postTarget);
         destroyTarget(m_bgTarget);
         if (m_whiteTex) { glDeleteTextures(1, &m_whiteTex); m_whiteTex = 0; }
@@ -1527,8 +1544,22 @@ private:
 
     bool readbackOnGlThread(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height, bool glAlreadyHeld = false)
     {
-        const MaliTarget &src = (m_postTarget.fbo && m_lastPresentedPost) ? m_postTarget : m_mainTarget;
-        if (!m_initialized || !src.fbo)
+        if (!m_initialized)
+            return false;
+        if (m_lastPresentedDirect)
+        {
+            if (!m_lastDirectW || !m_lastDirectH)
+                return false;
+            GlContextGuard guard(glAlreadyHeld);
+            width = m_lastDirectW;
+            height = m_lastDirectH;
+            rgba.resize(static_cast<size_t>(width) * height * 4u);
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glReadPixels(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height), GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+            return true;
+        }
+        const MaliTarget &src = (m_postTarget.fbo && m_lastPresentedPost) ? m_postTarget : m_mainTarget[m_lastPresentedMain];
+        if (!src.fbo)
             return false;
         GlContextGuard guard(glAlreadyHeld);
         width = src.width;
@@ -2165,14 +2196,33 @@ private:
         const float scale = m_drsEnabled ? m_drsScale : 1.0f;
         const uint32_t rw = std::max(320u, static_cast<uint32_t>(std::lround(pkt.width * scale)) & ~3u);
         const uint32_t rh = std::max(240u, static_cast<uint32_t>(std::lround(pkt.height * scale)) & ~3u);
-        if (m_mainTarget.width != rw || m_mainTarget.height != rh)
-            makeTarget(m_mainTarget, rw, rh, true);
 
         // Phase 5.1 fix preserved: skip m_postTarget FBO unless bloom or explicit post-upscale is active.
         const bool wantBloom = m_postEnabled && m_postBloomEnabled && m_bloom.enabled;
         const bool runPost = wantBloom || (m_postEnabled && m_postUpscaleEnabled && (rw != pkt.width || rh != pkt.height));
-        if (runPost && (m_postTarget.width != pkt.width || m_postTarget.height != pkt.height))
-            makeTarget(m_postTarget, pkt.width, pkt.height, false);
+
+        uint32_t drawW = 0u, drawH = 0u;
+#if defined(PS2X_LINUX_SDL2_SHIM)
+        ps2xLinuxGetDrawableSize(drawW, drawH);
+#endif
+        const bool fullViewportMatch = (m_screenMode == 1) || (drawW * 3u == drawH * 4u);
+        const bool directScanout =
+#if defined(PS2X_LINUX_SDL2_SHIM)
+            m_directScanoutEnabled && !m_hasLetterboxCrop && !runPost && !pkt.hold &&
+            (!m_drsEnabled || m_drsScale >= 0.99f) && fullViewportMatch &&
+            static_cast<bool>(presentHook()) && drawW > 0u && drawH > 0u;
+#else
+            false;
+#endif
+
+        MaliTarget &mt = m_mainTarget[m_mainIdx];
+        if (!directScanout)
+        {
+            if (mt.width != rw || mt.height != rh)
+                makeTarget(mt, rw, rh, true);
+            if (runPost && (m_postTarget.width != pkt.width || m_postTarget.height != pkt.height))
+                makeTarget(m_postTarget, pkt.width, pkt.height, false);
+        }
 
         resetPsoAndUniformCaches();
 
@@ -2189,8 +2239,16 @@ private:
             invalidateDepth();
         }
 
-        glBindFramebuffer(GL_FRAMEBUFFER, m_mainTarget.fbo);
-        glViewport(0, 0, static_cast<GLsizei>(m_mainTarget.width), static_cast<GLsizei>(m_mainTarget.height));
+        if (directScanout)
+        {
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glViewport(0, 0, static_cast<GLsizei>(drawW), static_cast<GLsizei>(drawH));
+        }
+        else
+        {
+            glBindFramebuffer(GL_FRAMEBUFFER, mt.fbo);
+            glViewport(0, 0, static_cast<GLsizei>(mt.width), static_cast<GLsizei>(mt.height));
+        }
         glDepthMask(GL_TRUE);
         glClearColor(m_fog.colour[0], m_fog.colour[1], m_fog.colour[2], 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -2375,35 +2433,52 @@ private:
             ++i;
         }
 
-        invalidateDepth();
+        invalidateDepth(directScanout);
 
-        GLuint outTex = m_mainTarget.color;
-        uint32_t outW = m_mainTarget.width;
-        uint32_t outH = m_mainTarget.height;
+        GLuint outTex = 0u;
+        uint32_t outW = 0u;
+        uint32_t outH = 0u;
         m_lastPresentedPost = false;
-        if (runPost && m_postTarget.fbo)
+        if (directScanout)
         {
-            glBindFramebuffer(GL_FRAMEBUFFER, m_postTarget.fbo);
-            glViewport(0, 0, static_cast<GLsizei>(m_postTarget.width), static_cast<GLsizei>(m_postTarget.height));
-            glDisable(GL_DEPTH_TEST);
-            glDisable(GL_BLEND);
-            glUseProgram(m_progPost.id);
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, m_mainTarget.color);
-            const float bloomAmt = wantBloom ? 0.25f : 0.0f;
-            const float bloomThr = m_bloom.threshold > 0.05f ? std::min(m_bloom.threshold, 0.9f) : 0.65f;
-            if (m_progPost.uMisc >= 0)
-                glUniform4f(m_progPost.uMisc, 1.0f / static_cast<float>(m_mainTarget.width),
-                            1.0f / static_cast<float>(m_mainTarget.height), bloomAmt, bloomThr);
-            glBindVertexArray(m_emptyVao);
-            glDrawArrays(GL_TRIANGLES, 0, 3);
-            outTex = m_postTarget.color;
-            outW = m_postTarget.width;
-            outH = m_postTarget.height;
-            m_lastPresentedPost = true;
+            outTex = 0u;
+            outW = drawW;
+            outH = drawH;
+            m_lastPresentedDirect = true;
+            m_lastDirectW = drawW;
+            m_lastDirectH = drawH;
         }
-
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        else
+        {
+            outTex = mt.color;
+            outW = mt.width;
+            outH = mt.height;
+            if (runPost && m_postTarget.fbo)
+            {
+                glBindFramebuffer(GL_FRAMEBUFFER, m_postTarget.fbo);
+                glViewport(0, 0, static_cast<GLsizei>(m_postTarget.width), static_cast<GLsizei>(m_postTarget.height));
+                glDisable(GL_DEPTH_TEST);
+                glDisable(GL_BLEND);
+                glUseProgram(m_progPost.id);
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, mt.color);
+                const float bloomAmt = wantBloom ? 0.25f : 0.0f;
+                const float bloomThr = m_bloom.threshold > 0.05f ? std::min(m_bloom.threshold, 0.9f) : 0.65f;
+                if (m_progPost.uMisc >= 0)
+                    glUniform4f(m_progPost.uMisc, 1.0f / static_cast<float>(mt.width),
+                                1.0f / static_cast<float>(mt.height), bloomAmt, bloomThr);
+                glBindVertexArray(m_emptyVao);
+                glDrawArrays(GL_TRIANGLES, 0, 3);
+                outTex = m_postTarget.color;
+                outW = m_postTarget.width;
+                outH = m_postTarget.height;
+                m_lastPresentedPost = true;
+            }
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            m_lastPresentedDirect = false;
+            m_lastPresentedMain = m_mainIdx;
+            m_mainIdx ^= 1;
+        }
         m_arenaSlot = (m_arenaSlot + 1) % 3;
 
         if (m_paceEnabled && !pkt.hold)
@@ -2423,6 +2498,12 @@ private:
         {
             if (const auto &hook = presentHook())
                 hook(outTex, outW, outH);
+#if defined(PS2X_LINUX_SDL2_SHIM)
+            const double swapMs = ps2xLinuxLastSwapMs();
+            const double capMs = ps2xLinuxLastCapSleepMs();
+            m_emaSwapMs = m_emaSwapMs > 0.0 ? (m_emaSwapMs * 0.85 + swapMs * 0.15) : swapMs;
+            m_emaCapMs = m_emaCapMs > 0.0 ? (m_emaCapMs * 0.85 + capMs * 0.15) : capMs;
+#endif
         }
 
         const double frameMs = static_cast<double>(nowUs() - frameStartUs) * 0.001;
@@ -2462,11 +2543,12 @@ private:
         {
             const double gpuMb = static_cast<double>(m_gpuMeshBytes + m_gpuTexBytes) / (1024.0 * 1024.0);
             const double budMb = static_cast<double>(m_cacheBudgetBytes) / (1024.0 * 1024.0);
-            std::fprintf(stderr, "[mali:stats] frame=%llu draws=%u mergeSaved=%u instSaved=%u pass2Skip=%u culled=%u texWrap=%u drop=%llu drs=%.2f drawMs=%.2f renderMs=%.2f mem=%.1f/%.1fM skin=%u/%u/%u\n",
+            std::fprintf(stderr, "[mali:stats] frame=%llu draws=%u mergeSaved=%u instSaved=%u pass2Skip=%u culled=%u direct=%d drop=%llu drs=%.2f drawMs=%.2f swapMs=%.2f capMs=%.2f renderMs=%.2f mem=%.1f/%.1fM skin=%u/%u/%u\n",
                          static_cast<unsigned long long>(m_frameNum), m_drawCallsThisFrame,
                          m_mergeSavedThisFrame, m_instSavedThisFrame, m_pass2SkipThisFrame, m_culledThisFrame,
-                         m_texWrapThisFrame, static_cast<unsigned long long>(m_droppedFrames.load(std::memory_order_relaxed)),
-                         m_drsScale, m_emaDrawMs, m_emaFrameMs, gpuMb, budMb,
+                         m_lastPresentedDirect ? 1 : 0,
+                         static_cast<unsigned long long>(m_droppedFrames.load(std::memory_order_relaxed)),
+                         m_drsScale, m_emaDrawMs, m_emaSwapMs, m_emaCapMs, m_emaFrameMs, gpuMb, budMb,
                          m_skinGpuDrawsThisFrame, m_skinCpuDrawsThisFrame, m_skinMaxQwordsThisFrame);
         }
 
@@ -2616,11 +2698,14 @@ private:
         t.width = t.height = 0;
     }
 
-    static void invalidateDepth()
+    static void invalidateDepth(bool defaultFbo = false)
     {
 #if defined(PS2X_MALI_GLES)
-        const GLenum attachments[2] = {GL_DEPTH_ATTACHMENT, GL_STENCIL_ATTACHMENT};
-        glInvalidateFramebuffer(GL_FRAMEBUFFER, 2, attachments);
+        static constexpr GLenum kDefaultDiscard[2] = {GL_DEPTH, GL_STENCIL};
+        static constexpr GLenum kFboDiscard[2] = {GL_DEPTH_ATTACHMENT, GL_STENCIL_ATTACHMENT};
+        glInvalidateFramebuffer(GL_FRAMEBUFFER, 2, defaultFbo ? kDefaultDiscard : kFboDiscard);
+#else
+        (void)defaultFbo;
 #endif
     }
 
@@ -3102,6 +3187,9 @@ private:
     bool m_mergeEnabled = true;
     bool m_instancingEnabled = true;
     bool m_keepCurrentEnabled = true;
+    bool m_directScanoutEnabled = true;
+    bool m_hasLetterboxCrop = false;
+    int m_screenMode = -1;
     bool m_drsDrawOnly = true;
     int m_atPass2Mode = 1;
     bool m_zPrepassEnabled = false;
@@ -3109,6 +3197,9 @@ private:
     bool m_postBloomEnabled = false;
     bool m_postUpscaleEnabled = false;
     bool m_lastPresentedPost = false;
+    bool m_lastPresentedDirect = false;
+    uint32_t m_lastDirectW = 0;
+    uint32_t m_lastDirectH = 0;
     bool m_dumpTexEnabled = false;
     bool m_paceEnabled = false;
     bool m_statsEnabled = false;
@@ -3122,6 +3213,8 @@ private:
     int m_drsTargetFps = 30;
     float m_drsScale = 1.0f;
     double m_emaDrawMs = 0.0;
+    double m_emaSwapMs = 0.0;
+    double m_emaCapMs = 0.0;
     double m_emaFrameMs = 0.0;
     int m_drsOverStreak = 0;
     int m_drsUnderStreak = 0;
@@ -3179,7 +3272,9 @@ private:
     ShaderProg m_progSkinOpaque{}, m_progSkinCut{}, m_progDepth{}, m_progPost{};
     GLuint m_emptyVao = 0;
     GLuint m_whiteTex = 0;
-    MaliTarget m_mainTarget{}, m_postTarget{}, m_bgTarget{};
+    MaliTarget m_mainTarget[2]{}, m_postTarget{}, m_bgTarget{};
+    int m_mainIdx = 0;
+    int m_lastPresentedMain = 0;
 
     GLuint m_arenaVao[3] = {};
     GLuint m_arenaVbo[3] = {};

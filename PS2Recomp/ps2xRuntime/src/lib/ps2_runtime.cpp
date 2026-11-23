@@ -3298,6 +3298,8 @@ void PS2Runtime::run()
     std::function<void(const Texture2D &, uint32_t, uint32_t)> drawHostFrame = [&](const Texture2D &shown, uint32_t presentWidth, uint32_t presentHeight)
     {
             BeginDrawing();
+            if (shown.id != 0u)
+            {
             ClearBackground(BLACK);
             const float srcWidth = static_cast<float>(std::max<uint32_t>(1u, presentWidth));
             const float srcHeight = static_cast<float>(std::max<uint32_t>(1u, presentHeight));
@@ -3340,6 +3342,7 @@ void PS2Runtime::run()
                 dstWidth,
                 dstHeight};
             DrawTexturePro(shown, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+            }
             if (GetTime() < g_pictureLabelUntil) // F9 just flipped the picture: say which one shows
             {
                 const char *label = g_pictureLabelNative ? "NATIVE" : "GS (emulated)";
@@ -3440,8 +3443,9 @@ void PS2Runtime::run()
                                         if (!native_renderer::shown())
                                             return;
                                         lastGsPresent.store(GetTime(), std::memory_order_relaxed);
-                                        hostFrameFlipY = true; // a GL render target: y-up
-                                        drawHostFrame(Texture2D{texture | 0x80000000u, static_cast<int>(width), static_cast<int>(height), 1,
+                                        hostFrameFlipY = (texture != 0u); // a GL render target: y-up
+                                        const unsigned int texId = (texture != 0u) ? (texture | 0x80000000u) : 0u;
+                                        drawHostFrame(Texture2D{texId, static_cast<int>(width), static_cast<int>(height), 1,
                                                                 PIXELFORMAT_UNCOMPRESSED_R8G8B8A8},
                                                       width, height);
                                         hostFrameFlipY = false; });
