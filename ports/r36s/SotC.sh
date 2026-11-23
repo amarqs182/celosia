@@ -37,15 +37,15 @@ if [ -n "${SSH_CONNECTION:-}" ] || [ -n "${SSH_TTY:-}" ]; then
 fi
 sudo systemctl stop batt_led.service 2>/dev/null
 
-# Max frequencias CPU (1.5 GHz) e GPU (520 MHz max suportado pelo kernel)
+# Max frequencias CPU (1.5 GHz), GPU (520 MHz) e DMC/DRAM (666 MHz)
 echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor >/dev/null 2>&1
 echo 1512000 | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq >/dev/null 2>&1
-for gpu_dev in /sys/class/devfreq/*gpu*; do
-  [ -d "$gpu_dev" ] || continue
-  echo performance | sudo tee "$gpu_dev/governor" >/dev/null 2>&1
-  GPU_MAX_FREQ="$(cat "$gpu_dev/max_freq" 2>/dev/null)"
-  [ -n "$GPU_MAX_FREQ" ] && echo "$GPU_MAX_FREQ" | sudo tee "$gpu_dev/min_freq" >/dev/null 2>&1
-done  
+for df_dev in /sys/class/devfreq/*gpu* /sys/class/devfreq/*dmc*; do
+  [ -d "$df_dev" ] || continue
+  echo performance | sudo tee "$df_dev/governor" >/dev/null 2>&1
+  DF_MAX_FREQ="$(cat "$df_dev/max_freq" 2>/dev/null)"
+  [ -n "$DF_MAX_FREQ" ] && echo "$DF_MAX_FREQ" | sudo tee "$df_dev/min_freq" >/dev/null 2>&1
+done
 
 # Ativacao e configuracao do ZRAM
 sudo swapon /dev/zram0 2>/dev/null
@@ -68,7 +68,7 @@ export SOTC_NATIVE_GL=1
 export SOTC_RENDER_SCALE=1.0
 export SOTC_TEXTURE_FILTER=1
 export PS2X_SWAP_INTERVAL=0
-export SOTC_FPS_CAP=60
+export SOTC_FPS_CAP=30
 export SOTC_CAM_INVERT_X=1
 # Desabilitado em producao; para capturar microprogramas VU1 ausentes, defina:
 # export PS2X_VU1_DUMP_MISSING="$PORT_DIR/vu1"
@@ -131,7 +131,7 @@ export PS2X_HOST_CLOCK_MAX_LAG=2
 unset SOTC_FIXED_DT
 export SOTC_MAX_DT=0.0333334
 unset SOTC_CAP20
-export SOTC_CAP30=0
+export SOTC_CAP30=1
 export SOTC_FRAME_INTERVAL=1
 
 # 5. Geometria Otimizada, Batching e Fast Paths do Renderizador GL
@@ -180,8 +180,10 @@ export SOTC_P1CHARA=1
 export SOTC_RENDER_THREAD=1
 export SOTC_HOOK_ASYNC=1
 export SOTC_ASYNC_BUILDS=1
-export SOTC_HOLD_INCOMPLETE=1
-export SOTC_HOLD_TERRAIN_MS=300
+export SOTC_TAKEUP_MS=2
+export SOTC_HOLD_INCOMPLETE=0
+export SOTC_HOLD_TERRAIN_MS=0
+export SOTC_HOLD_FRAMES=0
 export SOTC_GL_NODISCARD=1
 export SOTC_GL_OPAQUE88=1
 export SOTC_GL_BGSMALL87=1
