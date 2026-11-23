@@ -203,6 +203,24 @@ namespace native_renderer
                 d.ps2Lists = std::atoi(std::getenv("SOTC_PS2_LISTS")) != 0;
             if (on("SOTC_GPU_SKIN"))
                 d.gpuSkinning = std::atoi(std::getenv("SOTC_GPU_SKIN")) != 0;
+            if (on("SOTC_MALI_BLOOM"))
+                d.maliBloom = std::atoi(std::getenv("SOTC_MALI_BLOOM")) != 0;
+            else if (on("SOTC_MALI_POST_BLOOM"))
+                d.maliBloom = std::atoi(std::getenv("SOTC_MALI_POST_BLOOM")) != 0;
+            if (on("SOTC_MALI_EXPOSURE"))
+                d.maliExposure = std::atoi(std::getenv("SOTC_MALI_EXPOSURE")) != 0;
+            if (on("SOTC_MALI_DOF"))
+                d.maliDof = std::atoi(std::getenv("SOTC_MALI_DOF")) != 0;
+            if (on("SOTC_MALI_MOTION_BLUR"))
+                d.maliMotionBlur = static_cast<float>(std::clamp(std::atoi(std::getenv("SOTC_MALI_MOTION_BLUR")), 0, 2));
+            if (on("SOTC_MALI_CA"))
+                d.maliCa = std::atoi(std::getenv("SOTC_MALI_CA")) != 0;
+            if (on("SOTC_MALI_LENS_FLARE"))
+                d.maliLensFlare = std::atoi(std::getenv("SOTC_MALI_LENS_FLARE")) != 0;
+            if (on("SOTC_MALI_AO"))
+                d.maliAo = std::atoi(std::getenv("SOTC_MALI_AO")) != 0;
+            if (on("SOTC_MALI_WATER"))
+                d.maliWater = std::atoi(std::getenv("SOTC_MALI_WATER")) != 0;
             if (on("SOTC_CAP30"))
                 d.frameCap30 = std::atoi(std::getenv("SOTC_CAP30")) != 0;
             if (on("SOTC_CAP20")) // round 107: Frame rate, Steady 20 (1) or Auto (0)
@@ -466,6 +484,38 @@ namespace native_renderer
             {"heat_haze", "Heat haze", "Distorção de calor", "The shimmering air the screen copy makes (behind the bird colossus, some fights). The underwater ripple stays.",
              "O ar tremulando feito com a cópia da tela (atrás do colosso pássaro, algumas lutas). A ondulação embaixo d'água continua.",
              &Tuning::heatHaze, nullptr, 0, 1, 1, "SOTC_NATIVE_NOHAZE"},
+            {"mali_bloom", "Mali Bloom (Team ICO)", "Bloom Mali (Team ICO)",
+             "Quarter-res depth-masked Team ICO bloom with Dual-Kawase blur and temporal persistence.",
+             "Bloom Team ICO em baixa resolução com máscara de profundidade, borrão Kawase e persistência temporal.",
+             &Tuning::maliBloom, nullptr, 0, 1, 1, "SOTC_MALI_BLOOM"},
+            {"mali_exposure", "Mali Exposure", "Exposição Mali",
+             "Framebuffer exposure adaptation driven by the downsampled scene luminance.",
+             "Adaptação de exposição no framebuffer guiada pela luminância média da cena.",
+             &Tuning::maliExposure, nullptr, 0, 1, 1, "SOTC_MALI_EXPOSURE"},
+            {"mali_dof", "Mali Depth of Field", "DoF Mali (Prof. de campo)",
+             "160x120 Dual-Kawase depth of field driven by the game's focus distance.",
+             "Desfoque de profundidade 160x120 guiado pela distância de foco do jogo.",
+             &Tuning::maliDof, nullptr, 0, 1, 1, "SOTC_MALI_DOF"},
+            {"mali_motion_blur", "Mali Motion Blur", "Motion Blur Mali",
+             "Off: none. Game blur: ScreenBlur from the game. Game + trail: adds a subtle previous-frame trail.",
+             "Desligado: nenhum. Jogo: ScreenBlur do jogo. Jogo + rastro: adiciona rastro leve do quadro anterior.",
+             nullptr, &Tuning::maliMotionBlur, 0.0f, 2.0f, 1.0f, "SOTC_MALI_MOTION_BLUR"},
+            {"mali_ca", "Chromatic Aberration", "Aberração cromática",
+             "Subtle radial RGB fringing near the edges of the screen fused into the final composite.",
+             "Desvio cromático radial sutil nas bordas da tela fundido na composição final.",
+             &Tuning::maliCa, nullptr, 0, 1, 1, "SOTC_MALI_CA"},
+            {"mali_lens_flare", "Lens Flare", "Lens Flare (brilho solar)",
+             "Screen-space sun ghosts and halos reusing the 64x48 bloom history buffer.",
+             "Reflexos solares de lente reutilizando o buffer 64x48 do bloom.",
+             &Tuning::maliLensFlare, nullptr, 0, 1, 1, "SOTC_MALI_LENS_FLARE"},
+            {"mali_ao", "Ambient Occlusion (SSAO)", "Oclusão ambiental (SSAO)",
+             "160x120 quarter-res 4-tap contact SSAO with 2x2 dither-canceling blur.",
+             "Oclusão de contato SSAO 160x120 com filtro 2x2 anti-ruído.",
+             &Tuning::maliAo, nullptr, 0, 1, 1, "SOTC_MALI_AO"},
+            {"mali_water", "Mali Fresnel Water", "Água Fresnel Mali",
+             "Lightweight Fresnel-modulated water tint without an extra reflection render pass.",
+             "Superfície de água leve com Fresnel e cor do céu sem passe extra de reflexão.",
+             &Tuning::maliWater, nullptr, 0, 1, 1, "SOTC_MALI_WATER"},
             // (Round 62: a menu item on the Vita again, as the user asked; round
             // 64: off by default (the user's choice), a saved value honoured,
             // SOTC_CAP30 over both. On, it caps only the heavy frames: above 150
@@ -785,6 +835,14 @@ namespace native_renderer
             {"screen_blur", 3, "Cost: GPU (a copy of the picture and a full-screen pass) while it is on screen.",
              "Custo: GPU (uma cópia da imagem e uma passada na tela inteira) enquanto aparece."},
             {"feedback", 3, "Cost: GPU, only in the scenes that use it.", "Custo: GPU, só nas cenas que usam."},
+            {"mali_bloom", 3, "Cost: low GPU (128x96 mask + 64x48 Kawase).", "Custo: GPU baixo (máscara 128x96 + Kawase 64x48)."},
+            {"mali_exposure", 3, "Cost: near zero (reuses bloom luma).", "Custo: quase zero (reutiliza luma do bloom)."},
+            {"mali_dof", 3, "Cost: low GPU (160x120 blur + depth read).", "Custo: GPU baixo (borrão 160x120 + leitura de profundidade)."},
+            {"mali_motion_blur", 3, "Cost: near zero in final pass.", "Custo: quase zero no passe final."},
+            {"mali_ca", 3, "Cost: near zero in final pass.", "Custo: quase zero no passe final."},
+            {"mali_lens_flare", 3, "Cost: near zero (reuses bloom buffer).", "Custo: quase zero (reutiliza buffer do bloom)."},
+            {"mali_ao", 3, "Cost: medium GPU (160x120 4-tap depth SSAO + blur).", "Custo: GPU médio (SSAO 160x120 + borrão)."},
+            {"mali_water", 3, "Cost: very low GPU (no reflection pass).", "Custo: GPU muito baixo (sem passe de reflexão)."},
             {"shadows", 4, "Cost: GPU (the shadow mask: reduction, blur, darkening) and the model worker.",
              "Custo: GPU (a máscara de sombra: redução, borrão, escurecimento) e a thread dos modelos."},
             {"body_shadows", 4, "Cost: GPU (stencil volumes) and the model worker (volumes built each frame).",
@@ -832,7 +890,9 @@ namespace native_renderer
                 item.backends = 1;
             if (key == "bloom_rounds" || key == "bloom_spread" || key == "dbg_haze_source" || key == "dbg_water_source" || key == "dbg_redraw_mode0" || key == "dbg_glow_vita" || key == "dbg_bloom_sameframe" ||
                 key == "dbg_gpu_skin" || key == "dbg_render_thread" || key == "dbg_gl_pools" || key == "dbg_gl_merge" || key == "dbg_gl_lean" ||
-                key == "dbg_gl_nodiscard")
+                key == "dbg_gl_nodiscard" ||
+                key == "mali_bloom" || key == "mali_exposure" || key == "mali_dof" || key == "mali_motion_blur" ||
+                key == "mali_ca" || key == "mali_lens_flare" || key == "mali_ao" || key == "mali_water")
                 item.backends = 2;
         }
         return v;
@@ -940,6 +1000,10 @@ namespace native_renderer
             static const char *ratePt[] = {"Auto", "20 estável"};
             static const char *sourceEn[] = {"small copy", "full copy", "last frame"};
             static const char *sourcePt[] = {"cópia pequena", "cópia inteira", "quadro anterior"};
+            static const char *mbEn[] = {"Off", "Game blur", "Game + trail"};
+            static const char *mbPt[] = {"Desligado", "Jogo (ScreenBlur)", "Jogo + rastro"};
+            if (item.number == &Tuning::maliMotionBlur)
+                return {3, mbEn, mbPt};
             if (item.number == &Tuning::frameRate)
                 return {2, rateEn, ratePt};
             if (item.number == &Tuning::preset)

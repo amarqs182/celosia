@@ -66,6 +66,16 @@ namespace native_renderer
         // view's ripple at layer 19 stays). SOTC_NATIVE_NOHAZE=1.
         bool heatHaze = true;
 
+        // Mali-G31 (R36S) live post-FX & water switches (Phase 8B/9, toggled in-game via FN submenu).
+        bool maliBloom = true;          // SOTC_MALI_BLOOM
+        bool maliExposure = true;       // SOTC_MALI_EXPOSURE
+        bool maliDof = false;           // SOTC_MALI_DOF
+        float maliMotionBlur = 0.0f;    // SOTC_MALI_MOTION_BLUR (0 off, 1 game ScreenBlur, 2 ScreenBlur + frame trail)
+        bool maliCa = false;            // SOTC_MALI_CA
+        bool maliLensFlare = false;     // SOTC_MALI_LENS_FLARE
+        bool maliAo = false;            // SOTC_MALI_AO
+        bool maliWater = true;          // SOTC_MALI_WATER
+
         // Debugging (the menus' Debug group): what to draw at all.
         uint32_t hiddenLayers = 0;  // bit n: the display list's layer n is not drawn
         bool showNative = true;     // off: the emulated GS picture of the same moment is shown (the native one still drawn)

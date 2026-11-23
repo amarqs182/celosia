@@ -3141,6 +3141,19 @@ private:
         m_frameNum = pkt.frameNum;
         m_fog = pkt.fog;
         m_bloom = pkt.bloom;
+        {
+            const Tuning &liveTune = tuning();
+            m_postBloomEnabled = liveTune.maliBloom;
+            m_exposureEnabled = liveTune.maliExposure;
+            m_dofEnabled = liveTune.maliDof;
+            m_motionBlurMode = std::clamp(static_cast<int>(liveTune.maliMotionBlur + 0.5f), 0, 2);
+            m_caEnabled = liveTune.maliCa;
+            m_lensFlareEnabled = liveTune.maliLensFlare;
+            m_aoEnabled = liveTune.maliAo;
+            m_waterEnabled = liveTune.maliWater;
+            if (!m_postBloomEnabled && !m_lensFlareEnabled)
+                m_bloomHistValid = false;
+        }
         m_culledThisFrame = 0;
         m_drawCallsThisFrame = 0;
         m_mergeSavedThisFrame = 0;

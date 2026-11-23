@@ -12635,14 +12635,12 @@ namespace sotc_native
                 sflags = full->flags;
             else
                 noteRead((s + 0x18u) & ~7u, 8u), std::memcpy(&sflags, g_ram + ((s + 0x18u) & 0x1FFFFF8u), 8);
-            static const bool simpleWater = []() -> bool
+            static const bool isMaliRenderer = []() -> bool
             {
-                const char *w = std::getenv("SOTC_MALI_WATER");
-                if (w && w[0])
-                    return std::atoi(w) != 0;
                 const char *r = std::getenv("SOTC_RENDERER");
                 return r && std::strcmp(r, "mali") == 0;
             }();
+            const bool simpleWater = isMaliRenderer && native_renderer::tuning().maliWater;
             const bool layer14 = ((sflags >> 25) & 1u) != 0;
             const bool reflective = (layer14 || (sflags & 0x2200u) == 0x2200u) && (!noReflect || simpleWater) && !state.debugColour;
             if (runs && e && e->resolved && !usingFallback && !posed && !twoTextures && !reflective && info && (!detailTexturesOn() || info->texMode != 2u) && mesh == id)
