@@ -79,6 +79,10 @@ namespace sotc_decomp
     // Called before a garbage move (sotc_native: the model jobs on the worker
     // use the memos by address; round 23).
     inline void (*g_beforeGuestMove)() = nullptr;
+    // Round P4's check (SOTC_P4MOVE_CHECK, p4_move.h): called right after a garbage move (source / destination offsets in main RAM, bytes).
+    inline void (*g_afterGuestMove)(uint32_t src, uint32_t dst, uint32_t bytes) = nullptr;
+    // Round P4: the move g_beforeGuestMove is called for (source, destination, bytes; guest addresses as copyViaSpr has them).
+    inline uint32_t g_moveSrc = 0, g_moveDst = 0, g_moveBytes = 0;
     // The game frame (sotc_native syncFrame), for in-run A/B switches.
     inline uint64_t g_gameFrame = 0;
     // Round 65: the camera context GetCameraContext last returned (sotc_native's
@@ -162,24 +166,35 @@ namespace sotc_decomp
         uint32_t first = 0; // the oldest move number the run of recorded serials reaches
     };
     inline GuestMoveIndex g_guestMoveIndex;
+    // Round P4 (p4_move.h): the hook worker sees the garbage moves as they were when the job it runs was handed over (the
+    // serial, the count, its own index of the ring), so a move that went on while older jobs were still queued is not seen
+    // by them: exactly what they saw before P4, when every move joined the whole queue first. Defined in sotc_native.cpp;
+    // t_moveView is set only on the hook worker. (Equal to the globals whenever no move went on beside queued jobs.)
+    extern thread_local bool t_moveView;
+    extern thread_local uint32_t t_moveViewSerial, t_moveViewCount;
+    inline GuestMoveIndex g_guestMoveIndexView; // the hook worker's index (only it builds it)
+    inline uint32_t moveSerialSeen() { return t_moveView ? t_moveViewSerial : g_guestMoveSerial; }
+    inline uint32_t moveCountSeen() { return t_moveView ? t_moveViewCount : g_guestMoveCount; }
+    inline GuestMoveIndex &moveIndexSeen() { return t_moveView ? g_guestMoveIndexView : g_guestMoveIndex; }
     inline void buildGuestMoveIndex()
     {
-        GuestMoveIndex &x = g_guestMoveIndex;
-        if (x.builtAt == g_guestMoveCount)
+        GuestMoveIndex &x = moveIndexSeen();
+        const uint32_t count = moveCountSeen();
+        if (x.builtAt == count)
             return;
-        x.builtAt = g_guestMoveCount;
-        const uint32_t n = std::min(g_guestMoveCount, kGuestMoves);
+        x.builtAt = count;
+        const uint32_t n = std::min(count, kGuestMoves);
         // Only the newest moves with serials one after the other (a chunked
         // copy in between was not recorded: what came before it is not used).
-        uint32_t expect = g_guestMoveSerial, used = 0;
+        uint32_t expect = moveSerialSeen(), used = 0;
         for (; used < n; ++used)
         {
-            const GuestMove &m = g_guestMoves[(g_guestMoveCount - 1u - used) & (kGuestMoves - 1u)];
+            const GuestMove &m = g_guestMoves[(count - 1u - used) & (kGuestMoves - 1u)];
             if (m.serial != expect)
                 break;
             --expect;
         }
-        x.first = g_guestMoveCount - used;
+        x.first = count - used;
         x.byDst.resize(used);
         x.maxLen = 0;
         for (uint32_t i = 0; i < used; ++i)
@@ -197,7 +212,7 @@ namespace sotc_decomp
     // holds `addr` (false: none).
     inline bool guestMoveInto(uint32_t addr, uint32_t before, uint32_t &number)
     {
-        const GuestMoveIndex &x = g_guestMoveIndex;
+        const GuestMoveIndex &x = moveIndexSeen();
         // Moves with dst in (addr - maxLen, addr]: the last with dst <= addr, back.
         auto it = std::upper_bound(x.byDst.begin(), x.byDst.end(), addr, [](uint32_t a, uint32_t n) { return a < g_guestMoves[n & (kGuestMoves - 1u)].dst; });
         bool found = false;
@@ -223,10 +238,10 @@ namespace sotc_decomp
     template <typename F>
     inline bool walkGuestMoves(uint32_t addr, F &&f)
     {
-        if (!g_guestMoveCount)
+        if (!moveCountSeen())
             return false;
         buildGuestMoveIndex();
-        uint32_t before = g_guestMoveCount, at = addr, number = 0;
+        uint32_t before = moveCountSeen(), at = addr, number = 0;
         for (int step = 0; step < 8 && guestMoveInto(at, before, number); ++step)
         {
             const GuestMove &m = g_guestMoves[number & (kGuestMoves - 1u)];
@@ -668,11 +683,14 @@ namespace sotc_decomp
         kN2Snd,    // round N2 (SOTC_N2SND=0 off): the sound engine's remote layer on the host: Sg2RemoteSend / Sg2RemoteTickProc
                    // hand their commands to the native driver straight (no guest ring, no SIF RPC), the reply written into the
                    // game's status block; the mixer's N2 paths (sound_n2.cpp, sound_mixer.cpp; docs/sound_n2.md; SOTC_N2SND_CHECK)
+        kP4Move,   // round P4 (off unless SOTC_P4MOVE=1): a heap garbage move waits only for the queued hook jobs whose guest reads
+                   // meet the moved span (source or destination), not for the whole queue (p4_move.h, sotc_native.cpp;
+                   // SOTC_P4MOVE_CHECK in a PS2X_P4_CHECK build)
         kSwitchCount
     };
     inline const char *const kSwitchEnv[kSwitchCount] = {"SOTC_CAMCOLL", "SOTC_COLLPROBE", "SOTC_MOTION", "SOTC_LEAVES", "SOTC_HOTLIST", "SOTC_HOTLIST44", "SOTC_HOTLIST46", "SOTC_HOTLIST47",
-                                                         "SOTC_SCRIPTVM", "SOTC_ISYS", "SOTC_HOTLIST48", "SOTC_FASTNATIVE", "SOTC_FASTNATIVE2", "SOTC_FASTNATIVE3", "SOTC_PTCL62", "SOTC_COLL63", "SOTC_TEX64", "SOTC_WALK67", "SOTC_PREF69", "SOTC_COLL71", "SOTC_CHARLOD78", "SOTC_PTCL79", "SOTC_SEG80", "SOTC_POSE82", "SOTC_WALK83", "SOTC_PTCL83", "SOTC_PROBE84", "SOTC_FIND84", "SOTC_GROUND85", "SOTC_PTCL89", "SOTC_PTCL91", "SOTC_JOIN95", "SOTC_DRAW95", "SOTC_EARLY95", "SOTC_OBJ96", "SOTC_SEL96", "SOTC_SEL97", "SOTC_LINKS97", "SOTC_PATH97", "SOTC_PLAN97", "SOTC_WALK101", "SOTC_SKIN101", "SOTC_LEAF101", "SOTC_OBJ101", "SOTC_SW102", "SOTC_PTCL103", "SOTC_SOLID103", "SOTC_GRP106", "SOTC_OAN106", "SOTC_AI106", "SOTC_COLL115", "SOTC_PKT117", "SOTC_GLV117", "SOTC_DRAW117", "SOTC_LEAF117", "SOTC_SYM120", "SOTC_HEAP120", "SOTC_FLUSH119", "SOTC_WALK119", "SOTC_PART119", "SOTC_VIEW119", "SOTC_PTCL123", "SOTC_BLEND123", "SOTC_SEG123", "SOTC_GAZE122", "SOTC_CLOTH122", "SOTC_QUAT122", "SOTC_KEYS122", "SOTC_FIN125", "SOTC_OBJ125", "SOTC_SCROLL127", "SOTC_GEO126", "SOTC_CTL126", "SOTC_IMM128", "SOTC_TEXR128", "SOTC_PF134", "SOTC_CLIP134", "SOTC_POSE136", "SOTC_KEY136", "SOTC_EULER136", "SOTC_PF135", "SOTC_FIN138", "SOTC_SUB139", "SOTC_RND139", "SOTC_GC139", "SOTC_SORT140", "SOTC_QUAD140", "SOTC_CLIP140", "SOTC_PF141", "SOTC_PFC141", "SOTC_LIFTD1", "SOTC_LIFTD2", "SOTC_LIFTD3", "SOTC_LIFTD4", "SOTC_LIFTD5", "SOTC_LIFTALT", "SOTC_S9RT", "SOTC_S10DRAW", "SOTC_S4DISP", "SOTC_S11RT", "SOTC_S2COLL", "SOTC_S3CHARA", "SOTC_A9SWEEP", "SOTC_N2SND"};
-    inline signed char g_switch[kSwitchCount] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, -1}; // -1: not read yet (kA9Sweep: 0, off, until a9sweep::init reads it)
+                                                         "SOTC_SCRIPTVM", "SOTC_ISYS", "SOTC_HOTLIST48", "SOTC_FASTNATIVE", "SOTC_FASTNATIVE2", "SOTC_FASTNATIVE3", "SOTC_PTCL62", "SOTC_COLL63", "SOTC_TEX64", "SOTC_WALK67", "SOTC_PREF69", "SOTC_COLL71", "SOTC_CHARLOD78", "SOTC_PTCL79", "SOTC_SEG80", "SOTC_POSE82", "SOTC_WALK83", "SOTC_PTCL83", "SOTC_PROBE84", "SOTC_FIND84", "SOTC_GROUND85", "SOTC_PTCL89", "SOTC_PTCL91", "SOTC_JOIN95", "SOTC_DRAW95", "SOTC_EARLY95", "SOTC_OBJ96", "SOTC_SEL96", "SOTC_SEL97", "SOTC_LINKS97", "SOTC_PATH97", "SOTC_PLAN97", "SOTC_WALK101", "SOTC_SKIN101", "SOTC_LEAF101", "SOTC_OBJ101", "SOTC_SW102", "SOTC_PTCL103", "SOTC_SOLID103", "SOTC_GRP106", "SOTC_OAN106", "SOTC_AI106", "SOTC_COLL115", "SOTC_PKT117", "SOTC_GLV117", "SOTC_DRAW117", "SOTC_LEAF117", "SOTC_SYM120", "SOTC_HEAP120", "SOTC_FLUSH119", "SOTC_WALK119", "SOTC_PART119", "SOTC_VIEW119", "SOTC_PTCL123", "SOTC_BLEND123", "SOTC_SEG123", "SOTC_GAZE122", "SOTC_CLOTH122", "SOTC_QUAT122", "SOTC_KEYS122", "SOTC_FIN125", "SOTC_OBJ125", "SOTC_SCROLL127", "SOTC_GEO126", "SOTC_CTL126", "SOTC_IMM128", "SOTC_TEXR128", "SOTC_PF134", "SOTC_CLIP134", "SOTC_POSE136", "SOTC_KEY136", "SOTC_EULER136", "SOTC_PF135", "SOTC_FIN138", "SOTC_SUB139", "SOTC_RND139", "SOTC_GC139", "SOTC_SORT140", "SOTC_QUAD140", "SOTC_CLIP140", "SOTC_PF141", "SOTC_PFC141", "SOTC_LIFTD1", "SOTC_LIFTD2", "SOTC_LIFTD3", "SOTC_LIFTD4", "SOTC_LIFTD5", "SOTC_LIFTALT", "SOTC_S9RT", "SOTC_S10DRAW", "SOTC_S4DISP", "SOTC_S11RT", "SOTC_S2COLL", "SOTC_S3CHARA", "SOTC_A9SWEEP", "SOTC_N2SND", "SOTC_P4MOVE"};
+    inline signed char g_switch[kSwitchCount] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, -1, -1}; // -1: not read yet (kA9Sweep: 0, off, until a9sweep::init reads it)
     inline bool switchOn(int which)
     {
         signed char v = g_switch[which];
@@ -723,7 +741,7 @@ namespace sotc_decomp
             // (32.74/33.44 -> 33.54/34.48, game 29.90->29.00 ms, render mean 25.75->24.30 ms) with pf141=0.
             v = (which == kFind84 || which == kPtcl91 || which == kEarly95 || which == kObj96 || which == kCharLod78 ||
                  which == kPtcl79 || which == kOan106 || which == kFlush119 || which == kWalk119 || which == kPart119 || which == kView119 ||
-                 which == kGaze122 || which == kTexr128 || which == kCtl126 || which == kSeg123 || which == kPose136
+                 which == kGaze122 || which == kTexr128 || which == kCtl126 || which == kSeg123 || which == kPose136 || which == kP4Move
 #if defined(__linux__) && defined(__aarch64__)
                  || which == kPf141 || which == kPfc141
 #endif
@@ -883,6 +901,7 @@ namespace sotc_decomp
     // job starts a camera earlier. Not exact: the step sees the camera of the
     // frame before (culling, distances); the clip is left to the walk.
     inline bool early95On() { return switchOn(kEarly95); }
+    inline bool p4moveOn() { return switchOn(kP4Move); }
     inline bool s9RtOn() { return switchOn(kS9Rt); }
     inline bool s10DrawOn() { return switchOn(kS10Draw); }
     inline bool s4DispOn() { return switchOn(kS4Disp); }
