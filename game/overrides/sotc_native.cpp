@@ -6968,6 +6968,31 @@ namespace sotc_native
 #endif
             sotc_decomp::fastStatsTick(frame);
             ps2_lean::frameTick(frame);
+            {
+                const native_renderer::Tuning &tune = native_renderer::tuning();
+                static bool s_p4MenuInit = false, s_p4MenuLast = false, s_p2MenuLast = false;
+                if (!s_p4MenuInit)
+                {
+                    s_p4MenuInit = true;
+                    s_p4MenuLast = tune.p4Move;
+                    s_p2MenuLast = tune.p2Ptcl;
+                    sotc_decomp::setSwitch(sotc_decomp::kP4Move, tune.p4Move);
+                    sotc_decomp::setSwitch(sotc_decomp::kP2Ptcl, tune.p2Ptcl);
+                }
+                else
+                {
+                    if (tune.p4Move != s_p4MenuLast)
+                    {
+                        s_p4MenuLast = tune.p4Move;
+                        sotc_decomp::setSwitch(sotc_decomp::kP4Move, tune.p4Move);
+                    }
+                    if (tune.p2Ptcl != s_p2MenuLast)
+                    {
+                        s_p2MenuLast = tune.p2Ptcl;
+                        sotc_decomp::setSwitch(sotc_decomp::kP2Ptcl, tune.p2Ptcl);
+                    }
+                }
+            }
             sotc_decomp::abTick(frame);
             native_renderer::beginFrame();
             // SOTC_DRAW_DUMP_FRAMES=f,f,... (debugging): those frames' draws to
