@@ -59,6 +59,7 @@ double ps2xLinuxLastCapSleepMs();
 #include <vector>
 
 #if defined(__linux__)
+#include <dirent.h>
 #include <pthread.h>
 #include <sched.h>
 #include <sys/stat.h>
@@ -174,6 +175,46 @@ inline GLenum astcBlockToFormat(uint8_t bx, uint8_t by)
     if (bx == 8 && by == 6) return GL_COMPRESSED_RGBA_ASTC_8x6_KHR;
     if (bx == 8 && by == 8) return GL_COMPRESSED_RGBA_ASTC_8x8_KHR;
     return 0;
+}
+
+inline uint8_t astcBlockToFmtCode(uint8_t bx, uint8_t by)
+{
+    if (bx == 4 && by == 4) return 3u;
+    if (bx == 5 && by == 4) return 4u;
+    if (bx == 5 && by == 5) return 5u;
+    if (bx == 6 && by == 5) return 6u;
+    if (bx == 6 && by == 6) return 7u;
+    if (bx == 8 && by == 5) return 8u;
+    if (bx == 8 && by == 6) return 9u;
+    if (bx == 8 && by == 8) return 10u;
+    return 0u;
+}
+
+inline GLenum fmtCodeToGlInternal(uint8_t fmtCode, uint8_t &outBx, uint8_t &outBy)
+{
+    outBx = outBy = 0;
+    switch (fmtCode)
+    {
+    case 0u: return GL_RGB565;
+    case 1u: return GL_RGB5_A1;
+    case 2u: return GL_RGBA8;
+    case 3u: outBx = 4; outBy = 4; return GL_COMPRESSED_RGBA_ASTC_4x4_KHR;
+    case 4u: outBx = 5; outBy = 4; return GL_COMPRESSED_RGBA_ASTC_5x4_KHR;
+    case 5u: outBx = 5; outBy = 5; return GL_COMPRESSED_RGBA_ASTC_5x5_KHR;
+    case 6u: outBx = 6; outBy = 5; return GL_COMPRESSED_RGBA_ASTC_6x5_KHR;
+    case 7u: outBx = 6; outBy = 6; return GL_COMPRESSED_RGBA_ASTC_6x6_KHR;
+    case 8u: outBx = 8; outBy = 5; return GL_COMPRESSED_RGBA_ASTC_8x5_KHR;
+    case 9u: outBx = 8; outBy = 6; return GL_COMPRESSED_RGBA_ASTC_8x6_KHR;
+    case 10u: outBx = 8; outBy = 8; return GL_COMPRESSED_RGBA_ASTC_8x8_KHR;
+    default: return GL_RGBA8;
+    }
+}
+
+inline uint64_t computeTexContentHash(const uint8_t *rgba, size_t len, uint32_t w, uint32_t h, uint32_t levels)
+{
+    const uint32_t meta[3] = {w, h, levels};
+    uint64_t hval = fnv1aHash(meta, sizeof(meta));
+    return fnv1aHash(rgba, len, hval);
 }
 
 #if defined(PS2X_MALI_GLES)
@@ -1230,8 +1271,10 @@ void bindProgUniforms(ShaderProg &out, GLuint p)
 }
 
 bool linkProgCached(ShaderProg &out, const char *name, const char *vsSrc, const char *fsSrc,
-                    const std::string &cacheDir, bool useCache)
+                    const std::string &cacheDir, bool useCache, bool *outFromCache = nullptr)
 {
+    if (outFromCache)
+        *outFromCache = false;
 #if defined(PS2X_MALI_GLES)
     std::string binPath;
     if (useCache && !cacheDir.empty())
@@ -1255,6 +1298,8 @@ bool linkProgCached(ShaderProg &out, const char *name, const char *vsSrc, const 
                     {
                         std::fclose(fp);
                         bindProgUniforms(out, p);
+                        if (outFromCache)
+                            *outFromCache = true;
                         return true;
                     }
                     glDeleteProgram(p);
@@ -1706,6 +1751,8 @@ public:
 
         if (const char *sc = std::getenv("SOTC_MALI_SHADER_CACHE_DIR"); sc && sc[0])
             m_shaderCacheDir = sc;
+        else if (const char *mc = std::getenv("PS2X_MEMCARD_DIR"); mc && mc[0])
+            m_shaderCacheDir = std::string(mc) + "/../shader_cache";
         else
             m_shaderCacheDir = "/tmp/celosia_mali_shaders";
     }
@@ -2187,32 +2234,68 @@ private:
         glGetIntegerv(GL_MAX_ARRAY_TEXTURE_LAYERS, &maxLayers);
         m_maxArrayLayers = static_cast<uint32_t>(std::clamp(maxLayers, 16, 256));
 
-        if (!linkProgCached(m_progOpaque, "opaque", kMaliWorldVert, kMaliOpaqueFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
-            !linkProgCached(m_progCut, "cut", kMaliWorldVert, kMaliCutFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
-            !linkProgCached(m_progScreen, "screen", kMaliScreenVert, kMaliScreenFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
-            !linkProgCached(m_progSkinOpaque, "skin_opaque", kMaliSkinVert, kMaliOpaqueFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
-            !linkProgCached(m_progSkinCut, "skin_cut", kMaliSkinVert, kMaliCutFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
-            !linkProgCached(m_progDepth, "depth", kMaliDepthVert, kMaliDepthFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
-            !linkProgCached(m_progPost, "post", kMaliPostVert, kMaliPostFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
-            !linkProgCached(m_progOpaqueFast, "opaque_fast", kMaliWorldVert, kMaliOpaqueFastFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
-            !linkProgCached(m_progCutFast, "cut_fast", kMaliWorldVert, kMaliCutFastFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
-            !linkProgCached(m_progSoftFast, "soft_fast", kMaliWorldVert, kMaliSoftFastFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
-            !linkProgCached(m_progSoft, "soft", kMaliWorldVert, kMaliSoftFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
-            !linkProgCached(m_progSkinOpaqueFast, "skin_opaque_fast", kMaliSkinVert, kMaliOpaqueFastFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
-            !linkProgCached(m_progSkinCutFast, "skin_cut_fast", kMaliSkinVert, kMaliCutFastFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
-            !linkProgCached(m_progSkinSoftFast, "skin_soft_fast", kMaliSkinVert, kMaliSoftFastFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
-            !linkProgCached(m_progArrOpaqueFast, "arr_opaque_fast", kMaliWorldArrVert, kMaliArrOpaqueFastFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
-            !linkProgCached(m_progArrCutFast, "arr_cut_fast", kMaliWorldArrVert, kMaliArrCutFastFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
-            !linkProgCached(m_progArrSoftFast, "arr_soft_fast", kMaliWorldArrVert, kMaliArrSoftFastFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
-            !linkProgCached(m_progArrOpaque, "arr_opaque", kMaliWorldArrVert, kMaliArrOpaqueFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
-            !linkProgCached(m_progArrCut, "arr_cut", kMaliWorldArrVert, kMaliArrCutFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
-            !linkProgCached(m_progArrSoft, "arr_soft", kMaliWorldArrVert, kMaliArrSoftFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
-            !linkProgCached(m_progWater, "water", kMaliWorldVert, kMaliWaterFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
-            !linkProgCached(m_progBloomMask, "bloom_mask", kMaliPostVert, kMaliBloomMaskFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
-            !linkProgCached(m_progKawase, "kawase", kMaliPostVert, kMaliKawaseFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
-            !linkProgCached(m_progTemporal, "temporal", kMaliPostVert, kMaliTemporalFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
-            !linkProgCached(m_progAo, "ao", kMaliPostVert, kMaliAoFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
-            !linkProgCached(m_progAoBlur, "ao_blur", kMaliPostVert, kMaliAoBlurFrag, m_shaderCacheDir, m_shaderCacheEnabled))
+#if defined(__linux__)
+        if (m_shaderCacheEnabled && !m_shaderCacheDir.empty())
+            ::mkdir(m_shaderCacheDir.c_str(), 0755);
+        if (m_dumpTexEnabled && !m_texDumpDir.empty())
+            ::mkdir(m_texDumpDir.c_str(), 0755);
+        m_astcFiles.clear();
+        if (m_hasAstc && !m_astcCacheDir.empty())
+        {
+            if (DIR *dp = ::opendir(m_astcCacheDir.c_str()))
+            {
+                while (struct dirent *de = ::readdir(dp))
+                {
+                    if (de->d_name[0] == '.')
+                        continue;
+                    const std::string fn(de->d_name);
+                    if ((fn.size() > 6 && fn.compare(fn.size() - 6, 6, ".astcm") == 0) ||
+                        (fn.size() > 5 && fn.compare(fn.size() - 5, 5, ".astc") == 0))
+                    {
+                        m_astcFiles.insert(fn);
+                    }
+                }
+                ::closedir(dp);
+            }
+        }
+#endif
+
+        uint32_t shHits = 0u, shMisses = 0u;
+        auto linkTracked = [&](ShaderProg &out, const char *name, const char *vsSrc, const char *fsSrc) -> bool {
+            bool fromCache = false;
+            if (!linkProgCached(out, name, vsSrc, fsSrc, m_shaderCacheDir, m_shaderCacheEnabled, &fromCache))
+                return false;
+            if (fromCache) ++shHits;
+            else ++shMisses;
+            return true;
+        };
+
+        if (!linkTracked(m_progOpaque, "opaque", kMaliWorldVert, kMaliOpaqueFrag) ||
+            !linkTracked(m_progCut, "cut", kMaliWorldVert, kMaliCutFrag) ||
+            !linkTracked(m_progScreen, "screen", kMaliScreenVert, kMaliScreenFrag) ||
+            !linkTracked(m_progSkinOpaque, "skin_opaque", kMaliSkinVert, kMaliOpaqueFrag) ||
+            !linkTracked(m_progSkinCut, "skin_cut", kMaliSkinVert, kMaliCutFrag) ||
+            !linkTracked(m_progDepth, "depth", kMaliDepthVert, kMaliDepthFrag) ||
+            !linkTracked(m_progPost, "post", kMaliPostVert, kMaliPostFrag) ||
+            !linkTracked(m_progOpaqueFast, "opaque_fast", kMaliWorldVert, kMaliOpaqueFastFrag) ||
+            !linkTracked(m_progCutFast, "cut_fast", kMaliWorldVert, kMaliCutFastFrag) ||
+            !linkTracked(m_progSoftFast, "soft_fast", kMaliWorldVert, kMaliSoftFastFrag) ||
+            !linkTracked(m_progSoft, "soft", kMaliWorldVert, kMaliSoftFrag) ||
+            !linkTracked(m_progSkinOpaqueFast, "skin_opaque_fast", kMaliSkinVert, kMaliOpaqueFastFrag) ||
+            !linkTracked(m_progSkinCutFast, "skin_cut_fast", kMaliSkinVert, kMaliCutFastFrag) ||
+            !linkTracked(m_progSkinSoftFast, "skin_soft_fast", kMaliSkinVert, kMaliSoftFastFrag) ||
+            !linkTracked(m_progArrOpaqueFast, "arr_opaque_fast", kMaliWorldArrVert, kMaliArrOpaqueFastFrag) ||
+            !linkTracked(m_progArrCutFast, "arr_cut_fast", kMaliWorldArrVert, kMaliArrCutFastFrag) ||
+            !linkTracked(m_progArrSoftFast, "arr_soft_fast", kMaliWorldArrVert, kMaliArrSoftFastFrag) ||
+            !linkTracked(m_progArrOpaque, "arr_opaque", kMaliWorldArrVert, kMaliArrOpaqueFrag) ||
+            !linkTracked(m_progArrCut, "arr_cut", kMaliWorldArrVert, kMaliArrCutFrag) ||
+            !linkTracked(m_progArrSoft, "arr_soft", kMaliWorldArrVert, kMaliArrSoftFrag) ||
+            !linkTracked(m_progWater, "water", kMaliWorldVert, kMaliWaterFrag) ||
+            !linkTracked(m_progBloomMask, "bloom_mask", kMaliPostVert, kMaliBloomMaskFrag) ||
+            !linkTracked(m_progKawase, "kawase", kMaliPostVert, kMaliKawaseFrag) ||
+            !linkTracked(m_progTemporal, "temporal", kMaliPostVert, kMaliTemporalFrag) ||
+            !linkTracked(m_progAo, "ao", kMaliPostVert, kMaliAoFrag) ||
+            !linkTracked(m_progAoBlur, "ao_blur", kMaliPostVert, kMaliAoBlurFrag))
         {
             return false;
         }
@@ -2239,9 +2322,10 @@ private:
         makeTarget(m_bgTarget, 256, 256, true);
         m_lastPresentTime = std::chrono::steady_clock::now();
         m_initialized = true;
-        std::fprintf(stderr, "[mali] Phase 9 GLES 3.2 backend up (async=%d mailbox=%d keepCur=%d direct=%d fastSh=%d texArr=%d(maxL=%u,bud=%lluM) merge=%d(chunk=%u) inst=%d atPass2=%d cull=%d skin=%d tex5551=%d water=%d bloom=%d exp=%d dof=%d mb=%d ca=%d flare=%d ao=%d upBud=%llu drs=%d@%dfps[%.2f..%.2f] drawOnly=%d budget=%lluM)\n",
+        std::fprintf(stderr, "[mali] Phase 10 GLES 3.2 backend up (async=%d mailbox=%d keepCur=%d direct=%d fastSh=%d shCache=%u/%u astcIdx=%zu texArr=%d(maxL=%u,bud=%lluM) merge=%d(chunk=%u) inst=%d atPass2=%d cull=%d skin=%d tex5551=%d water=%d bloom=%d exp=%d dof=%d mb=%d ca=%d flare=%d ao=%d upBud=%llu drs=%d@%dfps[%.2f..%.2f] drawOnly=%d budget=%lluM)\n",
                      m_asyncEnabled ? 1 : 0, m_mailboxEnabled ? 1 : 0, m_keepCurrentEnabled ? 1 : 0,
                      m_directScanoutEnabled ? 1 : 0, m_fastShadersEnabled ? 1 : 0,
+                     shHits, shMisses, m_astcFiles.size(),
                      m_texArrayEnabled ? 1 : 0, m_maxArrayLayers,
                      static_cast<unsigned long long>(m_texArrayBudgetBytes >> 20),
                      m_mergeEnabled ? 1 : 0, m_mergeChunkMax, m_instancingEnabled ? 1 : 0,
@@ -2673,6 +2757,12 @@ private:
                 return false;
         }
 
+        uint8_t bx = 0, by = 0;
+        const GLenum internalFmt = fmtCodeToGlInternal(fmtCode, bx, by);
+#if !defined(PS2X_MALI_GLES)
+        if (bx > 0u)
+            return false;
+#endif
         const uint32_t maxDim = std::max(w, h);
         const uint32_t tierCap = (maxDim >= 256u) ? 16u : ((maxDim >= 128u) ? 32u : 64u);
         const uint32_t cap = std::min(m_maxArrayLayers, tierCap);
@@ -2682,7 +2772,10 @@ private:
             const uint64_t bpp = (fmtCode < 2u) ? 2ull : 4ull;
             for (uint32_t lv = 0; lv < levels; ++lv)
             {
-                mipBytes += static_cast<uint64_t>(bw) * bh * bpp;
+                if (bx > 0u)
+                    mipBytes += static_cast<uint64_t>((bw + bx - 1u) / bx) * ((bh + by - 1u) / by) * 16ull;
+                else
+                    mipBytes += static_cast<uint64_t>(bw) * bh * bpp;
                 bw = std::max(1u, bw >> 1);
                 bh = std::max(1u, bh >> 1);
             }
@@ -2716,7 +2809,6 @@ private:
         glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
         arr.wrapClamp = 0u;
 
-        const GLenum internalFmt = (fmtCode == 0u) ? GL_RGB565 : (fmtCode == 1u ? GL_RGB5_A1 : GL_RGBA8);
 #if defined(PS2X_MALI_GLES)
         glTexStorage3D(GL_TEXTURE_2D_ARRAY, static_cast<GLsizei>(levels), internalFmt,
                        static_cast<GLsizei>(w), static_cast<GLsizei>(h), static_cast<GLsizei>(cap));
@@ -2750,14 +2842,18 @@ private:
 
     void uploadTextureOnGl(const UploadCmd &cmd, uint64_t frameNum)
     {
-        if (m_dumpTexEnabled && m_dumpedTexIds.insert(cmd.id).second)
+        const uint64_t contentHash = (m_dumpTexEnabled || (m_hasAstc && !m_astcFiles.empty()))
+            ? computeTexContentHash(cmd.rgba.data(), cmd.rgba.size(), cmd.width, cmd.height, cmd.levels)
+            : 0ull;
+        if (m_dumpTexEnabled && m_dumpedTexIds.insert(contentHash).second)
         {
-            char fname[96];
-            std::snprintf(fname, sizeof(fname), "%s/%016llx_%ux%u.rgba",
-                          m_texDumpDir.c_str(), static_cast<unsigned long long>(cmd.id), cmd.width, cmd.height);
+            char fname[128];
+            std::snprintf(fname, sizeof(fname), "%s/%016llx_%ux%u_L%u.rgba",
+                          m_texDumpDir.c_str(), static_cast<unsigned long long>(contentHash),
+                          cmd.width, cmd.height, cmd.levels);
             if (FILE *fp = std::fopen(fname, "wb"))
             {
-                std::fwrite(cmd.rgba.data(), 1, static_cast<size_t>(cmd.width) * cmd.height * 4u, fp);
+                std::fwrite(cmd.rgba.data(), 1, cmd.rgba.size(), fp);
                 std::fclose(fp);
             }
         }
@@ -2791,7 +2887,7 @@ private:
         tx.maxAlpha = maxA;
         tx.binaryAlpha = allBinaryAlpha;
 
-        if (m_hasAstc && !m_astcCacheDir.empty() && tryUploadAstcFromCache(cmd.id, tx))
+        if (m_hasAstc && !m_astcFiles.empty() && tryUploadAstcFromCache(contentHash, cmd.id, tx))
         {
             ++m_astcHits;
             if (m_uploadBudgetUs)
@@ -4011,13 +4107,13 @@ private:
                 }
                 prevStatic = &q;
             }
-            std::fprintf(stderr, "[mali:stats] frame=%llu draws=%u mergeSaved=%u instSaved=%u pass2Skip=%u culled=%u direct=%d drop=%llu drs=%.2f drawMs=%.2f postMs=%.2f swapMs=%.2f capMs=%.2f renderMs=%.2f mem=%.1f/%.1fM arr=%u arrMiss=%u/%llu b=%u/%u/%u/%u b2s=%u brk=%u/%u/%u/%u/%u/%u b2brk=%u/%u/%u/%u/%u/%u skin=%u/%u/%u upQ=%zu\n",
+            std::fprintf(stderr, "[mali:stats] frame=%llu draws=%u mergeSaved=%u instSaved=%u pass2Skip=%u culled=%u direct=%d drop=%llu drs=%.2f drawMs=%.2f postMs=%.2f swapMs=%.2f capMs=%.2f renderMs=%.2f mem=%.1f/%.1fM arr=%u arrMiss=%u/%llu astc=%u b=%u/%u/%u/%u b2s=%u brk=%u/%u/%u/%u/%u/%u b2brk=%u/%u/%u/%u/%u/%u skin=%u/%u/%u upQ=%zu\n",
                          static_cast<unsigned long long>(m_frameNum), m_drawCallsThisFrame,
                          m_mergeSavedThisFrame, m_instSavedThisFrame, m_pass2SkipThisFrame, m_culledThisFrame,
                          m_lastPresentedDirect ? 1 : 0,
                          static_cast<unsigned long long>(m_droppedFrames.load(std::memory_order_relaxed)),
                          m_drsScale, m_emaDrawMs, m_emaPostMs, m_emaSwapMs, m_emaCapMs, m_emaFrameMs, gpuMb, budMb, liveArrays,
-                         m_arrMissDrawsThisFrame, static_cast<unsigned long long>(m_arrMissUploads),
+                         m_arrMissDrawsThisFrame, static_cast<unsigned long long>(m_arrMissUploads), m_astcHits,
                          bCnt[0], bCnt[1], bCnt[2], bCnt[3], m_b2SavedThisFrame,
                          brkClip, brkArr, brkState, brkDyn, brkSkin, brkNoSrc,
                          b2BrkClip, b2BrkArr, b2BrkState, b2BrkDyn, b2BrkSkin, b2BrkNoSrc,
@@ -4071,51 +4167,158 @@ private:
         glVertexAttribPointer(5, 3, GL_FLOAT, GL_FALSE, sizeof(SkinVertex), reinterpret_cast<const void *>(offsetof(SkinVertex, weight)));
     }
 
-    bool tryUploadAstcFromCache(uint64_t id, MaliTex &tx)
+    bool tryUploadAstcFromCache(uint64_t contentHash, uint64_t legacyId, MaliTex &tx)
     {
-        char hex[32];
-        std::snprintf(hex, sizeof(hex), "%016llx.astc", static_cast<unsigned long long>(id));
-        const std::string path = m_astcCacheDir + "/" + hex;
+        char nameBuf[48];
+        std::snprintf(nameBuf, sizeof(nameBuf), "%016llx.astcm", static_cast<unsigned long long>(contentHash));
+        bool isMulti = m_astcFiles.count(nameBuf) != 0u;
+        if (!isMulti)
+        {
+            std::snprintf(nameBuf, sizeof(nameBuf), "%016llx.astc", static_cast<unsigned long long>(contentHash));
+            if (m_astcFiles.count(nameBuf) == 0u)
+            {
+                std::snprintf(nameBuf, sizeof(nameBuf), "%016llx.astc", static_cast<unsigned long long>(legacyId));
+                if (m_astcFiles.count(nameBuf) == 0u)
+                    return false;
+            }
+        }
+
+        const std::string path = m_astcCacheDir + "/" + nameBuf;
         FILE *fp = std::fopen(path.c_str(), "rb");
         if (!fp)
             return false;
 
-        uint8_t hdr[16] = {};
-        if (std::fread(hdr, 1, 16, fp) != 16 ||
-            hdr[0] != 0x13u || hdr[1] != 0xABu || hdr[2] != 0xA1u || hdr[3] != 0x5Cu)
+        uint8_t bx = 0, by = 0;
+        uint32_t w = 0, h = 0, levels = 1u;
+        GLenum fmt = 0;
+        std::vector<uint32_t> levelSizes;
+        if (isMulti)
         {
-            std::fclose(fp);
-            return false;
+            uint8_t hdr[12] = {};
+            if (std::fread(hdr, 1, 12, fp) != 12 ||
+                hdr[0] != 'M' || hdr[1] != 'T' || hdr[2] != 'C' || hdr[3] != '1')
+            {
+                std::fclose(fp);
+                return false;
+            }
+            bx = hdr[4];
+            by = hdr[5];
+            levels = hdr[6];
+            w = static_cast<uint32_t>(hdr[8]) | (static_cast<uint32_t>(hdr[9]) << 8);
+            h = static_cast<uint32_t>(hdr[10]) | (static_cast<uint32_t>(hdr[11]) << 8);
+            fmt = astcBlockToFormat(bx, by);
+            if (!fmt || !w || !h || levels == 0u || levels > 12u)
+            {
+                std::fclose(fp);
+                return false;
+            }
+            levelSizes.resize(levels);
+            m_astcScratch.clear();
+            uint32_t lw = w, lh = h;
+            for (uint32_t lv = 0; lv < levels; ++lv)
+            {
+                uint32_t lvBytes = 0;
+                if (std::fread(&lvBytes, sizeof(lvBytes), 1, fp) != 1)
+                {
+                    std::fclose(fp);
+                    return false;
+                }
+                const uint32_t expBytes = ((lw + bx - 1u) / bx) * ((lh + by - 1u) / by) * 16u;
+                if (lvBytes != expBytes)
+                {
+                    std::fclose(fp);
+                    return false;
+                }
+                const size_t off = m_astcScratch.size();
+                m_astcScratch.resize(off + lvBytes);
+                if (std::fread(m_astcScratch.data() + off, 1, lvBytes, fp) != lvBytes)
+                {
+                    std::fclose(fp);
+                    return false;
+                }
+                levelSizes[lv] = lvBytes;
+                lw = std::max(1u, lw >> 1);
+                lh = std::max(1u, lh >> 1);
+            }
         }
-        const uint8_t bx = hdr[4], by = hdr[5];
-        const GLenum fmt = astcBlockToFormat(bx, by);
-        const uint32_t w = static_cast<uint32_t>(hdr[7]) | (static_cast<uint32_t>(hdr[8]) << 8) | (static_cast<uint32_t>(hdr[9]) << 16);
-        const uint32_t h = static_cast<uint32_t>(hdr[10]) | (static_cast<uint32_t>(hdr[11]) << 8) | (static_cast<uint32_t>(hdr[12]) << 16);
-        if (!fmt || !w || !h)
+        else
         {
-            std::fclose(fp);
-            return false;
-        }
-        const uint32_t blocksX = (w + bx - 1u) / bx;
-        const uint32_t blocksY = (h + by - 1u) / by;
-        const size_t dataBytes = static_cast<size_t>(blocksX) * blocksY * 16u;
-        m_astcScratch.resize(dataBytes);
-        if (std::fread(m_astcScratch.data(), 1, dataBytes, fp) != dataBytes)
-        {
-            std::fclose(fp);
-            return false;
+            uint8_t hdr[16] = {};
+            if (std::fread(hdr, 1, 16, fp) != 16 ||
+                hdr[0] != 0x13u || hdr[1] != 0xABu || hdr[2] != 0xA1u || hdr[3] != 0x5Cu)
+            {
+                std::fclose(fp);
+                return false;
+            }
+            bx = hdr[4];
+            by = hdr[5];
+            fmt = astcBlockToFormat(bx, by);
+            w = static_cast<uint32_t>(hdr[7]) | (static_cast<uint32_t>(hdr[8]) << 8) | (static_cast<uint32_t>(hdr[9]) << 16);
+            h = static_cast<uint32_t>(hdr[10]) | (static_cast<uint32_t>(hdr[11]) << 8) | (static_cast<uint32_t>(hdr[12]) << 16);
+            if (!fmt || !w || !h)
+            {
+                std::fclose(fp);
+                return false;
+            }
+            const uint32_t blocksX = (w + bx - 1u) / bx;
+            const uint32_t blocksY = (h + by - 1u) / by;
+            const uint32_t dataBytes = blocksX * blocksY * 16u;
+            m_astcScratch.resize(dataBytes);
+            if (std::fread(m_astcScratch.data(), 1, dataBytes, fp) != dataBytes)
+            {
+                std::fclose(fp);
+                return false;
+            }
+            levelSizes.push_back(dataBytes);
         }
         std::fclose(fp);
 
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        const uint8_t fmtCode = astcBlockToFmtCode(bx, by);
+        tx.pendingEvict = false;
+        releaseTexArrayLayer(tx.arrayId, tx.arrayLayer);
+        tx.arrayId = -1;
+        tx.arrayLayer = 0;
+        const bool arrEligible = m_texArrayEnabled && fmtCode >= 3u && w >= 8u && w <= 256u && h >= 8u && h <= 256u;
+        if (arrEligible && !allocTexArraySlot(w, h, levels, fmtCode, tx.arrayId, tx.arrayLayer))
+            ++m_arrMissUploads;
+
+        glBindTexture(GL_TEXTURE_2D, tx.tex);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, levels > 1u ? GL_LINEAR_MIPMAP_NEAREST : GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
-        glCompressedTexImage2D(GL_TEXTURE_2D, 0, fmt, static_cast<GLsizei>(w), static_cast<GLsizei>(h), 0,
-                               static_cast<GLsizei>(dataBytes), m_astcScratch.data());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(levels - 1u));
+
+        size_t off = 0;
+        uint32_t lw = w, lh = h;
+        for (uint32_t lv = 0; lv < levels; ++lv)
+        {
+            const uint32_t lvBytes = levelSizes[lv];
+            glCompressedTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(lv), fmt,
+                                   static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 0,
+                                   static_cast<GLsizei>(lvBytes), m_astcScratch.data() + off);
+            if (tx.arrayId >= 0)
+            {
+                glBindTexture(GL_TEXTURE_2D_ARRAY, m_texArrays[tx.arrayId].tex);
+                glCompressedTexSubImage3D(GL_TEXTURE_2D_ARRAY, static_cast<GLint>(lv),
+                                          0, 0, static_cast<GLint>(tx.arrayLayer),
+                                          static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 1,
+                                          fmt, static_cast<GLsizei>(lvBytes), m_astcScratch.data() + off);
+            }
+            off += lvBytes;
+            lw = std::max(1u, lw >> 1);
+            lh = std::max(1u, lh >> 1);
+        }
+        if (tx.arrayId >= 0)
+            m_lastTexArr = ~0u;
+
+        if (m_gpuTexBytes >= tx.gpuBytes)
+            m_gpuTexBytes -= tx.gpuBytes;
+        tx.gpuBytes = static_cast<uint64_t>(m_astcScratch.size());
+        m_gpuTexBytes += tx.gpuBytes;
         tx.width = w;
         tx.height = h;
-        tx.levels = 1;
+        tx.levels = levels;
         tx.astc = true;
+        tx.tex16 = false;
         return true;
     }
 
@@ -4803,6 +5006,7 @@ private:
     std::string m_astcCacheDir;
     std::string m_texDumpDir;
     std::string m_shaderCacheDir;
+    std::unordered_set<std::string> m_astcFiles;
 
     // Game-thread state
     uint64_t m_recFrameNum = 0;

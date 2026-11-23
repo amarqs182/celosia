@@ -55,7 +55,12 @@ echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null 2>&1
 export SDL_GAMECONTROLLERCONFIG="1900bb3e4b4800000011000000010000,GO-Super Gamepad,a:b0,b:b1,back:b12,dpdown:b9,dpleft:b10,dpright:b11,dpup:b8,guide:b16,leftshoulder:b4,leftstick:b14,lefttrigger:b6,leftx:a0,lefty:a1,rightshoulder:b5,rightstick:b15,righttrigger:b7,rightx:a2,righty:a3,start:b13,x:b2,y:b3,platform:Linux,"
 unset PS2X_INPUT_SCRIPT PS2X_INPUT_CLOCK PS2X_INPUT_RECORD SOTC_INPUT_RECORD SOTC_INPUT_REPLAY PS2X_SNAPSHOT_DIR
 export PS2X_MEMCARD_DIR="$PORT_DIR/memcards"
-mkdir -p "$PORT_DIR/memcards"
+mkdir -p "$PORT_DIR/memcards" "$PORT_DIR/shader_cache" "$PORT_DIR/tex_cache" "$PORT_DIR/mesh_cache"
+export SOTC_MALI_SHADER_CACHE_DIR="$PORT_DIR/shader_cache"
+export SOTC_MALI_TEX_CACHE="$PORT_DIR/tex_cache"
+export SOTC_MESH_CACHE=1
+export SOTC_MESH_CACHE_DIR="$PORT_DIR/mesh_cache"
+export SOTC_MESH_CACHE_MB=96
 
 # 1. Renderizador Nativo OpenGL ES 3.2 na GPU Mali-G31 (Resolucao Nativa 100% 640x480 & Audio Mono)
 export SOTC_NATIVE=1

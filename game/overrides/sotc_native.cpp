@@ -1,5 +1,8 @@
 #include <tuple>
 #include "sotc_replay.h"
+#if defined(__linux__)
+#include <sys/stat.h>
+#endif
 // Shadow of the Colossus: models drawn by the native renderer
 // (runtime/native_renderer.h) straight from the game's own model data, read
 // at modelDisp (docs/native_renderer_map.md). SOTC_NATIVE=1 shows that
@@ -694,6 +697,192 @@ namespace sotc_native
         );
 
         return true;
+    }
+
+    // Phase 10: Persistent content-addressed static mesh disk cache (`static_meshes_v1.bin`).
+    // Stores meshopt-optimized vertices/indices keyed by 64-bit FNV-1a hash of the raw PS2 packet
+    // + build flags so area streaming skips readBatches/triangulate/meshoptimizer on repeat loads.
+    struct StaticMeshDiskCache
+    {
+        struct RecHdr
+        {
+            uint32_t magic;
+            uint32_t payloadLen;
+            uint64_t key;
+            uint32_t v1Count;
+            uint32_t i1Count;
+            uint32_t v2Count;
+            uint32_t i2Count;
+            uint32_t flags;
+            uint32_t reserved;
+        };
+        static constexpr uint32_t kMagic = 0x314D4353u; // 'SCM1'
+
+        std::mutex mtx;
+        bool initialized = false;
+        bool enabled = false;
+        FILE *fp = nullptr;
+        uint64_t fileBytes = 0;
+        uint64_t maxBytes = 96ull * 1024ull * 1024ull;
+        uint64_t hits = 0;
+        uint64_t stores = 0;
+        std::unordered_map<uint64_t, uint64_t> offsets;
+
+        ~StaticMeshDiskCache()
+        {
+            if (fp)
+                std::fclose(fp);
+        }
+
+        void ensureInit()
+        {
+            if (initialized)
+                return;
+            initialized = true;
+            const char *enEnv = std::getenv("SOTC_MESH_CACHE");
+            if (enEnv && std::atoi(enEnv) == 0)
+                return;
+            std::string dir;
+            if (const char *d = std::getenv("SOTC_MESH_CACHE_DIR"); d && d[0])
+                dir = d;
+            else if (const char *mc = std::getenv("PS2X_MEMCARD_DIR"); mc && mc[0])
+                dir = std::string(mc) + "/../mesh_cache";
+            else
+                return;
+            if (const char *mb = std::getenv("SOTC_MESH_CACHE_MB"); mb && mb[0])
+                maxBytes = static_cast<uint64_t>(std::clamp(std::atoi(mb), 8, 512)) * 1024ull * 1024ull;
+
+#if defined(__linux__)
+            ::mkdir(dir.c_str(), 0755);
+#endif
+            const std::string path = dir + "/static_meshes_v1.bin";
+            fp = std::fopen(path.c_str(), "a+b");
+            if (!fp)
+            {
+                fp = std::fopen(path.c_str(), "w+b");
+                if (!fp)
+                    return;
+            }
+            std::fseek(fp, 0, SEEK_SET);
+            uint64_t pos = 0;
+            RecHdr hdr{};
+            while (std::fread(&hdr, sizeof(hdr), 1, fp) == 1)
+            {
+                if (hdr.magic != kMagic || hdr.payloadLen > 32u * 1024u * 1024u)
+                    break;
+                const uint64_t expPayload =
+                    static_cast<uint64_t>(hdr.v1Count + hdr.v2Count) * sizeof(native_renderer::Vertex) +
+                    static_cast<uint64_t>(hdr.i1Count + hdr.i2Count) * sizeof(uint32_t);
+                if (expPayload != hdr.payloadLen)
+                    break;
+                const uint64_t nextPos = pos + sizeof(RecHdr) + hdr.payloadLen;
+                if (std::fseek(fp, static_cast<long>(hdr.payloadLen), SEEK_CUR) != 0)
+                    break;
+                offsets[hdr.key] = pos;
+                pos = nextPos;
+            }
+            fileBytes = pos;
+            std::fseek(fp, static_cast<long>(fileBytes), SEEK_SET);
+            enabled = true;
+        }
+
+        bool lookup(uint64_t key, bool &isLit, bool &indexed1,
+                    std::vector<native_renderer::Vertex> &v1, std::vector<uint32_t> &i1,
+                    bool &indexed2, std::vector<native_renderer::Vertex> &v2, std::vector<uint32_t> &i2)
+        {
+            std::lock_guard<std::mutex> lk(mtx);
+            ensureInit();
+            if (!enabled || !fp)
+                return false;
+            auto it = offsets.find(key);
+            if (it == offsets.end())
+                return false;
+            if (std::fseek(fp, static_cast<long>(it->second), SEEK_SET) != 0)
+                return false;
+            RecHdr hdr{};
+            if (std::fread(&hdr, sizeof(hdr), 1, fp) != 1 || hdr.magic != kMagic || hdr.key != key)
+                return false;
+            isLit = (hdr.flags & 1u) != 0u;
+            indexed1 = (hdr.flags & 4u) != 0u;
+            indexed2 = (hdr.flags & 8u) != 0u;
+            v1.resize(hdr.v1Count);
+            i1.resize(hdr.i1Count);
+            v2.resize(hdr.v2Count);
+            i2.resize(hdr.i2Count);
+            if ((hdr.v1Count && std::fread(v1.data(), sizeof(native_renderer::Vertex), hdr.v1Count, fp) != hdr.v1Count) ||
+                (hdr.i1Count && std::fread(i1.data(), sizeof(uint32_t), hdr.i1Count, fp) != hdr.i1Count) ||
+                (hdr.v2Count && std::fread(v2.data(), sizeof(native_renderer::Vertex), hdr.v2Count, fp) != hdr.v2Count) ||
+                (hdr.i2Count && std::fread(i2.data(), sizeof(uint32_t), hdr.i2Count, fp) != hdr.i2Count))
+            {
+                v1.clear(); i1.clear(); v2.clear(); i2.clear();
+                return false;
+            }
+            ++hits;
+            return true;
+        }
+
+        void store(uint64_t key, bool isLit, bool twoPasses, bool indexed1,
+                   const std::vector<native_renderer::Vertex> &v1, const std::vector<uint32_t> &i1,
+                   bool indexed2, const std::vector<native_renderer::Vertex> &v2, const std::vector<uint32_t> &i2)
+        {
+            std::lock_guard<std::mutex> lk(mtx);
+            ensureInit();
+            if (!enabled || !fp || offsets.find(key) != offsets.end())
+                return;
+            const uint64_t payloadLen =
+                static_cast<uint64_t>(v1.size() + v2.size()) * sizeof(native_renderer::Vertex) +
+                static_cast<uint64_t>(i1.size() + i2.size()) * sizeof(uint32_t);
+            if (payloadLen == 0u || fileBytes + sizeof(RecHdr) + payloadLen > maxBytes)
+                return;
+            RecHdr hdr{};
+            hdr.magic = kMagic;
+            hdr.payloadLen = static_cast<uint32_t>(payloadLen);
+            hdr.key = key;
+            hdr.v1Count = static_cast<uint32_t>(v1.size());
+            hdr.i1Count = static_cast<uint32_t>(i1.size());
+            hdr.v2Count = static_cast<uint32_t>(v2.size());
+            hdr.i2Count = static_cast<uint32_t>(i2.size());
+            hdr.flags = (isLit ? 1u : 0u) | (twoPasses ? 2u : 0u) | (indexed1 ? 4u : 0u) | (indexed2 ? 8u : 0u);
+            std::fseek(fp, static_cast<long>(fileBytes), SEEK_SET);
+            if (std::fwrite(&hdr, sizeof(hdr), 1, fp) != 1 ||
+                (hdr.v1Count && std::fwrite(v1.data(), sizeof(native_renderer::Vertex), hdr.v1Count, fp) != hdr.v1Count) ||
+                (hdr.i1Count && std::fwrite(i1.data(), sizeof(uint32_t), hdr.i1Count, fp) != hdr.i1Count) ||
+                (hdr.v2Count && std::fwrite(v2.data(), sizeof(native_renderer::Vertex), hdr.v2Count, fp) != hdr.v2Count) ||
+                (hdr.i2Count && std::fwrite(i2.data(), sizeof(uint32_t), hdr.i2Count, fp) != hdr.i2Count))
+            {
+                return;
+            }
+            std::fflush(fp);
+            offsets[key] = fileBytes;
+            fileBytes += sizeof(RecHdr) + payloadLen;
+            ++stores;
+        }
+    };
+
+    inline StaticMeshDiskCache &staticMeshDiskCache()
+    {
+        static StaticMeshDiskCache cache;
+        return cache;
+    }
+
+    inline uint64_t staticMeshContentKey(const uint8_t *raw, uint32_t size, bool twoPasses, bool reorderSafe, int meshoptModeVal)
+    {
+        uint64_t h = 14695981039346656037ull;
+        const uint32_t meta[2] = {size, (twoPasses ? 1u : 0u) | (reorderSafe ? 2u : 0u) | (static_cast<uint32_t>(meshoptModeVal & 3) << 2)};
+        for (uint32_t w : meta)
+        {
+            for (int b = 0; b < 4; ++b)
+            {
+                h ^= static_cast<uint8_t>((w >> (b * 8)) & 0xFFu);
+                h *= 1099511628211ull;
+            }
+        }
+        for (uint32_t i = 0; i < size; ++i)
+        {
+            h ^= raw[i];
+            h *= 1099511628211ull;
+        }
+        return h;
     }
 
     inline void uploadOptimizedStaticMesh(uint64_t id, const std::vector<native_renderer::Vertex> &verts, bool reorderSafe)
@@ -9968,6 +10157,23 @@ namespace sotc_native
         {
             try
             {
+                const int mode = meshoptMode();
+                const uint32_t rawOff = data - base;
+                const uint64_t cacheKey = (rawOff + size <= bytes.size())
+                    ? staticMeshContentKey(bytes.data() + rawOff, size, twoPasses, reorderSafe, mode)
+                    : 0ull;
+                if (cacheKey && staticMeshDiskCache().lookup(cacheKey, isLit, indexed, opt_verts, opt_indices, indexed_second, opt_second_verts, opt_second_indices))
+                {
+                    if (!indexed)
+                        vertices.swap(opt_verts);
+                    if (twoPasses && !indexed_second)
+                        second.swap(opt_second_verts);
+                    isSkinned = false;
+                    ok = true;
+                    std::vector<uint8_t>().swap(bytes);
+                    return;
+                }
+
                 std::vector<Strip> strips;
                 readBatchesFrom(CopyMem{base, &bytes}, data, size, strips);
                 isSkinned = skinned(strips);
@@ -9986,7 +10192,6 @@ namespace sotc_native
                         o.nz = v.nz;
                     };
                     triangulate(strips, place, vertices);
-                    const int mode = meshoptMode();
                     if (mode == 1)
                     {
                         indexed = optStaticMeshWithMeshopt(vertices, opt_verts, opt_indices, reorderSafe);
@@ -10022,6 +10227,13 @@ namespace sotc_native
                                 opt_second_indices.clear();
                             }
                         }
+                    }
+                    if (cacheKey)
+                    {
+                        staticMeshDiskCache().store(
+                            cacheKey, isLit, twoPasses,
+                            indexed, indexed ? opt_verts : vertices, opt_indices,
+                            indexed_second, indexed_second ? opt_second_verts : second, opt_second_indices);
                     }
                 }
                 ok = true;
@@ -11974,44 +12186,107 @@ namespace sotc_native
             else if (needsBuild && !usingFallback)
             {
                 SOTC_PROF_SCOPE(kHookBuild);
-                strips.clear();
-                readBatches(data, size, strips);
-                if (skinned(strips) && lit(strips))
-                    g_litPackets.insert(id);
-                if (skinned(strips))
+                const int mode = meshoptMode();
+                const uint64_t syncCacheKey = (!changedInPlace && ((data & 0x1FFFFFFu) + size <= 0x2000000u))
+                    ? staticMeshContentKey(g_ram + (data & 0x1FFFFFFu), size, twoPasses, reorderSafe, mode)
+                    : 0ull;
+                bool syncHit = false;
+                if (syncCacheKey)
                 {
-                    try
+                    bool hitLit = false, idx1 = false, idx2 = false;
+                    std::vector<native_renderer::Vertex> v1, v2;
+                    std::vector<uint32_t> i1, i2;
+                    if (staticMeshDiskCache().lookup(syncCacheKey, hitLit, idx1, v1, i1, idx2, v2, i2))
                     {
-                        skinnedPacket = &g_skinnedPackets.emplace(id, makeSkinnedPacket(std::move(strips))).first->second;
-                        g_skinnedIds.insert(id);
+                        if (hitLit)
+                            g_litPackets.insert(id);
+                        if (idx1)
+                            native_renderer::uploadIndexedMesh(id, v1.data(), static_cast<uint32_t>(v1.size()),
+                                                               i1.data(), static_cast<uint32_t>(i1.size()));
+                        else
+                            native_renderer::uploadMesh(id, v1.data(), static_cast<uint32_t>(v1.size()));
+                        if (twoPasses)
+                        {
+                            if (idx2)
+                                native_renderer::uploadIndexedMesh(id ^ (1ull << 61), v2.data(), static_cast<uint32_t>(v2.size()),
+                                                                   i2.data(), static_cast<uint32_t>(i2.size()));
+                            else
+                                native_renderer::uploadMesh(id ^ (1ull << 61), v2.data(), static_cast<uint32_t>(v2.size()));
+                        }
+                        syncHit = true;
                     }
-                    catch (const std::bad_alloc &)
-                    {
-                        return; // no room in the heap: not drawn this time
-                    }
-                    g_skinnedPacketBytes += skinnedPacket->bytes;
                 }
-                else
+                if (!syncHit)
                 {
-                    vertices.clear();
-                    if (lit(strips))
+                    strips.clear();
+                    readBatches(data, size, strips);
+                    if (skinned(strips) && lit(strips))
                         g_litPackets.insert(id);
-                    const auto place = [](const BatchVertex &v, native_renderer::Vertex &o)
+                    if (skinned(strips))
                     {
-                        o.x = v.x;
-                        o.y = v.y;
-                        o.z = v.z;
-                        o.nx = v.nx;
-                        o.ny = v.ny;
-                        o.nz = v.nz;
-                    };
-                    triangulate(strips, place, vertices);
-                    uploadOptimizedStaticMesh(id, vertices, reorderSafe);
-                    if (twoPasses) // two textures: second pass never reorders triangles
+                        try
+                        {
+                            skinnedPacket = &g_skinnedPackets.emplace(id, makeSkinnedPacket(std::move(strips))).first->second;
+                            g_skinnedIds.insert(id);
+                        }
+                        catch (const std::bad_alloc &)
+                        {
+                            return; // no room in the heap: not drawn this time
+                        }
+                        g_skinnedPacketBytes += skinnedPacket->bytes;
+                    }
+                    else
                     {
                         vertices.clear();
-                        triangulate(strips, place, vertices, true);
-                        uploadOptimizedStaticMesh(id ^ (1ull << 61), vertices, false);
+                        const bool isLitNow = lit(strips);
+                        if (isLitNow)
+                            g_litPackets.insert(id);
+                        const auto place = [](const BatchVertex &v, native_renderer::Vertex &o)
+                        {
+                            o.x = v.x;
+                            o.y = v.y;
+                            o.z = v.z;
+                            o.nx = v.nx;
+                            o.ny = v.ny;
+                            o.nz = v.nz;
+                        };
+                        triangulate(strips, place, vertices);
+                        std::vector<native_renderer::Vertex> ov1, ov2;
+                        std::vector<uint32_t> oi1, oi2;
+                        bool idx1 = false, idx2 = false;
+                        if (mode == 1 && optStaticMeshWithMeshopt(vertices, ov1, oi1, reorderSafe))
+                        {
+                            idx1 = true;
+                            native_renderer::uploadIndexedMesh(id, ov1.data(), static_cast<uint32_t>(ov1.size()),
+                                                               oi1.data(), static_cast<uint32_t>(oi1.size()));
+                        }
+                        else
+                        {
+                            uploadOptimizedStaticMesh(id, vertices, reorderSafe);
+                        }
+                        if (twoPasses) // two textures: second pass never reorders triangles
+                        {
+                            std::vector<native_renderer::Vertex> v2;
+                            triangulate(strips, place, v2, true);
+                            if (mode == 1 && optStaticMeshWithMeshopt(v2, ov2, oi2, false))
+                            {
+                                idx2 = true;
+                                native_renderer::uploadIndexedMesh(id ^ (1ull << 61), ov2.data(), static_cast<uint32_t>(ov2.size()),
+                                                                   oi2.data(), static_cast<uint32_t>(oi2.size()));
+                            }
+                            else
+                            {
+                                uploadOptimizedStaticMesh(id ^ (1ull << 61), v2, false);
+                                ov2.swap(v2);
+                            }
+                        }
+                        if (syncCacheKey && (idx1 || mode == 0))
+                        {
+                            staticMeshDiskCache().store(
+                                syncCacheKey, isLitNow, twoPasses,
+                                idx1, idx1 ? ov1 : vertices, oi1,
+                                idx2, ov2, oi2);
+                        }
                     }
                 }
                 if (here)
