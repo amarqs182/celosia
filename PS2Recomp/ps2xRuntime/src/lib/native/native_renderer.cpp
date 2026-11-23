@@ -225,6 +225,8 @@ namespace native_renderer
                 d.p4Move = std::atoi(std::getenv("SOTC_P4MOVE")) != 0;
             if (on("SOTC_P2PTCL"))
                 d.p2Ptcl = std::atoi(std::getenv("SOTC_P2PTCL")) != 0;
+            if (on("SOTC_P1CHARA"))
+                d.p1Chara = std::atoi(std::getenv("SOTC_P1CHARA")) != 0;
             if (on("SOTC_CAP30"))
                 d.frameCap30 = std::atoi(std::getenv("SOTC_CAP30")) != 0;
             if (on("SOTC_CAP20")) // round 107: Frame rate, Steady 20 (1) or Auto (0)
@@ -528,6 +530,10 @@ namespace native_renderer
              "Replaces the particle manager's five layer walks with a single host pass.",
              "Substitui as cinco passadas de camadas de partículas por um único passe no host.",
              &Tuning::p2Ptcl, nullptr, 0, 1, 1, "SOTC_P2PTCL"},
+            {"p1_chara", "P1 Character Chain (C1+P1)", "P1 Personagens (C1+P1)",
+             "Host motion-key cache, once-a-frame skeleton rig validation, host gaze key table, and pose/palette prefetches.",
+             "Cache de chaves de animação, rig validado 1x por quadro, tabela host de gaze e prefetch de ossos/paleta.",
+             &Tuning::p1Chara, nullptr, 0, 1, 1, "SOTC_P1CHARA"},
             // (Round 62: a menu item on the Vita again, as the user asked; round
             // 64: off by default (the user's choice), a saved value honoured,
             // SOTC_CAP30 over both. On, it caps only the heavy frames: above 150
@@ -879,6 +885,7 @@ namespace native_renderer
             {"sac_max", 8, nullptr, nullptr},
             {"p4_move", 8, "Cost: reduces CPU waits during area streaming and GC moves.", "Custo: reduz esperas de CPU em streaming de área e GC."},
             {"p2_ptcl", 8, "Cost: reduces CPU overhead in particle layer passes.", "Custo: reduz custo de CPU nas camadas de partículas."},
+            {"p1_chara", 8, "Cost: cuts CPU & DDR bandwidth on Wander, Agro, and colossi.", "Custo: reduz uso de CPU e banda de memória em Wander, Agro e colossos."},
         };
         static std::deque<std::string> helps; // (stable addresses)
         for (TuningItem &item : v)

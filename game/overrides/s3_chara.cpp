@@ -38,6 +38,7 @@
 #include "sotc_decomp.h"
 #include "pose82_math.h"
 #include "chara_types.h"
+#include "p1_chara.h"
 
 #include "ps2_runtime_macros.h"
 #include "runtime/native_renderer.h"
@@ -99,10 +100,10 @@ namespace s3chara
         return e ? std::atoi(e) : def;
     }
     bool on() { return sotc_decomp::switchOn(sotc_decomp::kS3Chara); }
-    A9S_HOIST(int, a9s_s3_chara_v_103, envInt("SOTC_S3CHARA_CHECK", 0)); // round A9 sweep (a9sweep.h)
+    A9S_HOIST(int, a9s_s3_chara_v_103, envInt("SOTC_S3CHARA_CHECK", p1chara::checkOn())); // round A9 sweep (a9sweep.h)
     int checkMode()
     {
-        return A9S_VAL(::a9sweep::on(), a9s_s3_chara_v_103, int, envInt("SOTC_S3CHARA_CHECK", 0));
+        return A9S_VAL(::a9sweep::on(), a9s_s3_chara_v_103, int, envInt("SOTC_S3CHARA_CHECK", p1chara::checkOn()));
     }
     A9S_HOIST(int, a9s_s3_chara_v_108, envInt("SOTC_S3CHARA_LOG", 0)); // round A9 sweep (a9sweep.h)
     int logEvery()
@@ -297,6 +298,7 @@ namespace s3chara
         uint32_t link[kMaxBones][2];     // visit -> the bone's (first child, next sibling) words as read
         uint32_t off[kMaxBones][4];      // visit -> the bone's offset (+0x10) as read (the kept bones rest on it)
         uint32_t gen = 0;                // made again: the kept bones made from the old shape are void
+        uint64_t checked = ~0ull;        // round C1 (c1rig): the game frame the links / offsets were last compared in
     };
     constexpr int kRigs = 24;
     struct RigCache
@@ -416,6 +418,19 @@ namespace s3chara
         return diff == 0u;
     }
 
+    // Round C1 (c1rig): counts for the [c1rig] line (game thread; the rig caches are per thread).
+    struct C1RigStats
+    {
+        uint64_t trusted = 0, compared = 0, checked = 0, stale = 0;
+    };
+    C1RigStats g_c1rig;
+    inline bool c1rigOn() { return sotc_decomp::switchOn(sotc_decomp::kC1Rig) || sotc_decomp::p1charaOn(); } // round P1: p1chara trusts the frame's rig too
+    bool c1rigCheck()
+    {
+        static const bool v = envInt("SOTC_C1RIG_CHECK", p1chara::checkOn()) != 0; // round P1: SOTC_P1CHARA_CHECK turns it on too
+        return v;
+    }
+
     Rig *rigFor(const uint8_t *ram, uint32_t skel, uint32_t bones)
     {
         RigCache *c = t_rigs;
@@ -434,13 +449,35 @@ namespace s3chara
             }
             if (g->skel == skel && g->bones == bones)
             {
+                // Round C1 (SOTC_C1RIG, A/B c1rig): a rig compared in this game frame is trusted for the frame's later poses
+                // (a skeleton is resource data: its links and offsets are not written while it lives). SOTC_C1RIG_CHECK=1:
+                // the trusted rigs are compared anyway and a difference counted ([c1rig] stale must be 0).
+                const uint64_t fr = sotc_decomp::g_gameFrame;
+                if (g->checked == fr && c1rigOn())
+                {
+                    ++g_c1rig.trusted;
+                    if (c1rigCheck())
+                    {
+                        ++g_c1rig.checked;
+                        if (!inRam(bones, g->count * 0x40u) || !same(ram, *g))
+                        {
+                            ++g_c1rig.stale;
+                            g->checked = ~0ull;
+                            return rigFor(ram, skel, bones); // the plain path (compares, makes it again)
+                        }
+                    }
+                    g->used = c->tick;
+                    return g;
+                }
+                ++g_c1rig.compared;
                 if (!inRam(bones, g->count * 0x40u) || !same(ram, *g))
                 {
                     ++g_st.rigMiss;
                     if (!build(ram, skel, bones, *g))
-                        return g->skel = 0, nullptr;
+                        return g->skel = 0, g->checked = ~0ull, nullptr;
                     ++g_st.rigsMade;
                 }
+                g->checked = fr;
                 g->used = c->tick;
                 return g;
             }
@@ -457,6 +494,7 @@ namespace s3chara
             return nullptr;
         }
         ++g_st.rigsMade;
+        g->checked = sotc_decomp::g_gameFrame;
         g->used = c->tick;
         return g;
     }
@@ -518,6 +556,7 @@ namespace s3chara
         uint8_t *reused;
         bool rootSame;   // the root's inputs the kept set's bits
         int32_t lo, hi;
+        const uint32_t (*hoff)[4]; // round P1: the rig's offsets by visit (the guest's bits, compared this game frame), or none
     };
 
     inline __attribute__((always_inline)) bool sameBits(float32x4_t a, float32x4_t b)
@@ -609,7 +648,27 @@ namespace s3chara
                 cur = par;
             }
             const uint32_t b = g.bone[k];
-            const float32x4_t off = vmulq_f32(vld1q_f32(reinterpret_cast<const float *>(a.bp + b * kBone + kOffset)), a.scale);
+            float32x4_t offRaw;
+            if (a.hoff)
+            {
+                // Round P1: the offset from the rig's contiguous host array (16 bytes a visit, the guest's bits) instead of
+                // the bone's 0x40-byte guest record; the lines of the bones two visits on asked ahead (locals read, the
+                // matrix's two lines and the quaternion written).
+                offRaw = vld1q_f32(reinterpret_cast<const float *>(a.hoff[k]));
+                if (k + 2 < hi)
+                {
+                    const uint32_t nb = g.bone[k + 2];
+                    __builtin_prefetch(a.lp + nb * 0x10u, 1);
+                    __builtin_prefetch(a.mp + nb * 0x40u, 1);
+#if !defined(__aarch64__)
+                    __builtin_prefetch(a.mp + nb * 0x40u + 0x20u, 1);
+#endif
+                    __builtin_prefetch(a.qp + nb * 0x10u, 1);
+                }
+            }
+            else
+                offRaw = vld1q_f32(reinterpret_cast<const float *>(a.bp + b * kBone + kOffset));
+            const float32x4_t off = vmulq_f32(offRaw, a.scale);
             const float32x4_t loc = pose82::normalize(vld1q_f32(reinterpret_cast<const float *>(a.lp + b * 0x10u)));
             const M4 m = pose82::boneMatrix(p, loc, off);
             const float32x4_t q = pose82::qmul(pq, loc);
@@ -730,7 +789,24 @@ namespace s3chara
         a.kb = nullptr;
         a.reused = nullptr;
         a.rootSame = false;
+        a.lo = a.hi = 0;
         const int32_t n = static_cast<int32_t>(g->n);
+        // Round P1 (p1chara): the rig's offsets were compared with the guest's in this game frame (rigFor: every call, or
+        // the frame's first with c1rig), so they are the guest's bits: the loop reads them instead of the bone records.
+        const bool p1 = sotc_decomp::p1charaOn();
+        a.hoff = p1 ? g->off : nullptr;
+        if (lane == 0)
+        {
+            p1chara::Stats &ps = p1chara::g_st;
+            ++ps.poses;
+            ps.poseBones += static_cast<uint64_t>(n);
+            // the proxy (loads the pose's loop makes from guest memory): locals 16 + offsets 16 a bone, or locals only
+            ps.poseOldLd += static_cast<uint64_t>(n) * 32u;
+            ps.poseNewLd += static_cast<uint64_t>(n) * (p1 ? 16u : 32u);
+            if (p1)
+                ++ps.poseHostOff;
+            p1chara::logMaybe();
+        }
         if (keepOn())
         {
             Keep *e = keepFor(lane, g, mats, quats, locals, a.scale, a.root.c[3], rootQ, a.rootSame);
@@ -822,6 +898,9 @@ namespace s3chara
         std::fprintf(stderr, "[s3chk] frame %llu: poses %llu (%llu bones) differ %llu; split keys %llu (%llu channels) differ %llu; key jobs %llu\n", (unsigned long long)fr,
                      (unsigned long long)s.checks, (unsigned long long)s.checkBones, (unsigned long long)s.checkBad, (unsigned long long)s.keyChecks,
                      (unsigned long long)s.keyChannels, (unsigned long long)s.keyBad, (unsigned long long)s.keyJobs);
+        std::fprintf(stderr, "[c1rig] frame %llu: rigs trusted %llu compared %llu; checked %llu stale %llu\n", (unsigned long long)fr,
+                     (unsigned long long)g_c1rig.trusted, (unsigned long long)g_c1rig.compared, (unsigned long long)g_c1rig.checked,
+                     (unsigned long long)g_c1rig.stale);
         const Stats keep = s;
         s = Stats{};
         s.checks = keep.checks, s.checkBones = keep.checkBones, s.checkBad = keep.checkBad, s.rigsMade = keep.rigsMade, s.rigMiss = keep.rigMiss;
