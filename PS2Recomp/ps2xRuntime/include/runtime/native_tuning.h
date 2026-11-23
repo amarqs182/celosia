@@ -77,6 +77,7 @@ namespace native_renderer
         bool maliWater = true;          // SOTC_MALI_WATER
         bool p4Move = false;            // SOTC_P4MOVE
         bool p2Ptcl = false;            // SOTC_P2PTCL
+        bool p1Chara = false;           // SOTC_P1CHARA
 
         // Debugging (the menus' Debug group): what to draw at all.
         uint32_t hiddenLayers = 0;  // bit n: the display list's layer n is not drawn

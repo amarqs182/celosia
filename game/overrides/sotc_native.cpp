@@ -3674,7 +3674,7 @@ namespace sotc_native
         constexpr size_t kTuningCount = sizeof(kTuningFlags) / sizeof(kTuningFlags[0]);
         static int tuningAt[kTuningCount];
         // The decomp rounds' subsystem switches (sotc_decomp.h's table).
-        static const char *const switchNames[sotc_decomp::kSwitchCount] = {"camcoll", "collprobe", "motion", "leaves", "hotlist", "hotlist44", "hotlist46", "hotlist47", "scriptvm", "isys", "hotlist48", "fastnative", "fastnative2", "fastnative3", "ptcl62", "coll63", "tex64", "walk67", "pref69", "coll71", "charlod78", "ptcl79", "seg80", "pose82", "walk83", "ptcl83", "probe84", "find84", "ground85", "ptcl89", "ptcl91", "join95", "draw95", "early95", "obj96", "sel96", "sel97", "links97", "path97", "plan97", "walk101", "skin101", "leaf101", "obj101", "sw102", "ptcl103", "solid103", "grp106", "oan106", "ai106", "coll115", "pkt117", "glv117", "draw117", "leaf117", "sym120", "heap120", "flush119", "walk119", "part119", "view119", "ptcl123", "blend123", "seg123", "gaze122", "cloth122", "quat122", "keys122", "fin125", "obj125", "scroll127", "geo126", "ctl126", "imm128", "texr128", "pf134", "clip134", "pose136", "key136", "euler136", "pf135", "fin138", "sub139", "rnd139", "gc139", "sort140", "quad140", "clip140", "pf141", "pfc141", "liftd1", "liftd2", "liftd3", "liftd4", "liftd5", "liftalt", "s9rt", "s10draw", "s4disp", "s11rt", "s2coll", "s3chara", "a9sweep", "n2snd", "p4move", "p2ptcl"};
+        static const char *const switchNames[sotc_decomp::kSwitchCount] = {"camcoll", "collprobe", "motion", "leaves", "hotlist", "hotlist44", "hotlist46", "hotlist47", "scriptvm", "isys", "hotlist48", "fastnative", "fastnative2", "fastnative3", "ptcl62", "coll63", "tex64", "walk67", "pref69", "coll71", "charlod78", "ptcl79", "seg80", "pose82", "walk83", "ptcl83", "probe84", "find84", "ground85", "ptcl89", "ptcl91", "join95", "draw95", "early95", "obj96", "sel96", "sel97", "links97", "path97", "plan97", "walk101", "skin101", "leaf101", "obj101", "sw102", "ptcl103", "solid103", "grp106", "oan106", "ai106", "coll115", "pkt117", "glv117", "draw117", "leaf117", "sym120", "heap120", "flush119", "walk119", "part119", "view119", "ptcl123", "blend123", "seg123", "gaze122", "cloth122", "quat122", "keys122", "fin125", "obj125", "scroll127", "geo126", "ctl126", "imm128", "texr128", "pf134", "clip134", "pose136", "key136", "euler136", "pf135", "fin138", "sub139", "rnd139", "gc139", "sort140", "quad140", "clip140", "pf141", "pfc141", "liftd1", "liftd2", "liftd3", "liftd4", "liftd5", "liftalt", "s9rt", "s10draw", "s4disp", "s11rt", "s2coll", "s3chara", "a9sweep", "n2snd", "p4move", "p2ptcl", "c1keys", "c1rig", "p1chara"};
         static int switchAt[sotc_decomp::kSwitchCount];
         static bool switchStart[sotc_decomp::kSwitchCount];
         static int layerAt[32];
@@ -6970,14 +6970,16 @@ namespace sotc_native
             ps2_lean::frameTick(frame);
             {
                 const native_renderer::Tuning &tune = native_renderer::tuning();
-                static bool s_p4MenuInit = false, s_p4MenuLast = false, s_p2MenuLast = false;
+                static bool s_p4MenuInit = false, s_p4MenuLast = false, s_p2MenuLast = false, s_p1MenuLast = false;
                 if (!s_p4MenuInit)
                 {
                     s_p4MenuInit = true;
                     s_p4MenuLast = tune.p4Move;
                     s_p2MenuLast = tune.p2Ptcl;
+                    s_p1MenuLast = tune.p1Chara;
                     sotc_decomp::setSwitch(sotc_decomp::kP4Move, tune.p4Move);
                     sotc_decomp::setSwitch(sotc_decomp::kP2Ptcl, tune.p2Ptcl);
+                    sotc_decomp::setSwitch(sotc_decomp::kP1Chara, tune.p1Chara);
                 }
                 else
                 {
@@ -6990,6 +6992,11 @@ namespace sotc_native
                     {
                         s_p2MenuLast = tune.p2Ptcl;
                         sotc_decomp::setSwitch(sotc_decomp::kP2Ptcl, tune.p2Ptcl);
+                    }
+                    if (tune.p1Chara != s_p1MenuLast)
+                    {
+                        s_p1MenuLast = tune.p1Chara;
+                        sotc_decomp::setSwitch(sotc_decomp::kP1Chara, tune.p1Chara);
                     }
                 }
             }

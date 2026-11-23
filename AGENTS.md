@@ -145,6 +145,7 @@ Consequences for your work:
   anything requiring a newer glibc.
 - Shared memory is **895 MiB**, not 1 GB. Budget renderer pools against the
   measured figure.
+- **Visual & control invariants:** Never add synthetic tonemapping (e.g., Reinhard) absent from the PS2 original; keep exact GS 2× modulation (`128 = 1.0`, `255 ≈ 2.0`), Team ICO pseudo-HDR/bloom, and `GL_RGB565` opaque textures (`SOTC_MALI_TEX5551=0`) to avoid mipmap alpha flickering. Reserve `Select + Start` solely for PortMaster exit; bind the in-game settings submenu to the R36S **FN** button (`kGuide` / `guide:b16`) and expose new toggles live via `Tuning` (`native_tuning.h` / `native_renderer.cpp`).
 
 ### Kernel 4.4.189 & Platform Capabilities Audit (2026-11-15)
 
