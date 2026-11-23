@@ -50,6 +50,7 @@ double ps2xLinuxLastCapSleepMs();
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -81,7 +82,7 @@ namespace
 
 constexpr uint32_t kMaxSkinQwords = native_renderer::kSkinPaletteQwords; // 48 bones * 4 vec4s via glUniform4fv (libMali r13p0 safe)
 constexpr uint32_t kMaxInstances = 16u;
-constexpr uint64_t kMaxMergeSrcBytes = 40ull * 1024ull * 1024ull;
+constexpr uint64_t kMaxMergeSrcBytes = 48ull * 1024ull * 1024ull;
 constexpr uint64_t kMaxMergeRunBytes = 32ull * 1024ull * 1024ull;
 
 inline uint64_t nowUs()
@@ -650,7 +651,7 @@ out highp vec4 vUV;
 out mediump vec4 vColor;
 out highp vec4 vScreen;
 out highp float vLogW;
-out highp float vTexLayer;
+flat out highp float vTexLayer;
 
 void main()
 {
@@ -696,7 +697,7 @@ static const char *kMaliArrOpaqueFastFrag = MALI_FRAG_HDR R"(
 in highp vec4 vUV;
 in mediump vec4 vColor;
 in highp float vLogW;
-in highp float vTexLayer;
+flat in highp float vTexLayer;
 
 uniform mediump sampler2DArray uTexArray;
 uniform highp vec4 uFogC;
@@ -710,11 +711,11 @@ void main()
     if (uFogC.w > 0.0)
     {
         highp float lod = clamp(vLogW * uFogC.z + uFogC.y, 0.0, uFogC.w);
-        t = textureLod(uTexArray, vec3(vUV.xy, vTexLayer), lod);
+        t = textureLod(uTexArray, vec3(vUV.xy, floor(vTexLayer + 0.5)), lod);
     }
     else
     {
-        t = texture(uTexArray, vec3(vUV.xy, vTexLayer));
+        t = texture(uTexArray, vec3(vUV.xy, floor(vTexLayer + 0.5)));
     }
     mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
     oColor = vec4(raw / (vec3(1.0) + raw * 0.35), 1.0);
@@ -726,7 +727,7 @@ in highp vec4 vUV;
 in mediump vec4 vColor;
 in highp vec4 vScreen;
 in highp float vLogW;
-in highp float vTexLayer;
+flat in highp float vTexLayer;
 
 uniform mediump sampler2DArray uTexArray;
 uniform highp vec4 uFogC;
@@ -743,11 +744,11 @@ void main()
     if (uFogC.w > 0.0)
     {
         highp float lod = clamp(vLogW * uFogC.z + uFogC.y, 0.0, uFogC.w);
-        t = textureLod(uTexArray, vec3(vUV.xy, vTexLayer), lod);
+        t = textureLod(uTexArray, vec3(vUV.xy, floor(vTexLayer + 0.5)), lod);
     }
     else
     {
-        t = texture(uTexArray, vec3(vUV.xy, vTexLayer));
+        t = texture(uTexArray, vec3(vUV.xy, floor(vTexLayer + 0.5)));
     }
     mediump float alpha = clamp(t.a * max(uFogCol.w, 1.0) * vColor.a, 0.0, 1.0);
     if (alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y))
@@ -761,7 +762,7 @@ static const char *kMaliArrSoftFastFrag = MALI_FRAG_HDR R"(
 in highp vec4 vUV;
 in mediump vec4 vColor;
 in highp float vLogW;
-in highp float vTexLayer;
+flat in highp float vTexLayer;
 
 uniform mediump sampler2DArray uTexArray;
 uniform highp vec4 uFogC;
@@ -776,11 +777,11 @@ void main()
     if (uFogC.w > 0.0)
     {
         highp float lod = clamp(vLogW * uFogC.z + uFogC.y, 0.0, uFogC.w);
-        t = textureLod(uTexArray, vec3(vUV.xy, vTexLayer), lod);
+        t = textureLod(uTexArray, vec3(vUV.xy, floor(vTexLayer + 0.5)), lod);
     }
     else
     {
-        t = texture(uTexArray, vec3(vUV.xy, vTexLayer));
+        t = texture(uTexArray, vec3(vUV.xy, floor(vTexLayer + 0.5)));
     }
     mediump float alpha = clamp(t.a * max(uFogCol.w, 1.0) * vColor.a, 0.0, 1.0);
     if (alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y))
@@ -795,7 +796,7 @@ in highp vec4 vUV;
 in mediump vec4 vColor;
 in highp vec4 vScreen;
 in highp float vLogW;
-in highp float vTexLayer;
+flat in highp float vTexLayer;
 
 uniform mediump sampler2DArray uTexArray;
 uniform sampler2D uBackground;
@@ -809,7 +810,7 @@ void main()
 {
     highp float depth = vUV.z;
     highp float lod = uFogC.w > 0.0 ? clamp(vLogW * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
-    mediump vec4 t = textureLod(uTexArray, vec3(vUV.xy, vTexLayer), lod);
+    mediump vec4 t = textureLod(uTexArray, vec3(vUV.xy, floor(vTexLayer + 0.5)), lod);
     mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
     mediump vec3 rgb = raw / (vec3(1.0) + raw * 0.35);
     rgb = mix(uFogCol.rgb, rgb, clamp(vUV.w / max(depth, 1e-3), 0.0, 1.0));
@@ -830,7 +831,7 @@ in highp vec4 vUV;
 in mediump vec4 vColor;
 in highp vec4 vScreen;
 in highp float vLogW;
-in highp float vTexLayer;
+flat in highp float vTexLayer;
 
 uniform mediump sampler2DArray uTexArray;
 uniform sampler2D uBackground;
@@ -847,7 +848,7 @@ void main()
         discard;
     highp float depth = vUV.z;
     highp float lod = uFogC.w > 0.0 ? clamp(vLogW * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
-    mediump vec4 t = textureLod(uTexArray, vec3(vUV.xy, vTexLayer), lod);
+    mediump vec4 t = textureLod(uTexArray, vec3(vUV.xy, floor(vTexLayer + 0.5)), lod);
     mediump float alpha = clamp(t.a * max(uFogCol.w, 1.0) * vColor.a, 0.0, 1.0);
     if (alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y))
         discard;
@@ -871,7 +872,7 @@ in highp vec4 vUV;
 in mediump vec4 vColor;
 in highp vec4 vScreen;
 in highp float vLogW;
-in highp float vTexLayer;
+flat in highp float vTexLayer;
 
 uniform mediump sampler2DArray uTexArray;
 uniform sampler2D uBackground;
@@ -886,7 +887,7 @@ void main()
 {
     highp float depth = vUV.z;
     highp float lod = uFogC.w > 0.0 ? clamp(vLogW * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
-    mediump vec4 t = textureLod(uTexArray, vec3(vUV.xy, vTexLayer), lod);
+    mediump vec4 t = textureLod(uTexArray, vec3(vUV.xy, floor(vTexLayer + 0.5)), lod);
     mediump float alpha = clamp(t.a * max(uFogCol.w, 1.0) * vColor.a, 0.0, 1.0);
     if (alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y))
         alpha = 0.0;
@@ -902,6 +903,33 @@ void main()
         rgb = mix(rgb, texture(uBackground, scr).rgb, f);
     }
     oColor = vec4(rgb, alpha);
+}
+)";
+
+// Phase 8B: Lightweight Fresnel-modulated water tint (zero extra reflection FBO pass).
+static const char *kMaliWaterFrag = MALI_FRAG_HDR R"(
+in highp vec4 vUV;
+in mediump vec4 vColor;
+in highp vec4 vScreen;
+in highp float vLogW;
+
+uniform highp vec4 uFogA;
+uniform mediump vec4 uFogCol;
+uniform mediump vec4 uAlpha;
+
+out mediump vec4 oColor;
+
+void main()
+{
+    mediump float fres = clamp(vColor.a, 0.0, 1.0);
+    highp vec2 scr = vScreen.xy / max(vScreen.z, 1e-3);
+    mediump float wave = 0.5 + 0.5 * sin(scr.x * 22.0 + scr.y * 14.0 + uFogA.x * 2.5);
+    mediump vec3 deepCol = mix(vec3(0.14, 0.22, 0.26), uFogCol.rgb * 0.55, 0.45);
+    mediump vec3 skyCol = mix(vec3(0.52, 0.64, 0.72), uFogCol.rgb * 1.15, 0.65);
+    mediump vec3 raw = mix(deepCol, skyCol, clamp(fres * 0.85 + wave * 0.12, 0.0, 1.0));
+    mediump vec3 rgb = raw / (vec3(1.0) + raw * 0.35);
+    mediump float a = clamp((0.20 + fres * 0.55) * max(uAlpha.z, 0.35), 0.12, 0.78);
+    oColor = vec4(rgb, a);
 }
 )";
 
@@ -1009,7 +1037,7 @@ bool linkProgCached(ShaderProg &out, const char *name, const char *vsSrc, const 
     std::string binPath;
     if (useCache && !cacheDir.empty())
     {
-        binPath = cacheDir + "/" + name + "_v11.bin";
+        binPath = cacheDir + "/" + name + "_v12.bin";
         if (FILE *fp = std::fopen(binPath.c_str(), "rb"))
         {
             GLenum fmt = 0;
@@ -1258,6 +1286,7 @@ struct QueuedDraw
     uint8_t bucket = 0;
     bool skinned = false;
     bool deferredCull = false;
+    bool b2Opaque = false;
 };
 
 struct FramePacket
@@ -1348,6 +1377,7 @@ inline bool canMergeStatic(const QueuedDraw &a, const QueuedDraw &b)
            a.mesh && b.mesh &&
            !a.mesh->dynamic && !b.mesh->dynamic &&
            !a.skinned && !b.skinned &&
+           !a.state.reflectionSample && !b.state.reflectionSample &&
            !a.mesh->srcVerts.empty() && !b.mesh->srcVerts.empty() &&
            a.state.order == b.state.order &&
            a.psoKey == b.psoKey &&
@@ -1379,6 +1409,7 @@ inline bool canInstanceStatic(const QueuedDraw &a, const QueuedDraw &b)
            a.mesh == b.mesh &&
            !a.mesh->dynamic && !b.mesh->dynamic &&
            !a.skinned && !b.skinned &&
+           !a.state.reflectionSample && !b.state.reflectionSample &&
            a.stateHash == b.stateHash &&
            a.state.order == b.state.order &&
            a.psoKey == b.psoKey &&
@@ -1409,6 +1440,8 @@ public:
         m_mailboxEnabled = envBool("SOTC_MALI_MAILBOX", true);
         m_cullEnabled = envBool("SOTC_MALI_CULL", true);
         m_tex16Enabled = envBool("SOTC_MALI_TEX16", true);
+        m_tex5551Enabled = envBool("SOTC_MALI_TEX5551", false);
+        m_waterEnabled = envBool("SOTC_MALI_WATER", true);
         m_drsEnabled = envBool("SOTC_MALI_DRS", true);
         m_shaderCacheEnabled = envBool("SOTC_MALI_SHADER_CACHE", true);
         m_gpuSkinEnabled = envBool("SOTC_MALI_GPU_SKIN", true);
@@ -1446,7 +1479,7 @@ public:
         m_dumpTexEnabled = envBool("SOTC_MALI_DUMP_TEX", false);
         m_paceEnabled = envBool("SOTC_MALI_PACE", false);
         m_statsEnabled = envBool("SOTC_MALI_STATS", false);
-        m_uploadBudgetUs = static_cast<uint64_t>(std::max(0, envInt("SOTC_MALI_UPLOAD_BUDGET_US", 1500)));
+        m_uploadBudgetUs = static_cast<uint64_t>(std::max(0, envInt("SOTC_MALI_UPLOAD_BUDGET_US", 4000)));
         m_bgRate = static_cast<uint32_t>(std::max(1, envInt("SOTC_MALI_BG_RATE", 2)));
         m_targetFps = std::max(20, envInt("SOTC_FPS_CAP", 30));
         m_drsTargetFps = std::max(15, envInt("SOTC_MALI_DRS_TARGET_FPS", 30));
@@ -1963,7 +1996,8 @@ private:
             !linkProgCached(m_progArrSoftFast, "arr_soft_fast", kMaliWorldArrVert, kMaliArrSoftFastFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
             !linkProgCached(m_progArrOpaque, "arr_opaque", kMaliWorldArrVert, kMaliArrOpaqueFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
             !linkProgCached(m_progArrCut, "arr_cut", kMaliWorldArrVert, kMaliArrCutFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
-            !linkProgCached(m_progArrSoft, "arr_soft", kMaliWorldArrVert, kMaliArrSoftFrag, m_shaderCacheDir, m_shaderCacheEnabled))
+            !linkProgCached(m_progArrSoft, "arr_soft", kMaliWorldArrVert, kMaliArrSoftFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
+            !linkProgCached(m_progWater, "water", kMaliWorldVert, kMaliWaterFrag, m_shaderCacheDir, m_shaderCacheEnabled))
         {
             return false;
         }
@@ -1990,13 +2024,15 @@ private:
         makeTarget(m_bgTarget, 256, 256, true);
         m_lastPresentTime = std::chrono::steady_clock::now();
         m_initialized = true;
-        std::fprintf(stderr, "[mali] Phase 8 GLES 3.2 backend up (async=%d mailbox=%d keepCur=%d direct=%d fastSh=%d texArr=%d(maxL=%u,bud=%lluM) merge=%d(chunk=%u) inst=%d atPass2=%d cull=%d skin=%d drs=%d@%dfps[%.2f..%.2f] drawOnly=%d budget=%lluM)\n",
+        std::fprintf(stderr, "[mali] Phase 8B GLES 3.2 backend up (async=%d mailbox=%d keepCur=%d direct=%d fastSh=%d texArr=%d(maxL=%u,bud=%lluM) merge=%d(chunk=%u) inst=%d atPass2=%d cull=%d skin=%d tex5551=%d water=%d upBud=%llu drs=%d@%dfps[%.2f..%.2f] drawOnly=%d budget=%lluM)\n",
                      m_asyncEnabled ? 1 : 0, m_mailboxEnabled ? 1 : 0, m_keepCurrentEnabled ? 1 : 0,
                      m_directScanoutEnabled ? 1 : 0, m_fastShadersEnabled ? 1 : 0,
                      m_texArrayEnabled ? 1 : 0, m_maxArrayLayers,
                      static_cast<unsigned long long>(m_texArrayBudgetBytes >> 20),
                      m_mergeEnabled ? 1 : 0, m_mergeChunkMax, m_instancingEnabled ? 1 : 0,
                      m_atPass2Mode, m_cullEnabled ? 1 : 0, m_gpuSkinEnabled ? 1 : 0,
+                     m_tex5551Enabled ? 1 : 0, m_waterEnabled ? 1 : 0,
+                     static_cast<unsigned long long>(m_uploadBudgetUs),
                      m_drsEnabled ? 1 : 0, m_drsTargetFps, m_drsMin, m_drsMax, m_drsDrawOnly ? 1 : 0,
                      static_cast<unsigned long long>(m_cacheBudgetBytes >> 20));
         return true;
@@ -2061,6 +2097,8 @@ private:
         delProg(m_progArrOpaque);
         delProg(m_progArrCut);
         delProg(m_progArrSoft);
+        delProg(m_progWater);
+        m_deferredUploads.clear();
         m_initialized = false;
     }
 
@@ -2113,7 +2151,7 @@ private:
         m.srcBytes = 0;
     }
 
-    void processUploads(const FramePacket &pkt)
+    void processUploads(FramePacket &pkt)
     {
         m_uploadUsThisFrame = 0;
 
@@ -2161,8 +2199,28 @@ private:
         if (!pkt.confirmEvictTex.empty())
             reclaimEmptyTexArrays();
 
-        for (const UploadCmd &cmd : pkt.uploads)
+        for (UploadCmd &u : pkt.uploads)
         {
+            if (u.kind == UploadCmd::SkinnedMesh)
+                m_deferredUploads.push_front(std::move(u));
+            else
+                m_deferredUploads.push_back(std::move(u));
+        }
+        pkt.uploads.clear();
+
+        const uint64_t uploadStartUs = m_uploadBudgetUs ? nowUs() : 0u;
+        uint32_t uploadedCount = 0u;
+        while (!m_deferredUploads.empty())
+        {
+            const bool isSkinned = (m_deferredUploads.front().kind == UploadCmd::SkinnedMesh);
+            if (!isSkinned && m_uploadBudgetUs > 0u && uploadedCount >= 8u &&
+                (nowUs() - uploadStartUs) >= m_uploadBudgetUs)
+            {
+                break;
+            }
+            UploadCmd cmd = std::move(m_deferredUploads.front());
+            m_deferredUploads.pop_front();
+            ++uploadedCount;
             if (cmd.kind == UploadCmd::StaticMesh || cmd.kind == UploadCmd::IndexedMesh)
             {
                 MaliMesh &mesh = m_meshes[cmd.id];
@@ -2216,10 +2274,10 @@ private:
                         evictOldMergeSrc(pkt.frameNum, 30u, needBytes);
                     if (m_mergeSrcBytes + needBytes <= kMaxMergeSrcBytes)
                     {
-                        mesh.srcVerts = cmd.compactVerts;
+                        mesh.srcVerts = std::move(cmd.compactVerts);
                         if (mesh.indexed)
                         {
-                            mesh.srcIndices = cmd.indices;
+                            mesh.srcIndices = std::move(cmd.indices);
                         }
                         else
                         {
@@ -2513,7 +2571,7 @@ private:
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
         const bool use565 = m_tex16Enabled && minA >= 124u;
-        const bool use5551 = m_tex16Enabled && !use565 && allBinaryAlpha;
+        const bool use5551 = m_tex16Enabled && m_tex5551Enabled && !use565 && allBinaryAlpha;
         tx.tex16 = use565 || use5551;
         tx.pendingEvict = false;
         releaseTexArrayLayer(tx.arrayId, tx.arrayLayer);
@@ -2766,6 +2824,7 @@ private:
         m_skinGpuDrawsThisFrame = 0;
         m_skinCpuDrawsThisFrame = 0;
         m_skinMaxQwordsThisFrame = 0;
+        m_skinInvalidThisFrame = 0;
         uint64_t mergeUsThisFrame = 0;
 
         processUploads(pkt);
@@ -2791,7 +2850,7 @@ private:
             mesh.lastUsed = m_frameNum;
 
             MaliTex *texPtr = nullptr;
-            if (rd.state.texture)
+            if (!rd.state.reflectionSample && rd.state.texture)
             {
                 auto tit = m_textures.find(rd.state.texture);
                 if (tit != m_textures.end() && tit->second.tex)
@@ -2810,6 +2869,19 @@ private:
             q.state = rd.state;
             q.minW = 0.0f;
             q.seq = rd.seq;
+            if (mesh.skinned && (rd.state.skinPalette == 0u || rd.state.skinPalette > pkt.skinPalettes.size()))
+            {
+                ++m_skinInvalidThisFrame;
+                if (m_statsEnabled && !m_skinInvalidLogged)
+                {
+                    std::fprintf(stderr, "[mali:skin:invalid] frame=%llu mesh=%016llx pal=%u pals=%zu\n",
+                                 static_cast<unsigned long long>(m_frameNum),
+                                 static_cast<unsigned long long>(rd.meshId),
+                                 rd.state.skinPalette, pkt.skinPalettes.size());
+                    m_skinInvalidLogged = true;
+                }
+                continue;
+            }
             q.skinned = mesh.skinned && rd.state.skinPalette != 0u;
 
             if (q.skinned)
@@ -2817,7 +2889,14 @@ private:
             else if (mesh.dynamic && ((rd.meshId >> 63) & 1ull))
                 ++m_skinCpuDrawsThisFrame;
 
-            if (rd.state.screen || rd.state.screenDepthTest)
+            if (rd.state.reflectionSample)
+            {
+                if (!m_waterEnabled)
+                    continue;
+                q.bucket = 2u;
+                q.psoKey = makePsoKey(19u, Blend::Normal, true, false, 0u);
+            }
+            else if (rd.state.screen || rd.state.screenDepthTest)
             {
                 q.bucket = 3u;
                 q.psoKey = makePsoKey(2u, rd.state.blend, rd.state.screenDepthTest, false, 0u);
@@ -2868,10 +2947,11 @@ private:
                                          (rd.state.blend == Blend::Normal || rd.state.blend == Blend::Additive || rd.state.blend == Blend::Subtract);
                     const uint32_t b2Prog = canSoft ? (q.skinned ? (fastFog ? 11u : 4u) : (fastFog ? 8u : 12u)) : cutProg;
                     q.psoKey = makePsoKey(b2Prog, rd.state.blend, true, dw, df);
+                    q.b2Opaque = !rd.state.overlay && dw && rd.state.blend == Blend::Opaque;
                 }
             }
 
-            if (q.bucket <= 2u)
+            if (q.bucket <= 2u && !rd.state.reflectionSample)
             {
                 q.texArrayId = (m_texArrayEnabled && texPtr && texPtr->arrayId >= 0) ? texPtr->arrayId : -1;
                 q.texArrayLayer = (q.texArrayId >= 0) ? texPtr->arrayLayer : 0u;
@@ -2901,7 +2981,7 @@ private:
                 q.stateHash = sh;
             }
 
-            const bool mergeCandidate = m_mergeEnabled && q.bucket <= 2u && !mesh.dynamic && !q.skinned && !mesh.srcVerts.empty();
+            const bool mergeCandidate = m_mergeEnabled && q.bucket <= 2u && !rd.state.reflectionSample && !mesh.dynamic && !q.skinned && !mesh.srcVerts.empty();
             if (m_cullEnabled && mesh.hasBox && !mesh.dynamic && !mesh.skinned && !rd.state.screen && !rd.state.overlay && !rd.state.background)
             {
                 if (mergeCandidate)
@@ -2950,6 +3030,22 @@ private:
                 if (a.clipHash != b.clipHash) return a.clipHash < b.clipHash;
                 if (a.texArrayId < 0 && a.state.texture != b.state.texture) return a.state.texture < b.state.texture;
                 if (a.meshId != b.meshId) return a.meshId < b.meshId;
+            }
+            if (a.bucket == 2u)
+            {
+                if (a.b2Opaque != b.b2Opaque)
+                    return a.b2Opaque > b.b2Opaque;
+                if (a.b2Opaque)
+                {
+                    if (a.psoKey != b.psoKey) return a.psoKey < b.psoKey;
+                    if (a.stateHash != b.stateHash) return a.stateHash < b.stateHash;
+                    if (a.texArrayId != b.texArrayId) return a.texArrayId < b.texArrayId;
+                    if (a.state.clamp != b.state.clamp) return a.state.clamp < b.state.clamp;
+                    if (a.state.alphaTest != b.state.alphaTest) return a.state.alphaTest < b.state.alphaTest;
+                    if (a.clipHash != b.clipHash) return a.clipHash < b.clipHash;
+                    if (a.texArrayId < 0 && a.state.texture != b.state.texture) return a.state.texture < b.state.texture;
+                    if (a.meshId != b.meshId) return a.meshId < b.meshId;
+                }
             }
             return a.seq < b.seq;
         });
@@ -3410,11 +3506,47 @@ private:
             }
             uint32_t bCnt[4] = {0, 0, 0, 0};
             uint32_t brkClip = 0, brkArr = 0, brkState = 0, brkDyn = 0, brkSkin = 0, brkNoSrc = 0;
+            uint32_t b2BrkClip = 0, b2BrkArr = 0, b2BrkState = 0, b2BrkDyn = 0, b2BrkSkin = 0, b2BrkNoSrc = 0;
             const QueuedDraw *prevStatic = nullptr;
+            const QueuedDraw *prevStaticB2 = nullptr;
             for (const QueuedDraw &q : m_qAll)
             {
                 if (q.bucket < 4u)
                     ++bCnt[q.bucket];
+                if (q.bucket == 2u)
+                {
+                    if (q.skinned)
+                    {
+                        ++b2BrkSkin;
+                        prevStaticB2 = nullptr;
+                    }
+                    else if (!q.mesh || q.mesh->dynamic)
+                    {
+                        ++b2BrkDyn;
+                        prevStaticB2 = nullptr;
+                    }
+                    else if (q.mesh->srcVerts.empty())
+                    {
+                        ++b2BrkNoSrc;
+                        prevStaticB2 = nullptr;
+                    }
+                    else
+                    {
+                        if (prevStaticB2 && !canMergeStatic(*prevStaticB2, q))
+                        {
+                            if (prevStaticB2->state.order != q.state.order || prevStaticB2->psoKey != q.psoKey)
+                                ++b2BrkState;
+                            else if (prevStaticB2->texArrayId != q.texArrayId || (prevStaticB2->texArrayId < 0 && prevStaticB2->state.texture != q.state.texture))
+                                ++b2BrkArr;
+                            else if (prevStaticB2->state.clamp != q.state.clamp || prevStaticB2->state.alphaTest != q.state.alphaTest || prevStaticB2->stateHash != q.stateHash)
+                                ++b2BrkState;
+                            else
+                                ++b2BrkClip;
+                        }
+                        prevStaticB2 = &q;
+                    }
+                    continue;
+                }
                 if (q.bucket != 0u && q.bucket != 1u)
                     continue;
                 if (q.skinned)
@@ -3448,7 +3580,7 @@ private:
                 }
                 prevStatic = &q;
             }
-            std::fprintf(stderr, "[mali:stats] frame=%llu draws=%u mergeSaved=%u instSaved=%u pass2Skip=%u culled=%u direct=%d drop=%llu drs=%.2f drawMs=%.2f swapMs=%.2f capMs=%.2f renderMs=%.2f mem=%.1f/%.1fM arr=%u arrMiss=%u/%llu b=%u/%u/%u/%u b2s=%u brk=%u/%u/%u/%u/%u/%u skin=%u/%u/%u\n",
+            std::fprintf(stderr, "[mali:stats] frame=%llu draws=%u mergeSaved=%u instSaved=%u pass2Skip=%u culled=%u direct=%d drop=%llu drs=%.2f drawMs=%.2f swapMs=%.2f capMs=%.2f renderMs=%.2f mem=%.1f/%.1fM arr=%u arrMiss=%u/%llu b=%u/%u/%u/%u b2s=%u brk=%u/%u/%u/%u/%u/%u b2brk=%u/%u/%u/%u/%u/%u skin=%u/%u/%u upQ=%zu\n",
                          static_cast<unsigned long long>(m_frameNum), m_drawCallsThisFrame,
                          m_mergeSavedThisFrame, m_instSavedThisFrame, m_pass2SkipThisFrame, m_culledThisFrame,
                          m_lastPresentedDirect ? 1 : 0,
@@ -3457,7 +3589,9 @@ private:
                          m_arrMissDrawsThisFrame, static_cast<unsigned long long>(m_arrMissUploads),
                          bCnt[0], bCnt[1], bCnt[2], bCnt[3], m_b2SavedThisFrame,
                          brkClip, brkArr, brkState, brkDyn, brkSkin, brkNoSrc,
-                         m_skinGpuDrawsThisFrame, m_skinCpuDrawsThisFrame, m_skinMaxQwordsThisFrame);
+                         b2BrkClip, b2BrkArr, b2BrkState, b2BrkDyn, b2BrkSkin, b2BrkNoSrc,
+                         m_skinGpuDrawsThisFrame, m_skinCpuDrawsThisFrame, m_skinMaxQwordsThisFrame,
+                         m_deferredUploads.size());
         }
 
         if (m_frameNum % 300u == 0u)
@@ -3644,6 +3778,7 @@ private:
         m_progArrOpaque.shadow.reset();
         m_progArrCut.shadow.reset();
         m_progArrSoft.shadow.reset();
+        m_progWater.shadow.reset();
         glDisable(GL_CULL_FACE);
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, m_bgTarget.color ? m_bgTarget.color : m_whiteTex);
@@ -3672,6 +3807,7 @@ private:
         case 16u: return m_progArrOpaque;
         case 17u: return m_progArrCut;
         case 18u: return m_progArrSoft;
+        case 19u: return m_progWater;
         default: return m_progDepth;
         }
     }
@@ -3835,12 +3971,21 @@ private:
         setCached4f(prog.uFogC, sh.fogC, v, m_fog.scale, q.state.lodK, q.state.lodScale, q.state.maxLod);
         setCached4f(prog.uFogCol, sh.fogCol, v, m_fog.colour[0], m_fog.colour[1], m_fog.colour[2], texAlphaScale);
 
-        const bool bgFog = allowBgFog && m_fog.enabled && q.state.fogged && !q.state.background;
-        setCached4f(prog.uFogA, sh.fogA, v, m_fog.start, m_fog.width, static_cast<float>(m_fog.steps), bgFog ? 1.0f : 0.0f);
+        if (q.state.reflectionSample)
+        {
+            setCached4f(prog.uFogA, sh.fogA, v, q.state.mirrorRipple[0], q.state.mirrorRipple[1], 0.0f, 0.0f);
+            setCached4f(prog.uGuard, sh.guard, v, 0.0f, 0.0f, 0.0f, 0.0f);
+            setCached4f(prog.uAlpha, sh.alpha, v, minAlpha, maxAlpha, q.state.reflectionTint[3], 0.0f);
+        }
+        else
+        {
+            const bool bgFog = allowBgFog && m_fog.enabled && q.state.fogged && !q.state.background;
+            setCached4f(prog.uFogA, sh.fogA, v, m_fog.start, m_fog.width, static_cast<float>(m_fog.steps), bgFog ? 1.0f : 0.0f);
 
-        const bool useGuard = q.state.background && m_fog.skyNear > 0.0f;
-        setCached4f(prog.uGuard, sh.guard, v, useGuard ? 1.0f : 0.0f, m_fog.skyNear, q.state.screenDepthTest ? 1.0f : 0.0f, 0.0f);
-        setCached4f(prog.uAlpha, sh.alpha, v, minAlpha, maxAlpha, 0.0f, 0.0f);
+            const bool useGuard = q.state.background && m_fog.skyNear > 0.0f;
+            setCached4f(prog.uGuard, sh.guard, v, useGuard ? 1.0f : 0.0f, m_fog.skyNear, q.state.screenDepthTest ? 1.0f : 0.0f, 0.0f);
+            setCached4f(prog.uAlpha, sh.alpha, v, minAlpha, maxAlpha, 0.0f, 0.0f);
+        }
         sh.valid = true;
     }
 
@@ -4148,6 +4293,8 @@ private:
     bool m_hasAstc = false;
     bool m_cullEnabled = true;
     bool m_tex16Enabled = true;
+    bool m_tex5551Enabled = false;
+    bool m_waterEnabled = true;
     bool m_drsEnabled = true;
     bool m_shaderCacheEnabled = true;
     bool m_gpuSkinEnabled = true;
@@ -4237,7 +4384,10 @@ private:
     uint32_t m_skinGpuDrawsThisFrame = 0;
     uint32_t m_skinCpuDrawsThisFrame = 0;
     uint32_t m_skinMaxQwordsThisFrame = 0;
+    uint32_t m_skinInvalidThisFrame = 0;
     bool m_skinErrLogged = false;
+    bool m_skinInvalidLogged = false;
+    std::deque<UploadCmd> m_deferredUploads;
     uint64_t m_mergeSrcBytes = 0;
     uint64_t m_mergeRunBytes = 0;
     uint64_t m_gpuMeshBytes = 0;
@@ -4252,6 +4402,7 @@ private:
     ShaderProg m_progSkinOpaqueFast{}, m_progSkinCutFast{}, m_progSkinSoftFast{};
     ShaderProg m_progArrOpaqueFast{}, m_progArrCutFast{}, m_progArrSoftFast{};
     ShaderProg m_progArrOpaque{}, m_progArrCut{}, m_progArrSoft{};
+    ShaderProg m_progWater{};
     GLuint m_emptyVao = 0;
     GLuint m_whiteTex = 0;
     MaliTarget m_mainTarget[2]{}, m_postTarget{}, m_bgTarget{};
