@@ -106,6 +106,14 @@ inline int envInt(const char *name, int fallback)
     return std::atoi(e);
 }
 
+inline float envFloat(const char *name, float fallback)
+{
+    const char *e = std::getenv(name);
+    if (!e || !e[0])
+        return fallback;
+    return std::strtof(e, nullptr);
+}
+
 inline uint64_t fnv1aHash(const void *data, size_t len, uint64_t h = 14695981039346656037ull)
 {
     const auto *p = static_cast<const uint8_t *>(data);
@@ -385,6 +393,162 @@ void main()
 }
 )";
 
+// Phase 7B: Lean fragment shaders for Mali-G31 when background/vertex fog are inactive,
+// plus discard-free Soft variants that preserve Early-Z / Forward Pixel Kill (FPK).
+static const char *kMaliOpaqueFastFrag = MALI_FRAG_HDR R"(
+in highp vec4 vUV;
+in mediump vec4 vColor;
+in highp float vLogW;
+
+uniform sampler2D uTex;
+uniform highp vec4 uFogC;
+uniform mediump vec4 uFogCol;
+
+out mediump vec4 oColor;
+
+void main()
+{
+    mediump vec4 t;
+    if (uFogCol.w > 0.5)
+    {
+        if (uFogC.w > 0.0)
+        {
+            highp float lod = clamp(vLogW * uFogC.z + uFogC.y, 0.0, uFogC.w);
+            t = textureLod(uTex, vUV.xy, lod);
+        }
+        else
+        {
+            t = texture(uTex, vUV.xy);
+        }
+    }
+    else
+    {
+        t = vec4(vec3(128.0 / 255.0), 1.0);
+    }
+    mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
+    oColor = vec4(raw / (vec3(1.0) + raw * 0.35), 1.0);
+}
+)";
+
+static const char *kMaliCutFastFrag = MALI_FRAG_HDR R"(
+in highp vec4 vUV;
+in mediump vec4 vColor;
+in highp vec4 vScreen;
+in highp float vLogW;
+
+uniform sampler2D uTex;
+uniform highp vec4 uFogC;
+uniform mediump vec4 uFogCol;
+uniform mediump vec4 uAlpha;
+
+out mediump vec4 oColor;
+
+void main()
+{
+    if (vScreen.w < 0.0)
+        discard;
+    mediump vec4 t;
+    if (uFogCol.w > 0.5)
+    {
+        if (uFogC.w > 0.0)
+        {
+            highp float lod = clamp(vLogW * uFogC.z + uFogC.y, 0.0, uFogC.w);
+            t = textureLod(uTex, vUV.xy, lod);
+        }
+        else
+        {
+            t = texture(uTex, vUV.xy);
+        }
+    }
+    else
+    {
+        t = vec4(vec3(128.0 / 255.0), 1.0);
+    }
+    mediump float alpha = clamp(t.a * max(uFogCol.w, 1.0) * vColor.a, 0.0, 1.0);
+    if (alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y))
+        discard;
+    mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
+    oColor = vec4(raw / (vec3(1.0) + raw * 0.35), alpha);
+}
+)";
+
+static const char *kMaliSoftFastFrag = MALI_FRAG_HDR R"(
+in highp vec4 vUV;
+in mediump vec4 vColor;
+in highp float vLogW;
+
+uniform sampler2D uTex;
+uniform highp vec4 uFogC;
+uniform mediump vec4 uFogCol;
+uniform mediump vec4 uAlpha;
+
+out mediump vec4 oColor;
+
+void main()
+{
+    mediump vec4 t;
+    if (uFogCol.w > 0.5)
+    {
+        if (uFogC.w > 0.0)
+        {
+            highp float lod = clamp(vLogW * uFogC.z + uFogC.y, 0.0, uFogC.w);
+            t = textureLod(uTex, vUV.xy, lod);
+        }
+        else
+        {
+            t = texture(uTex, vUV.xy);
+        }
+    }
+    else
+    {
+        t = vec4(vec3(128.0 / 255.0), 1.0);
+    }
+    mediump float alpha = clamp(t.a * max(uFogCol.w, 1.0) * vColor.a, 0.0, 1.0);
+    if (alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y))
+        alpha = 0.0;
+    mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
+    oColor = vec4(raw / (vec3(1.0) + raw * 0.35), alpha);
+}
+)";
+
+static const char *kMaliSoftFrag = MALI_FRAG_HDR R"(
+in highp vec4 vUV;
+in mediump vec4 vColor;
+in highp vec4 vScreen;
+in highp float vLogW;
+
+uniform sampler2D uTex;
+uniform sampler2D uBackground;
+uniform highp vec4 uFogA;
+uniform highp vec4 uFogC;
+uniform mediump vec4 uFogCol;
+uniform mediump vec4 uAlpha;
+
+out mediump vec4 oColor;
+
+void main()
+{
+    highp float depth = vUV.z;
+    highp float lod = uFogC.w > 0.0 ? clamp(vLogW * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
+    mediump vec4 t = uFogCol.w > 0.5 ? textureLod(uTex, vUV.xy, lod) : vec4(vec3(128.0 / 255.0), 1.0);
+    mediump float alpha = clamp(t.a * max(uFogCol.w, 1.0) * vColor.a, 0.0, 1.0);
+    if (alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y))
+        alpha = 0.0;
+    mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
+    mediump vec3 rgb = raw / (vec3(1.0) + raw * 0.35);
+    rgb = mix(uFogCol.rgb, rgb, clamp(vUV.w / max(depth, 1e-3), 0.0, 1.0));
+    if (uFogA.w > 0.5)
+    {
+        highp vec2 scr = vScreen.xy / max(vScreen.z, 1e-3) * 0.5 + 0.5;
+        mediump float f = clamp((depth - uFogA.x) / max(uFogA.y, 1e-3), 0.0, 1.0);
+        if (uFogA.z > 0.0)
+            f = floor(f * uFogA.z) / uFogA.z;
+        rgb = mix(rgb, texture(uBackground, scr).rgb, f);
+    }
+    oColor = vec4(rgb, alpha);
+}
+)";
+
 static const char *kMaliScreenVert = MALI_VERT_HDR R"(
 layout(location = 0) in vec3 aPos;
 layout(location = 2) in vec4 aColor;
@@ -565,7 +729,7 @@ bool linkProgCached(ShaderProg &out, const char *name, const char *vsSrc, const 
     std::string binPath;
     if (useCache && !cacheDir.empty())
     {
-        binPath = cacheDir + "/" + name + "_v9.bin";
+        binPath = cacheDir + "/" + name + "_v10.bin";
         if (FILE *fp = std::fopen(binPath.c_str(), "rb"))
         {
             GLenum fmt = 0;
@@ -829,11 +993,11 @@ struct FramePacket
 
 inline uint32_t makePsoKey(uint32_t prog, Blend blend, bool depthTest, bool depthWrite, uint32_t depthFunc)
 {
-    return (prog & 7u)
-         | ((static_cast<uint32_t>(blend) & 3u) << 3)
-         | ((depthTest ? 1u : 0u) << 5)
-         | ((depthWrite ? 1u : 0u) << 6)
-         | ((depthFunc & 3u) << 7);
+    return (prog & 15u)
+         | ((static_cast<uint32_t>(blend) & 3u) << 4)
+         | ((depthTest ? 1u : 0u) << 6)
+         | ((depthWrite ? 1u : 0u) << 7)
+         | ((depthFunc & 3u) << 8);
 }
 
 inline bool cullAabb(const float *c, const float *lo, const float *hi, float &outMinW)
@@ -937,7 +1101,11 @@ public:
         m_instancingEnabled = envBool("SOTC_MALI_INSTANCING", true);
         m_keepCurrentEnabled = envBool("SOTC_MALI_KEEP_CURRENT", true);
         m_directScanoutEnabled = envBool("SOTC_MALI_DIRECT_SCANOUT", true);
-        m_drsDrawOnly = envBool("SOTC_MALI_DRS_DRAW_ONLY", true);
+        m_fastShadersEnabled = envBool("SOTC_MALI_FAST_SHADERS", true);
+        m_drsDrawOnly = envBool("SOTC_MALI_DRS_DRAW_ONLY", false);
+        m_drsMin = std::clamp(envFloat("SOTC_MALI_DRS_MIN", 0.60f), 0.45f, 1.0f);
+        m_drsMax = std::clamp(envFloat("SOTC_MALI_DRS_MAX", 1.0f), m_drsMin, 1.0f);
+        m_drsScale = m_drsMax;
         if (const char *sm = std::getenv("SOTC_SCREEN_MODE"); sm && sm[0])
             m_screenMode = std::atoi(sm);
         else if (std::getenv("SOTC_STRETCH"))
@@ -1461,7 +1629,14 @@ private:
             !linkProgCached(m_progSkinOpaque, "skin_opaque", kMaliSkinVert, kMaliOpaqueFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
             !linkProgCached(m_progSkinCut, "skin_cut", kMaliSkinVert, kMaliCutFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
             !linkProgCached(m_progDepth, "depth", kMaliDepthVert, kMaliDepthFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
-            !linkProgCached(m_progPost, "post", kMaliPostVert, kMaliPostFrag, m_shaderCacheDir, m_shaderCacheEnabled))
+            !linkProgCached(m_progPost, "post", kMaliPostVert, kMaliPostFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
+            !linkProgCached(m_progOpaqueFast, "opaque_fast", kMaliWorldVert, kMaliOpaqueFastFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
+            !linkProgCached(m_progCutFast, "cut_fast", kMaliWorldVert, kMaliCutFastFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
+            !linkProgCached(m_progSoftFast, "soft_fast", kMaliWorldVert, kMaliSoftFastFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
+            !linkProgCached(m_progSoft, "soft", kMaliWorldVert, kMaliSoftFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
+            !linkProgCached(m_progSkinOpaqueFast, "skin_opaque_fast", kMaliSkinVert, kMaliOpaqueFastFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
+            !linkProgCached(m_progSkinCutFast, "skin_cut_fast", kMaliSkinVert, kMaliCutFastFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
+            !linkProgCached(m_progSkinSoftFast, "skin_soft_fast", kMaliSkinVert, kMaliSoftFastFrag, m_shaderCacheDir, m_shaderCacheEnabled))
         {
             return false;
         }
@@ -1488,11 +1663,12 @@ private:
         makeTarget(m_bgTarget, 256, 256, true);
         m_lastPresentTime = std::chrono::steady_clock::now();
         m_initialized = true;
-        std::fprintf(stderr, "[mali] Phase 7A GLES 3.2 backend up (async=%d mailbox=%d keepCur=%d direct=%d merge=%d inst=%d atPass2=%d cull=%d skin=%d drs=%d@%dfps drawOnly=%d budget=%lluM)\n",
+        std::fprintf(stderr, "[mali] Phase 7B GLES 3.2 backend up (async=%d mailbox=%d keepCur=%d direct=%d fastSh=%d merge=%d inst=%d atPass2=%d cull=%d skin=%d drs=%d@%dfps[%.2f..%.2f] drawOnly=%d budget=%lluM)\n",
                      m_asyncEnabled ? 1 : 0, m_mailboxEnabled ? 1 : 0, m_keepCurrentEnabled ? 1 : 0,
-                     m_directScanoutEnabled ? 1 : 0, m_mergeEnabled ? 1 : 0, m_instancingEnabled ? 1 : 0,
+                     m_directScanoutEnabled ? 1 : 0, m_fastShadersEnabled ? 1 : 0,
+                     m_mergeEnabled ? 1 : 0, m_instancingEnabled ? 1 : 0,
                      m_atPass2Mode, m_cullEnabled ? 1 : 0, m_gpuSkinEnabled ? 1 : 0,
-                     m_drsEnabled ? 1 : 0, m_drsTargetFps, m_drsDrawOnly ? 1 : 0,
+                     m_drsEnabled ? 1 : 0, m_drsTargetFps, m_drsMin, m_drsMax, m_drsDrawOnly ? 1 : 0,
                      static_cast<unsigned long long>(m_cacheBudgetBytes >> 20));
         return true;
     }
@@ -1539,6 +1715,13 @@ private:
         delProg(m_progSkinCut);
         delProg(m_progDepth);
         delProg(m_progPost);
+        delProg(m_progOpaqueFast);
+        delProg(m_progCutFast);
+        delProg(m_progSoftFast);
+        delProg(m_progSoft);
+        delProg(m_progSkinOpaqueFast);
+        delProg(m_progSkinCutFast);
+        delProg(m_progSkinSoftFast);
         m_initialized = false;
     }
 
@@ -2099,8 +2282,11 @@ private:
                 const bool isOpaque = !hasAnyAlphaTest && !rd.state.background && !rd.state.overlay && !rd.state.noDepthWrite &&
                                       (rd.state.blend == Blend::Opaque ||
                                        (rd.state.blend == Blend::Normal && rd.state.opacity >= 0.99f && mesh.minAlpha >= 124u && texOpaque));
-                const uint32_t opProg = q.skinned ? 3u : 0u;
-                const uint32_t cutProg = q.skinned ? 4u : 1u;
+                const bool needBgFog = m_fog.enabled && rd.state.fogged && !rd.state.background;
+                const bool needVFog = m_fog.vertexFog && (!rd.state.background || rd.state.backgroundFge);
+                const bool fastFog = m_fastShadersEnabled && !needBgFog && !needVFog;
+                const uint32_t opProg = q.skinned ? (fastFog ? 9u : 3u) : (fastFog ? 6u : 0u);
+                const uint32_t cutProg = q.skinned ? (fastFog ? 10u : 4u) : (fastFog ? 7u : 1u);
                 if (isOpaque)
                 {
                     q.bucket = 0u;
@@ -2117,7 +2303,12 @@ private:
                     const uint32_t df = rd.state.overlay ? 2u : 0u;
                     const bool dw = !rd.state.overlay && !rd.state.noDepthWrite &&
                                     (rd.state.blend != Blend::Additive || rd.state.writeDepth);
-                    q.psoKey = makePsoKey(cutProg, rd.state.blend, true, dw, df);
+                    const bool needsGuard = rd.state.background && m_fog.skyNear > 0.0f;
+                    const bool hasHardCut = ate && (atst == 5u || atst == 6u) && afail == 0u;
+                    const bool canSoft = m_fastShadersEnabled && !dw && !needsGuard && !hasHardCut &&
+                                         (rd.state.blend == Blend::Normal || rd.state.blend == Blend::Additive || rd.state.blend == Blend::Subtract);
+                    const uint32_t b2Prog = canSoft ? (q.skinned ? (fastFog ? 11u : 4u) : (fastFog ? 8u : 12u)) : cutProg;
+                    q.psoKey = makePsoKey(b2Prog, rd.state.blend, true, dw, df);
                 }
             }
 
@@ -2332,7 +2523,9 @@ private:
                                 if (anyNeedPass2)
                                 {
                                     QueuedDraw p2 = sq;
-                                    p2.psoKey = makePsoKey(1u, sq.state.blend, true, false, 1u);
+                                    const bool fastFog = ((sq.psoKey & 15u) == 7u || (sq.psoKey & 15u) == 10u);
+                                    const uint32_t p2Prog = m_fastShadersEnabled ? (fastFog ? 8u : 12u) : 1u;
+                                    p2.psoKey = makePsoKey(p2Prog, sq.state.blend, true, false, 1u);
                                     emitMergedRun(p2, *run, pkt, true, 0.02f, aref);
                                 }
                                 else if (((sq.state.alphaTest >> 12) & 3u) == 1u || ((sq.state.alphaTest >> 12) & 3u) == 3u)
@@ -2400,7 +2593,9 @@ private:
                                 if (needsAlphaTestPass2(*inst[k], aref)) { anyPass2 = true; break; }
                             if (anyPass2)
                             {
-                                const uint32_t p2Pso = makePsoKey(1u, iq.state.blend, true, false, 1u);
+                                const bool fastFog = ((iq.psoKey & 15u) == 7u || (iq.psoKey & 15u) == 10u);
+                                const uint32_t p2Prog = m_fastShadersEnabled ? (fastFog ? 8u : 12u) : 1u;
+                                const uint32_t p2Pso = makePsoKey(p2Prog, iq.state.blend, true, false, 1u);
                                 emitInstanced(inst, count, pkt, true, 0.02f, aref, p2Pso);
                             }
                             else if (((iq.state.alphaTest >> 12) & 3u) == 1u || ((iq.state.alphaTest >> 12) & 3u) == 3u)
@@ -2494,41 +2689,44 @@ private:
         const double drawMs = static_cast<double>(nowUs() - frameStartUs) * 0.001;
         m_emaDrawMs = m_emaDrawMs > 0.0 ? (m_emaDrawMs * 0.85 + drawMs * 0.15) : drawMs;
 
+        double lastCapMs = 0.0;
         if (!pkt.hold)
         {
             if (const auto &hook = presentHook())
                 hook(outTex, outW, outH);
 #if defined(PS2X_LINUX_SDL2_SHIM)
             const double swapMs = ps2xLinuxLastSwapMs();
-            const double capMs = ps2xLinuxLastCapSleepMs();
+            lastCapMs = ps2xLinuxLastCapSleepMs();
             m_emaSwapMs = m_emaSwapMs > 0.0 ? (m_emaSwapMs * 0.85 + swapMs * 0.15) : swapMs;
-            m_emaCapMs = m_emaCapMs > 0.0 ? (m_emaCapMs * 0.85 + capMs * 0.15) : capMs;
+            m_emaCapMs = m_emaCapMs > 0.0 ? (m_emaCapMs * 0.85 + lastCapMs * 0.15) : lastCapMs;
 #endif
         }
 
         const double frameMs = static_cast<double>(nowUs() - frameStartUs) * 0.001;
+        const double gpuFrameMs = std::max(0.0, frameMs - lastCapMs);
         m_emaFrameMs = m_emaFrameMs > 0.0 ? (m_emaFrameMs * 0.85 + frameMs * 0.15) : frameMs;
+        m_emaGpuFrameMs = m_emaGpuFrameMs > 0.0 ? (m_emaGpuFrameMs * 0.85 + gpuFrameMs * 0.15) : gpuFrameMs;
         if (m_drsEnabled && (m_frameNum % 12u == 0u))
         {
-            const double metricMs = m_drsDrawOnly ? m_emaDrawMs : m_emaFrameMs;
+            const double metricMs = m_drsDrawOnly ? m_emaDrawMs : m_emaGpuFrameMs;
             const double budgetMs = (1000.0 / static_cast<double>(m_drsTargetFps)) * (m_drsDrawOnly ? 0.85 : 1.0);
-            if (metricMs > budgetMs * 1.10)
+            if (metricMs > budgetMs * 1.12)
             {
                 ++m_drsOverStreak;
                 m_drsUnderStreak = 0;
-                if (m_drsOverStreak >= 2 && m_drsScale > 0.75f)
+                if (m_drsOverStreak >= 2 && m_drsScale > m_drsMin)
                 {
-                    m_drsScale = std::max(0.75f, m_drsScale - 0.05f);
+                    m_drsScale = std::max(m_drsMin, m_drsScale - 0.05f);
                     m_drsOverStreak = 0;
                 }
             }
-            else if (metricMs < budgetMs * 1.02)
+            else if (metricMs <= budgetMs * 1.04 && m_emaDrawMs < budgetMs * 0.70)
             {
                 ++m_drsUnderStreak;
                 m_drsOverStreak = 0;
-                if (m_drsUnderStreak >= 4 && m_drsScale < 1.0f)
+                if (m_drsUnderStreak >= 6 && m_drsScale < m_drsMax)
                 {
-                    m_drsScale = std::min(1.0f, m_drsScale + 0.05f);
+                    m_drsScale = std::min(m_drsMax, m_drsScale + 0.05f);
                     m_drsUnderStreak = 0;
                 }
             }
@@ -2720,6 +2918,13 @@ private:
         m_progSkinOpaque.shadow.reset();
         m_progSkinCut.shadow.reset();
         m_progDepth.shadow.reset();
+        m_progOpaqueFast.shadow.reset();
+        m_progCutFast.shadow.reset();
+        m_progSoftFast.shadow.reset();
+        m_progSoft.shadow.reset();
+        m_progSkinOpaqueFast.shadow.reset();
+        m_progSkinCutFast.shadow.reset();
+        m_progSkinSoftFast.shadow.reset();
         glDisable(GL_CULL_FACE);
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, m_bgTarget.color ? m_bgTarget.color : m_whiteTex);
@@ -2735,22 +2940,29 @@ private:
         case 2u: return m_progScreen;
         case 3u: return m_progSkinOpaque;
         case 4u: return m_progSkinCut;
+        case 6u: return m_progOpaqueFast;
+        case 7u: return m_progCutFast;
+        case 8u: return m_progSoftFast;
+        case 9u: return m_progSkinOpaqueFast;
+        case 10u: return m_progSkinCutFast;
+        case 11u: return m_progSkinSoftFast;
+        case 12u: return m_progSoft;
         default: return m_progDepth;
         }
     }
 
     const ShaderProg &applyPso(uint32_t psoKey)
     {
-        const uint32_t progIdx = psoKey & 7u;
+        const uint32_t progIdx = psoKey & 15u;
         const ShaderProg &prog = progForIdx(progIdx);
         if (psoKey == m_lastPso)
             return prog;
 
-        if ((m_lastPso == ~0u) || ((m_lastPso & 7u) != progIdx))
+        if ((m_lastPso == ~0u) || ((m_lastPso & 15u) != progIdx))
             glUseProgram(prog.id);
 
-        const Blend blend = static_cast<Blend>((psoKey >> 3) & 3u);
-        if ((m_lastPso == ~0u) || (((m_lastPso >> 3) & 3u) != static_cast<uint32_t>(blend)))
+        const Blend blend = static_cast<Blend>((psoKey >> 4) & 3u);
+        if ((m_lastPso == ~0u) || (((m_lastPso >> 4) & 3u) != static_cast<uint32_t>(blend)))
         {
             if (blend == Blend::Opaque)
             {
@@ -2777,19 +2989,19 @@ private:
             }
         }
 
-        const bool depthTest = ((psoKey >> 5) & 1u) != 0u;
-        if ((m_lastPso == ~0u) || (((m_lastPso >> 5) & 1u) != (depthTest ? 1u : 0u)))
+        const bool depthTest = ((psoKey >> 6) & 1u) != 0u;
+        if ((m_lastPso == ~0u) || (((m_lastPso >> 6) & 1u) != (depthTest ? 1u : 0u)))
         {
             if (depthTest) glEnable(GL_DEPTH_TEST);
             else glDisable(GL_DEPTH_TEST);
         }
 
-        const bool depthWrite = ((psoKey >> 6) & 1u) != 0u;
-        if ((m_lastPso == ~0u) || (((m_lastPso >> 6) & 1u) != (depthWrite ? 1u : 0u)))
+        const bool depthWrite = ((psoKey >> 7) & 1u) != 0u;
+        if ((m_lastPso == ~0u) || (((m_lastPso >> 7) & 1u) != (depthWrite ? 1u : 0u)))
             glDepthMask(depthWrite ? GL_TRUE : GL_FALSE);
 
-        const uint32_t df = (psoKey >> 7) & 3u;
-        if ((m_lastPso == ~0u) || (((m_lastPso >> 7) & 3u) != df))
+        const uint32_t df = (psoKey >> 8) & 3u;
+        if ((m_lastPso == ~0u) || (((m_lastPso >> 8) & 3u) != df))
         {
             const GLenum fn = (df == 1u) ? GL_LESS : (df == 2u ? GL_EQUAL : (df == 3u ? GL_ALWAYS : GL_LEQUAL));
             glDepthFunc(fn);
@@ -2972,7 +3184,10 @@ private:
             if (needsAlphaTestPass2(q, aref))
             {
                 QueuedDraw pass2 = q;
-                pass2.psoKey = makePsoKey(q.skinned ? 4u : 1u, q.state.blend, true, false, 1u);
+                const bool fastFog = ((q.psoKey & 15u) == 7u || (q.psoKey & 15u) == 10u);
+                const uint32_t p2Prog = m_fastShadersEnabled ? (q.skinned ? (fastFog ? 11u : 4u) : (fastFog ? 8u : 12u))
+                                                             : (q.skinned ? 4u : 1u);
+                pass2.psoKey = makePsoKey(p2Prog, q.state.blend, true, false, 1u);
                 emitDrawSingle(pass2, pkt, true, 0.02f, aref);
             }
             else if (((q.state.alphaTest >> 12) & 3u) == 1u || ((q.state.alphaTest >> 12) & 3u) == 3u)
@@ -3188,9 +3403,10 @@ private:
     bool m_instancingEnabled = true;
     bool m_keepCurrentEnabled = true;
     bool m_directScanoutEnabled = true;
+    bool m_fastShadersEnabled = true;
     bool m_hasLetterboxCrop = false;
     int m_screenMode = -1;
-    bool m_drsDrawOnly = true;
+    bool m_drsDrawOnly = false;
     int m_atPass2Mode = 1;
     bool m_zPrepassEnabled = false;
     bool m_postEnabled = true;
@@ -3211,11 +3427,14 @@ private:
     uint32_t m_bgRate = 2;
     int m_targetFps = 30;
     int m_drsTargetFps = 30;
+    float m_drsMin = 0.60f;
+    float m_drsMax = 1.0f;
     float m_drsScale = 1.0f;
     double m_emaDrawMs = 0.0;
     double m_emaSwapMs = 0.0;
     double m_emaCapMs = 0.0;
     double m_emaFrameMs = 0.0;
+    double m_emaGpuFrameMs = 0.0;
     int m_drsOverStreak = 0;
     int m_drsUnderStreak = 0;
     std::chrono::steady_clock::time_point m_lastPresentTime{};
@@ -3270,6 +3489,8 @@ private:
 
     ShaderProg m_progOpaque{}, m_progCut{}, m_progScreen{};
     ShaderProg m_progSkinOpaque{}, m_progSkinCut{}, m_progDepth{}, m_progPost{};
+    ShaderProg m_progOpaqueFast{}, m_progCutFast{}, m_progSoftFast{}, m_progSoft{};
+    ShaderProg m_progSkinOpaqueFast{}, m_progSkinCutFast{}, m_progSkinSoftFast{};
     GLuint m_emptyVao = 0;
     GLuint m_whiteTex = 0;
     MaliTarget m_mainTarget[2]{}, m_postTarget{}, m_bgTarget{};
