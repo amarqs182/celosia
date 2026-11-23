@@ -3312,7 +3312,11 @@ void PS2Runtime::run()
                 if (std::getenv("SOTC_STRETCH")) return 1;
                 return -1;
             }();
+#if defined(PS2X_LINUX_SDL2_SHIM)
+            const int screenMode = hostmenu::settings().screenMode.load(std::memory_order_relaxed);
+#else
             const int screenMode = (envScreenMode >= 0) ? envScreenMode : hostmenu::settings().screenMode.load(std::memory_order_relaxed);
+#endif
             float dstWidth = std::min(screenWidth, screenHeight * aspect);
             float dstHeight = dstWidth / aspect;
             if (screenMode == hostmenu::kScreenStretch)

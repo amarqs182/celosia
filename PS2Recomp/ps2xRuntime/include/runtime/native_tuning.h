@@ -79,6 +79,12 @@ namespace native_renderer
         float maliAniso = 0.0f;         // SOTC_MALI_ANISO (0 off, 1 2x, 2 4x)
         bool maliFxaa = false;          // SOTC_MALI_FXAA
         bool maliRcas = false;          // SOTC_MALI_RCAS / SOTC_MALI_FSR_RCAS
+        bool maliDrs = true;            // SOTC_MALI_DRS
+        float maliAtPass2 = 1.0f;       // SOTC_MALI_AT_PASS2 (0 off, 1 smart auto, 2 always)
+        bool maliFastShaders = true;    // SOTC_MALI_FAST_SHADERS
+        bool maliCull = true;           // SOTC_MALI_CULL
+        bool maliMerge = true;          // SOTC_MALI_MERGE
+        bool maliInstancing = true;     // SOTC_MALI_INSTANCING
         bool p4Move = false;            // SOTC_P4MOVE
         bool p2Ptcl = false;            // SOTC_P2PTCL
         bool p1Chara = false;           // SOTC_P1CHARA
@@ -843,7 +849,7 @@ namespace native_renderer
     // its memory; the presets, settings.cfg and SOTC_RENDER_SCALE are
     // clamped to it). The Mac: up to 4x.
     constexpr float kMinRenderScale = 0.5f;
-#if defined(__vita__)
+#if defined(__vita__) || defined(__linux__)
     constexpr float kMaxRenderScale = 2.0f;
 #else
     constexpr float kMaxRenderScale = 4.0f;

@@ -101,18 +101,8 @@ export SOTC_ALPHA_TEST=1
 export SOTC_NATIVE_NOADDITIVE=0
 
 # 3. Geometria Estavel Sem Pop-in, Culling Nativo de Frustum e Meshopt
-export SOTC_PRESET=1
-export SOTC_SACRIFICES=0
-export SOTC_SAC_LOD=0
-# export SOTC_SAC_LOD_SCALE=1.6
-export SOTC_SAC_DRAWDIST=0
-# export SOTC_SAC_DRAWDIST_SCALE=0.75
 export SOTC_SAC_FAR_TERRAIN_SCALE=0
 export SOTC_SAC_MIN_PROJECTED=0
-export SOTC_SAC_CAMCOLL=1
-export SOTC_SAC_FARCHARA=0
-# export SOTC_SAC_FARCHARA_DIST=35.0
-export SOTC_SAC_FX=0
 export SOTC_GL_SORT87=0
 export SOTC_SORT_OPAQUE=1
 export SOTC_GL_TEXARRAY=1
@@ -203,18 +193,8 @@ export SOTC_COLLISION_STATS=0
 export SOTC_COLL115_LOG=0
 export SOTC_SEG123=0
 export SOTC_RENDERER="${SOTC_RENDERER:-mali}"
-# Mali-G31 Team ICO Pseudo-HDR, Post-FX & Fase E (alternar 0/1 ou pelo menu FN in-game)
-export SOTC_MALI_BLOOM=1
-export SOTC_MALI_EXPOSURE=1
-export SOTC_MALI_DOF=1
-export SOTC_MALI_MOTION_BLUR=1
-export SOTC_MALI_CA=1
-export SOTC_MALI_LENS_FLARE=1
-export SOTC_MALI_AO=1
-export SOTC_MALI_TRILINEAR=0
-export SOTC_MALI_ANISO=0
-export SOTC_MALI_FXAA=0
-export SOTC_MALI_RCAS=0
+# Mali-G31 Team ICO Pseudo-HDR, Post-FX & Fase E sao gerenciados pelo submenu FN (celosia_settings.cfg)
+# com defaults nativos do R36S em defaultTuning().
 # export SOTC_MALI_STATS=1
 export SOTC_GL_SHOTS=0
 export SOTC_GL_SHOT_DIR=/tmp/shots
