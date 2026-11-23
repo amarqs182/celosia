@@ -3110,7 +3110,7 @@ private:
                                 {
                                     QueuedDraw p2 = sq;
                                     const bool fastFog = ((sq.psoKey & 31u) == 7u || (sq.psoKey & 31u) == 10u);
-                                    const uint32_t p2Prog = m_fastShadersEnabled ? (fastFog ? 8u : 12u) : 1u;
+                                    const uint32_t p2ProgBase = m_fastShadersEnabled ? (fastFog ? 8u : 12u) : 1u; const uint32_t p2Prog = (sq.texArrayId >= 0) ? toArrayProg(p2ProgBase) : p2ProgBase;
                                     p2.psoKey = makePsoKey(p2Prog, sq.state.blend, true, false, 1u);
                                     emitMergedRun(p2, *run, pkt, true, 0.02f, aref);
                                 }
@@ -3334,24 +3334,27 @@ private:
         }
         m_arenaSlot = (m_arenaSlot + 1) % 3;
 
+        const double drawMs = static_cast<double>(nowUs() - frameStartUs) * 0.001;
+        m_emaDrawMs = m_emaDrawMs > 0.0 ? (m_emaDrawMs * 0.85 + drawMs * 0.15) : drawMs;
+        double pacerSleepMs = 0.0;
         if (m_paceEnabled && !pkt.hold)
         {
             const auto period = std::chrono::microseconds(1000000 / m_targetFps);
             const auto target = m_lastPresentTime + period;
             const auto now = std::chrono::steady_clock::now();
             if (target > now + std::chrono::microseconds(600))
+            {
                 std::this_thread::sleep_until(target - std::chrono::microseconds(400));
-            m_lastPresentTime = std::chrono::steady_clock::now();
+                pacerSleepMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - now).count();
+            }
         }
-
-        const double drawMs = static_cast<double>(nowUs() - frameStartUs) * 0.001;
-        m_emaDrawMs = m_emaDrawMs > 0.0 ? (m_emaDrawMs * 0.85 + drawMs * 0.15) : drawMs;
 
         double lastCapMs = 0.0;
         if (!pkt.hold)
         {
             if (const auto &hook = presentHook())
                 hook(outTex, outW, outH);
+            m_lastPresentTime = std::chrono::steady_clock::now();
 #if defined(PS2X_LINUX_SDL2_SHIM)
             const double swapMs = ps2xLinuxLastSwapMs();
             lastCapMs = ps2xLinuxLastCapSleepMs();
@@ -3361,10 +3364,10 @@ private:
         }
 
         const double frameMs = static_cast<double>(nowUs() - frameStartUs) * 0.001;
-        const double gpuFrameMs = std::max(0.0, frameMs - lastCapMs);
+        const double gpuFrameMs = std::max(0.0, frameMs - lastCapMs - pacerSleepMs);
         m_emaFrameMs = m_emaFrameMs > 0.0 ? (m_emaFrameMs * 0.85 + frameMs * 0.15) : frameMs;
         m_emaGpuFrameMs = m_emaGpuFrameMs > 0.0 ? (m_emaGpuFrameMs * 0.85 + gpuFrameMs * 0.15) : gpuFrameMs;
-        if (m_drsEnabled && (m_frameNum % 12u == 0u))
+        if (!pkt.hold && m_drsEnabled && (m_frameNum % 12u == 0u))
         {
             const double metricMs = m_drsDrawOnly ? m_emaDrawMs : m_emaGpuFrameMs;
             const double budgetMs = (1000.0 / static_cast<double>(m_drsTargetFps)) * (m_drsDrawOnly ? 0.85 : 1.0);

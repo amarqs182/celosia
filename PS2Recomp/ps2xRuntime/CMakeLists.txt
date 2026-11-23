@@ -588,6 +588,7 @@ if(PS2X_IS_LINUX AND PS2X_IS_AARCH64_TARGET)
         target_compile_options(ps2_iop PRIVATE -O3 -fno-math-errno -fno-trapping-math)
     endif()
     set_source_files_properties(src/lib/native/native_renderer_gl.cpp PROPERTIES COMPILE_OPTIONS "-fno-math-errno;-fno-trapping-math")
+    set_source_files_properties(src/lib/native/native_renderer_mali.cpp PROPERTIES COMPILE_OPTIONS "-fno-math-errno;-fno-trapping-math;-mcpu=cortex-a35")
     target_compile_options(ps2EntryRunner PRIVATE ${PS2X_LINUX_GAME_OPT})
 
     set(PS2X_LINUX_OVERRIDE_OPTS -O3)
