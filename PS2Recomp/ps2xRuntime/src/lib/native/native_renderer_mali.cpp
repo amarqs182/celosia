@@ -1798,8 +1798,8 @@ public:
         }
         m_mergeBudgetUs = static_cast<uint64_t>(std::max(0, envInt("SOTC_MALI_MERGE_BUDGET_US", 2500)));
         m_mergeChunkMax = static_cast<uint32_t>(std::clamp(envInt("SOTC_MALI_MERGE_CHUNK", 64), 4, 128));
-        m_cacheBudgetBytes = static_cast<uint64_t>(std::max(16, envInt("SOTC_MALI_CACHE_BUDGET_MB", 128))) * 1024ull * 1024ull;
-        m_texArrayBudgetBytes = std::min(80ull * 1024ull * 1024ull, (m_cacheBudgetBytes * 5ull) / 8ull);
+        m_cacheBudgetBytes = static_cast<uint64_t>(std::max(16, envInt("SOTC_MALI_CACHE_BUDGET_MB", 160))) * 1024ull * 1024ull;
+        m_texArrayBudgetBytes = std::min(100ull * 1024ull * 1024ull, (m_cacheBudgetBytes * 5ull) / 8ull);
         m_atPass2Mode = std::clamp(envInt("SOTC_MALI_AT_PASS2", 1), 0, 2); // 0=off, 1=smart auto, 2=always
         m_zPrepassEnabled = envBool("SOTC_MALI_ZPREPASS", false);
         m_postEnabled = envBool("SOTC_MALI_POST", true);
@@ -2617,28 +2617,8 @@ private:
         if (!pkt.confirmEvictTex.empty())
             reclaimEmptyTexArrays();
 
-        for (UploadCmd &u : pkt.uploads)
+        auto uploadCmdOnGl = [&](UploadCmd &cmd)
         {
-            if (u.kind == UploadCmd::SkinnedMesh)
-                m_deferredUploads.push_front(std::move(u));
-            else
-                m_deferredUploads.push_back(std::move(u));
-        }
-        pkt.uploads.clear();
-
-        const uint64_t uploadStartUs = m_uploadBudgetUs ? nowUs() : 0u;
-        uint32_t uploadedCount = 0u;
-        while (!m_deferredUploads.empty())
-        {
-            const bool isSkinned = (m_deferredUploads.front().kind == UploadCmd::SkinnedMesh);
-            if (!isSkinned && m_uploadBudgetUs > 0u && uploadedCount >= 8u &&
-                (nowUs() - uploadStartUs) >= m_uploadBudgetUs)
-            {
-                break;
-            }
-            UploadCmd cmd = std::move(m_deferredUploads.front());
-            m_deferredUploads.pop_front();
-            ++uploadedCount;
             if (cmd.kind == UploadCmd::StaticMesh || cmd.kind == UploadCmd::IndexedMesh)
             {
                 MaliMesh &mesh = m_meshes[cmd.id];
@@ -2699,8 +2679,8 @@ private:
                         }
                         else
                         {
-                            mesh.srcIndices.resize(cmd.compactVerts.size());
-                            for (uint32_t i = 0; i < cmd.compactVerts.size(); ++i)
+                            mesh.srcIndices.resize(mesh.srcVerts.size());
+                            for (uint32_t i = 0; i < mesh.srcVerts.size(); ++i)
                                 mesh.srcIndices[i] = i;
                         }
                         mesh.srcBytes = needBytes;
@@ -2746,6 +2726,65 @@ private:
             else if (cmd.kind == UploadCmd::Texture)
             {
                 uploadTextureOnGl(cmd, pkt.frameNum);
+            }
+        };
+
+        for (UploadCmd &u : pkt.uploads)
+        {
+            if (u.kind == UploadCmd::SkinnedMesh)
+                m_deferredUploads.push_front(std::move(u));
+            else
+                m_deferredUploads.push_back(std::move(u));
+        }
+        pkt.uploads.clear();
+
+        const uint64_t uploadStartUs = m_uploadBudgetUs ? nowUs() : 0u;
+        uint32_t uploadedCount = 0u;
+        while (!m_deferredUploads.empty())
+        {
+            const bool isSkinned = (m_deferredUploads.front().kind == UploadCmd::SkinnedMesh);
+            if (!isSkinned && m_uploadBudgetUs > 0u && uploadedCount >= 8u &&
+                (nowUs() - uploadStartUs) >= m_uploadBudgetUs)
+            {
+                break;
+            }
+            UploadCmd cmd = std::move(m_deferredUploads.front());
+            m_deferredUploads.pop_front();
+            ++uploadedCount;
+            uploadCmdOnGl(cmd);
+        }
+
+        // Never leave a mesh or texture in m_deferredUploads if it is actually drawn in pkt.draws
+        // this frame (since m_knownMeshes/m_knownTextures already marked it ready on the game thread).
+        if (!m_deferredUploads.empty() && !pkt.draws.empty())
+        {
+            m_drawnMeshIdsScratch.clear();
+            m_drawnTexIdsScratch.clear();
+            for (const RawDraw &rd : pkt.draws)
+            {
+                if (m_meshes.find(rd.meshId) == m_meshes.end())
+                    m_drawnMeshIdsScratch.insert(rd.meshId);
+                if (rd.state.texture && m_textures.find(rd.state.texture) == m_textures.end())
+                    m_drawnTexIdsScratch.insert(rd.state.texture);
+            }
+            if (!m_drawnMeshIdsScratch.empty() || !m_drawnTexIdsScratch.empty())
+            {
+                for (auto it = m_deferredUploads.begin(); it != m_deferredUploads.end();)
+                {
+                    const bool needed = (it->kind == UploadCmd::Texture)
+                        ? (m_drawnTexIdsScratch.count(it->id) != 0u)
+                        : (m_drawnMeshIdsScratch.count(it->id) != 0u);
+                    if (needed)
+                    {
+                        UploadCmd cmd = std::move(*it);
+                        it = m_deferredUploads.erase(it);
+                        uploadCmdOnGl(cmd);
+                    }
+                    else
+                    {
+                        ++it;
+                    }
+                }
             }
         }
 
@@ -5153,7 +5192,7 @@ private:
             evictOldMergeSrc(m_frameNum, 1200u, kMaxMergeSrcBytes / 4ull);
         for (auto it = m_mergeRuns.begin(); it != m_mergeRuns.end();)
         {
-            if (it->second.lastUsed + 120u < m_frameNum)
+            if (it->second.lastUsed + 1800u < m_frameNum)
             {
                 MergeRun &er = it->second;
                 if (m_lastVao == er.vao)
@@ -5171,33 +5210,38 @@ private:
             }
         }
 
+        // Reclaim CPU rawData from array textures unused for > 1800 frames (~30-45s) without evicting the GPU array texture.
+        for (auto &[id, t] : m_textures)
+        {
+            if (t.arrayId >= 0 && !t.rawData.empty() && t.lastUsed + 1800u < m_frameNum)
+            {
+                std::vector<uint8_t>().swap(t.rawData);
+                std::vector<uint32_t>().swap(t.astcLevelSizes);
+            }
+        }
+
         // Phase 1 of 2-phase tombstone eviction: reclaim empty texture arrays before computing projectedBytes.
+        // Never evict static meshes or textures by TTL when total GPU memory is within m_cacheBudgetBytes,
+        // so turning the camera never unloads or rebuilds previously visited scenery or textures.
         reclaimEmptyTexArrays();
         std::vector<uint64_t> candMeshes;
         std::vector<uint64_t> candTex;
         uint64_t projectedBytes = m_gpuMeshBytes + m_gpuTexBytes + m_gpuTexArrayBytes;
 
-        for (auto &[id, m] : m_meshes)
-        {
-            if (!m.dynamic && !m.pendingEvict && m.lastUsed + 1800u < m_frameNum)
-            {
-                m.pendingEvict = true;
-                candMeshes.push_back(id);
-                projectedBytes = (projectedBytes >= m.gpuBytes) ? (projectedBytes - m.gpuBytes) : 0ull;
-            }
-        }
-        for (auto &[id, t] : m_textures)
-        {
-            if (!t.pendingEvict && t.lastUsed + 1800u < m_frameNum)
-            {
-                t.pendingEvict = true;
-                candTex.push_back(id);
-                projectedBytes = (projectedBytes >= t.gpuBytes) ? (projectedBytes - t.gpuBytes) : 0ull;
-            }
-        }
-
         if (projectedBytes > m_cacheBudgetBytes)
         {
+            auto texEffectiveBytes = [this](const MaliTex &t) -> uint64_t {
+                if (t.gpuBytes > 0u)
+                    return t.gpuBytes;
+                if (t.arrayId >= 0 && static_cast<size_t>(t.arrayId) < m_texArrays.size())
+                {
+                    const MaliTexArray &arr = m_texArrays[t.arrayId];
+                    if (arr.capacity > 0u && arr.gpuBytes > 0u)
+                        return std::max<uint64_t>(256ull, arr.gpuBytes / arr.capacity);
+                }
+                return std::max<uint64_t>(256ull, static_cast<uint64_t>(t.width) * t.height * (t.tex16 ? 2ull : 4ull));
+            };
+
             struct BudgetCand
             {
                 uint64_t lastUsed;
@@ -5208,13 +5252,13 @@ private:
             std::vector<BudgetCand> cands;
             for (const auto &[id, m] : m_meshes)
             {
-                if (!m.dynamic && !m.pendingEvict && m.lastUsed + 180u < m_frameNum)
-                    cands.push_back({m.lastUsed, id, m.gpuBytes, true});
+                if (!m.dynamic && !m.pendingEvict && m.lastUsed + 600u < m_frameNum)
+                    cands.push_back({m.lastUsed, id, std::max<uint64_t>(256ull, m.gpuBytes), true});
             }
             for (const auto &[id, t] : m_textures)
             {
-                if (!t.pendingEvict && t.lastUsed + 180u < m_frameNum)
-                    cands.push_back({t.lastUsed, id, t.gpuBytes, false});
+                if (!t.pendingEvict && t.lastUsed + 600u < m_frameNum)
+                    cands.push_back({t.lastUsed, id, texEffectiveBytes(t), false});
             }
             std::sort(cands.begin(), cands.end(), [](const BudgetCand &a, const BudgetCand &b) {
                 return a.lastUsed < b.lastUsed;
@@ -5336,8 +5380,8 @@ private:
     uint64_t m_mergeBudgetUs = 2500;
     uint32_t m_mergeChunkMax = 64u;
     uint32_t m_maxArrayLayers = 64u;
-    uint64_t m_cacheBudgetBytes = 128ull * 1024ull * 1024ull;
-    uint64_t m_texArrayBudgetBytes = 80ull * 1024ull * 1024ull;
+    uint64_t m_cacheBudgetBytes = 160ull * 1024ull * 1024ull;
+    uint64_t m_texArrayBudgetBytes = 100ull * 1024ull * 1024ull;
     uint32_t m_bgRate = 2;
     int m_targetFps = 30;
     int m_drsTargetFps = 30;
@@ -5448,6 +5492,8 @@ private:
     std::vector<std::pair<uint64_t, uint64_t>> m_evictRunsScratch;
     std::vector<const QueuedDraw *> m_instScratch;
     std::vector<QueuedDraw> m_qBg, m_qAll;
+    std::unordered_set<uint64_t> m_drawnMeshIdsScratch;
+    std::unordered_set<uint64_t> m_drawnTexIdsScratch;
     std::unordered_set<uint64_t> m_dumpedTexIds;
     std::unordered_map<uint64_t, MaliMesh> m_meshes;
     std::unordered_map<uint64_t, MaliTex> m_textures;
