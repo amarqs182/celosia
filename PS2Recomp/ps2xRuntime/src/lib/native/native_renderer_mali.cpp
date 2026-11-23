@@ -134,7 +134,8 @@ inline int8_t packNormComponent(float f)
 struct CompactVertex
 {
     float x, y, z;
-    int8_t nx, ny, nz, pad;
+    int8_t nx, ny, nz;
+    uint8_t texLayer;
     uint8_t r, g, b, a;
     float u, v;
 };
@@ -151,7 +152,7 @@ inline void packCompactVertices(const Vertex *src, uint32_t count, std::vector<C
         dst[i].nx = packNormComponent(src[i].nx);
         dst[i].ny = packNormComponent(src[i].ny);
         dst[i].nz = packNormComponent(src[i].nz);
-        dst[i].pad = 0;
+        dst[i].texLayer = 0u;
         dst[i].r = src[i].r;
         dst[i].g = src[i].g;
         dst[i].b = src[i].b;
@@ -627,6 +628,283 @@ void main()
 }
 )";
 
+// Phase 7C: GL_TEXTURE_2D_ARRAY shaders for cross-texture static MergeRuns.
+static const char *kMaliWorldArrVert = MALI_VERT_HDR R"(
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec4 aColor;
+layout(location = 3) in vec2 aUV;
+layout(location = 4) in float aTexLayer;
+
+uniform vec4 uClip[4];
+uniform vec4 uInstanceClips[64];
+uniform int uInstanceCount;
+uniform vec4 uDirections[4];
+uniform vec4 uColours[4];
+uniform vec4 uMisc;
+uniform vec4 uFogB;
+uniform vec4 uFogC;
+uniform vec4 uGuard;
+
+out highp vec4 vUV;
+out mediump vec4 vColor;
+out highp vec4 vScreen;
+out highp float vLogW;
+out highp float vTexLayer;
+
+void main()
+{
+    vec4 c0 = uClip[0], c1 = uClip[1], c2 = uClip[2], c3 = uClip[3];
+    if (uInstanceCount > 1)
+    {
+        int b = gl_InstanceID * 4;
+        c0 = uInstanceClips[b + 0];
+        c1 = uInstanceClips[b + 1];
+        c2 = uInstanceClips[b + 2];
+        c3 = uInstanceClips[b + 3];
+    }
+    vec4 c = c0 * aPos.x + c1 * aPos.y + c2 * aPos.z + c3;
+    gl_Position = vec4(c.x, c.y, c.w - 0.2, c.w);
+
+    float wSafe = max(c.w, 1e-3);
+    float fog = uFogB.z > 0.5 ? clamp(uFogB.w + uFogC.x / wSafe, 0.0, 255.0) / 255.0 : 1.0;
+    vUV = vec4(aUV + uMisc.zw, c.w, fog * c.w);
+    vLogW = log2(wSafe);
+    vTexLayer = aTexLayer;
+
+    vec4 col = aColor * (1.0 / 128.0);
+    col.a *= uMisc.y;
+    if (uMisc.x < -0.5)
+    {
+        vec4 p = uDirections[0] * aPos.x + uDirections[1] * aPos.y + uDirections[2] * aPos.z + uDirections[3];
+        float ndv = dot(normalize(p.xyz), uDirections[1].xyz);
+        col.a *= 0.2 + 0.8 * (1.0 - abs(ndv));
+    }
+    else if (uMisc.x > 0.5)
+    {
+        vec4 d = max(uDirections[0] * aNormal.x + uDirections[1] * aNormal.y + uDirections[2] * aNormal.z + uDirections[3], 0.0);
+        d.w = 1.0;
+        vec4 light = uColours[0] * d.x + uColours[1] * d.y + uColours[2] * d.z + uColours[3];
+        col.rgb = min(col.rgb * light.rgb, vec3(255.0 / 128.0));
+    }
+    vColor = col;
+    vScreen = vec4(c.x, c.y, c.w, uGuard.x > 0.0 ? c.w - uGuard.y : 1.0);
+}
+)";
+
+static const char *kMaliArrOpaqueFastFrag = MALI_FRAG_HDR R"(
+in highp vec4 vUV;
+in mediump vec4 vColor;
+in highp float vLogW;
+in highp float vTexLayer;
+
+uniform mediump sampler2DArray uTexArray;
+uniform highp vec4 uFogC;
+uniform mediump vec4 uFogCol;
+
+out mediump vec4 oColor;
+
+void main()
+{
+    mediump vec4 t;
+    if (uFogC.w > 0.0)
+    {
+        highp float lod = clamp(vLogW * uFogC.z + uFogC.y, 0.0, uFogC.w);
+        t = textureLod(uTexArray, vec3(vUV.xy, vTexLayer), lod);
+    }
+    else
+    {
+        t = texture(uTexArray, vec3(vUV.xy, vTexLayer));
+    }
+    mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
+    oColor = vec4(raw / (vec3(1.0) + raw * 0.35), 1.0);
+}
+)";
+
+static const char *kMaliArrCutFastFrag = MALI_FRAG_HDR R"(
+in highp vec4 vUV;
+in mediump vec4 vColor;
+in highp vec4 vScreen;
+in highp float vLogW;
+in highp float vTexLayer;
+
+uniform mediump sampler2DArray uTexArray;
+uniform highp vec4 uFogC;
+uniform mediump vec4 uFogCol;
+uniform mediump vec4 uAlpha;
+
+out mediump vec4 oColor;
+
+void main()
+{
+    if (vScreen.w < 0.0)
+        discard;
+    mediump vec4 t;
+    if (uFogC.w > 0.0)
+    {
+        highp float lod = clamp(vLogW * uFogC.z + uFogC.y, 0.0, uFogC.w);
+        t = textureLod(uTexArray, vec3(vUV.xy, vTexLayer), lod);
+    }
+    else
+    {
+        t = texture(uTexArray, vec3(vUV.xy, vTexLayer));
+    }
+    mediump float alpha = clamp(t.a * max(uFogCol.w, 1.0) * vColor.a, 0.0, 1.0);
+    if (alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y))
+        discard;
+    mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
+    oColor = vec4(raw / (vec3(1.0) + raw * 0.35), alpha);
+}
+)";
+
+static const char *kMaliArrSoftFastFrag = MALI_FRAG_HDR R"(
+in highp vec4 vUV;
+in mediump vec4 vColor;
+in highp float vLogW;
+in highp float vTexLayer;
+
+uniform mediump sampler2DArray uTexArray;
+uniform highp vec4 uFogC;
+uniform mediump vec4 uFogCol;
+uniform mediump vec4 uAlpha;
+
+out mediump vec4 oColor;
+
+void main()
+{
+    mediump vec4 t;
+    if (uFogC.w > 0.0)
+    {
+        highp float lod = clamp(vLogW * uFogC.z + uFogC.y, 0.0, uFogC.w);
+        t = textureLod(uTexArray, vec3(vUV.xy, vTexLayer), lod);
+    }
+    else
+    {
+        t = texture(uTexArray, vec3(vUV.xy, vTexLayer));
+    }
+    mediump float alpha = clamp(t.a * max(uFogCol.w, 1.0) * vColor.a, 0.0, 1.0);
+    if (alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y))
+        alpha = 0.0;
+    mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
+    oColor = vec4(raw / (vec3(1.0) + raw * 0.35), alpha);
+}
+)";
+
+static const char *kMaliArrOpaqueFrag = MALI_FRAG_HDR R"(
+in highp vec4 vUV;
+in mediump vec4 vColor;
+in highp vec4 vScreen;
+in highp float vLogW;
+in highp float vTexLayer;
+
+uniform mediump sampler2DArray uTexArray;
+uniform sampler2D uBackground;
+uniform highp vec4 uFogA;
+uniform highp vec4 uFogC;
+uniform mediump vec4 uFogCol;
+
+out mediump vec4 oColor;
+
+void main()
+{
+    highp float depth = vUV.z;
+    highp float lod = uFogC.w > 0.0 ? clamp(vLogW * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
+    mediump vec4 t = textureLod(uTexArray, vec3(vUV.xy, vTexLayer), lod);
+    mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
+    mediump vec3 rgb = raw / (vec3(1.0) + raw * 0.35);
+    rgb = mix(uFogCol.rgb, rgb, clamp(vUV.w / max(depth, 1e-3), 0.0, 1.0));
+    if (uFogA.w > 0.5)
+    {
+        highp vec2 scr = vScreen.xy / max(vScreen.z, 1e-3) * 0.5 + 0.5;
+        mediump float f = clamp((depth - uFogA.x) / max(uFogA.y, 1e-3), 0.0, 1.0);
+        if (uFogA.z > 0.0)
+            f = floor(f * uFogA.z) / uFogA.z;
+        rgb = mix(rgb, texture(uBackground, scr).rgb, f);
+    }
+    oColor = vec4(rgb, 1.0);
+}
+)";
+
+static const char *kMaliArrCutFrag = MALI_FRAG_HDR R"(
+in highp vec4 vUV;
+in mediump vec4 vColor;
+in highp vec4 vScreen;
+in highp float vLogW;
+in highp float vTexLayer;
+
+uniform mediump sampler2DArray uTexArray;
+uniform sampler2D uBackground;
+uniform highp vec4 uFogA;
+uniform highp vec4 uFogC;
+uniform mediump vec4 uFogCol;
+uniform mediump vec4 uAlpha;
+
+out mediump vec4 oColor;
+
+void main()
+{
+    if (vScreen.w < 0.0)
+        discard;
+    highp float depth = vUV.z;
+    highp float lod = uFogC.w > 0.0 ? clamp(vLogW * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
+    mediump vec4 t = textureLod(uTexArray, vec3(vUV.xy, vTexLayer), lod);
+    mediump float alpha = clamp(t.a * max(uFogCol.w, 1.0) * vColor.a, 0.0, 1.0);
+    if (alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y))
+        discard;
+    mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
+    mediump vec3 rgb = raw / (vec3(1.0) + raw * 0.35);
+    rgb = mix(uFogCol.rgb, rgb, clamp(vUV.w / max(depth, 1e-3), 0.0, 1.0));
+    if (uFogA.w > 0.5)
+    {
+        highp vec2 scr = vScreen.xy / max(vScreen.z, 1e-3) * 0.5 + 0.5;
+        mediump float f = clamp((depth - uFogA.x) / max(uFogA.y, 1e-3), 0.0, 1.0);
+        if (uFogA.z > 0.0)
+            f = floor(f * uFogA.z) / uFogA.z;
+        rgb = mix(rgb, texture(uBackground, scr).rgb, f);
+    }
+    oColor = vec4(rgb, alpha);
+}
+)";
+
+static const char *kMaliArrSoftFrag = MALI_FRAG_HDR R"(
+in highp vec4 vUV;
+in mediump vec4 vColor;
+in highp vec4 vScreen;
+in highp float vLogW;
+in highp float vTexLayer;
+
+uniform mediump sampler2DArray uTexArray;
+uniform sampler2D uBackground;
+uniform highp vec4 uFogA;
+uniform highp vec4 uFogC;
+uniform mediump vec4 uFogCol;
+uniform mediump vec4 uAlpha;
+
+out mediump vec4 oColor;
+
+void main()
+{
+    highp float depth = vUV.z;
+    highp float lod = uFogC.w > 0.0 ? clamp(vLogW * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
+    mediump vec4 t = textureLod(uTexArray, vec3(vUV.xy, vTexLayer), lod);
+    mediump float alpha = clamp(t.a * max(uFogCol.w, 1.0) * vColor.a, 0.0, 1.0);
+    if (alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y))
+        alpha = 0.0;
+    mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
+    mediump vec3 rgb = raw / (vec3(1.0) + raw * 0.35);
+    rgb = mix(uFogCol.rgb, rgb, clamp(vUV.w / max(depth, 1e-3), 0.0, 1.0));
+    if (uFogA.w > 0.5)
+    {
+        highp vec2 scr = vScreen.xy / max(vScreen.z, 1e-3) * 0.5 + 0.5;
+        mediump float f = clamp((depth - uFogA.x) / max(uFogA.y, 1e-3), 0.0, 1.0);
+        if (uFogA.z > 0.0)
+            f = floor(f * uFogA.z) / uFogA.z;
+        rgb = mix(rgb, texture(uBackground, scr).rgb, f);
+    }
+    oColor = vec4(rgb, alpha);
+}
+)";
+
 struct UniformShadow
 {
     bool valid = false;
@@ -660,7 +938,7 @@ struct ShaderProg
     GLint uClip = -1, uInstanceClips = -1, uInstanceCount = -1;
     GLint uBones = -1, uDirections = -1, uColours = -1, uMisc = -1;
     GLint uFogA = -1, uFogB = -1, uFogC = -1, uFogCol = -1, uGuard = -1, uAlpha = -1;
-    GLint uTex = -1, uBackground = -1;
+    GLint uTex = -1, uTexArray = -1, uBackground = -1;
     mutable UniformShadow shadow{};
 };
 
@@ -714,10 +992,12 @@ void bindProgUniforms(ShaderProg &out, GLuint p)
     out.uGuard = glGetUniformLocation(p, "uGuard");
     out.uAlpha = glGetUniformLocation(p, "uAlpha");
     out.uTex = glGetUniformLocation(p, "uTex");
+    out.uTexArray = glGetUniformLocation(p, "uTexArray");
     out.uBackground = glGetUniformLocation(p, "uBackground");
 
     glUseProgram(p);
     if (out.uTex >= 0) glUniform1i(out.uTex, 0);
+    if (out.uTexArray >= 0) glUniform1i(out.uTexArray, 0);
     if (out.uBackground >= 0) glUniform1i(out.uBackground, 1);
     out.shadow.reset();
 }
@@ -729,7 +1009,7 @@ bool linkProgCached(ShaderProg &out, const char *name, const char *vsSrc, const 
     std::string binPath;
     if (useCache && !cacheDir.empty())
     {
-        binPath = cacheDir + "/" + name + "_v10.bin";
+        binPath = cacheDir + "/" + name + "_v11.bin";
         if (FILE *fp = std::fopen(binPath.c_str(), "rb"))
         {
             GLenum fmt = 0;
@@ -872,12 +1152,29 @@ struct MaliTex
     uint8_t minAlpha = 0;
     uint8_t maxAlpha = 0xFF;
     uint8_t wrapClamp = 0xFF; // Phase 5.1: cached GL_TEXTURE_WRAP_S/T state
+    int16_t arrayId = -1;     // Phase 7C: GL_TEXTURE_2D_ARRAY bucket index
+    uint8_t arrayLayer = 0;   // Phase 7C: layer within m_texArrays[arrayId]
     bool binaryAlpha = false; // Phase 6B: true when every level-0 texel is <=4 or >=124
     bool pendingEvict = false;
     bool astc = false;
     bool tex16 = false;
     uint64_t gpuBytes = 0;
     uint64_t lastUsed = 0;
+};
+
+struct MaliTexArray
+{
+    GLuint tex = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t levels = 1;
+    uint32_t capacity = 0;
+    uint32_t used = 0;
+    uint8_t fmtCode = 0;     // 0 = RGB565, 1 = RGB5_A1, 2 = RGBA8
+    uint8_t wrapClamp = 0xFF;
+    bool tex16 = false;
+    uint64_t gpuBytes = 0;
+    std::vector<uint8_t> freeLayers;
 };
 
 struct MaliTarget
@@ -896,13 +1193,14 @@ struct SkinPaletteEntry
     uint32_t qwordCount = 0;
 };
 
-// Phase 6C: Cached merged static run (strictly GL_UNSIGNED_INT + 28B CompactVertex).
+// Phase 6C/7C: Cached merged static run (strictly GL_UNSIGNED_INT + 28B CompactVertex).
 struct MergeRun
 {
     GLuint vao = 0;
     GLuint vbo = 0;
     GLuint ibo = 0;
     uint32_t indexCount = 0;
+    int16_t texArrayId = -1;
     uint64_t bytes = 0;
     uint64_t lastUsed = 0;
     uint32_t frames = 0;
@@ -955,6 +1253,8 @@ struct QueuedDraw
     float minW = 0.0f;
     uint32_t seq = 0;
     uint32_t psoKey = 0;
+    int16_t texArrayId = -1;
+    uint8_t texArrayLayer = 0;
     uint8_t bucket = 0;
     bool skinned = false;
     bool deferredCull = false;
@@ -993,11 +1293,25 @@ struct FramePacket
 
 inline uint32_t makePsoKey(uint32_t prog, Blend blend, bool depthTest, bool depthWrite, uint32_t depthFunc)
 {
-    return (prog & 15u)
-         | ((static_cast<uint32_t>(blend) & 3u) << 4)
-         | ((depthTest ? 1u : 0u) << 6)
-         | ((depthWrite ? 1u : 0u) << 7)
-         | ((depthFunc & 3u) << 8);
+    return (prog & 31u)
+         | ((static_cast<uint32_t>(blend) & 3u) << 5)
+         | ((depthTest ? 1u : 0u) << 7)
+         | ((depthWrite ? 1u : 0u) << 8)
+         | ((depthFunc & 3u) << 9);
+}
+
+inline uint32_t toArrayProg(uint32_t progIdx)
+{
+    switch (progIdx)
+    {
+    case 0u: return 16u;
+    case 1u: return 17u;
+    case 6u: return 13u;
+    case 7u: return 14u;
+    case 8u: return 15u;
+    case 12u: return 18u;
+    default: return progIdx;
+    }
 }
 
 inline bool cullAabb(const float *c, const float *lo, const float *hi, float &outMinW)
@@ -1037,7 +1351,8 @@ inline bool canMergeStatic(const QueuedDraw &a, const QueuedDraw &b)
            !a.mesh->srcVerts.empty() && !b.mesh->srcVerts.empty() &&
            a.state.order == b.state.order &&
            a.psoKey == b.psoKey &&
-           a.state.texture == b.state.texture &&
+           ((a.texArrayId >= 0 && a.texArrayId == b.texArrayId) ||
+            (a.texArrayId < 0 && b.texArrayId < 0 && a.state.texture == b.state.texture)) &&
            a.state.clamp == b.state.clamp &&
            a.clipHash == b.clipHash &&
            std::memcmp(a.clip, b.clip, 16u * sizeof(float)) == 0 &&
@@ -1067,7 +1382,8 @@ inline bool canInstanceStatic(const QueuedDraw &a, const QueuedDraw &b)
            a.stateHash == b.stateHash &&
            a.state.order == b.state.order &&
            a.psoKey == b.psoKey &&
-           a.state.texture == b.state.texture &&
+           ((a.texArrayId >= 0 && a.texArrayId == b.texArrayId) ||
+            (a.texArrayId < 0 && b.texArrayId < 0 && a.state.texture == b.state.texture)) &&
            a.state.clamp == b.state.clamp &&
            a.state.alphaTest == b.state.alphaTest &&
            a.state.lit == b.state.lit &&
@@ -1098,6 +1414,7 @@ public:
         m_shaderCacheEnabled = envBool("SOTC_MALI_SHADER_CACHE", true);
         m_gpuSkinEnabled = envBool("SOTC_MALI_GPU_SKIN", true);
         m_mergeEnabled = envBool("SOTC_MALI_MERGE", true);
+        m_texArrayEnabled = envBool("SOTC_MALI_TEXARRAY", true);
         m_instancingEnabled = envBool("SOTC_MALI_INSTANCING", true);
         m_keepCurrentEnabled = envBool("SOTC_MALI_KEEP_CURRENT", true);
         m_directScanoutEnabled = envBool("SOTC_MALI_DIRECT_SCANOUT", true);
@@ -1119,8 +1436,9 @@ public:
             m_hasLetterboxCrop = (cropRatio > 0.001f);
         }
         m_mergeBudgetUs = static_cast<uint64_t>(std::max(0, envInt("SOTC_MALI_MERGE_BUDGET_US", 2500)));
-        m_mergeChunkMax = static_cast<uint32_t>(std::clamp(envInt("SOTC_MALI_MERGE_CHUNK", 24), 4, 128));
+        m_mergeChunkMax = static_cast<uint32_t>(std::clamp(envInt("SOTC_MALI_MERGE_CHUNK", 48), 4, 128));
         m_cacheBudgetBytes = static_cast<uint64_t>(std::max(16, envInt("SOTC_MALI_CACHE_BUDGET_MB", 128))) * 1024ull * 1024ull;
+        m_texArrayBudgetBytes = std::min(48ull * 1024ull * 1024ull, m_cacheBudgetBytes / 2ull);
         m_atPass2Mode = std::clamp(envInt("SOTC_MALI_AT_PASS2", 1), 0, 2); // 0=off, 1=smart auto, 2=always
         m_zPrepassEnabled = envBool("SOTC_MALI_ZPREPASS", false);
         m_postEnabled = envBool("SOTC_MALI_POST", true);
@@ -1623,6 +1941,10 @@ private:
             }
         }
 
+        GLint maxLayers = 64;
+        glGetIntegerv(GL_MAX_ARRAY_TEXTURE_LAYERS, &maxLayers);
+        m_maxArrayLayers = static_cast<uint32_t>(std::clamp(maxLayers, 16, 256));
+
         if (!linkProgCached(m_progOpaque, "opaque", kMaliWorldVert, kMaliOpaqueFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
             !linkProgCached(m_progCut, "cut", kMaliWorldVert, kMaliCutFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
             !linkProgCached(m_progScreen, "screen", kMaliScreenVert, kMaliScreenFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
@@ -1636,7 +1958,13 @@ private:
             !linkProgCached(m_progSoft, "soft", kMaliWorldVert, kMaliSoftFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
             !linkProgCached(m_progSkinOpaqueFast, "skin_opaque_fast", kMaliSkinVert, kMaliOpaqueFastFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
             !linkProgCached(m_progSkinCutFast, "skin_cut_fast", kMaliSkinVert, kMaliCutFastFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
-            !linkProgCached(m_progSkinSoftFast, "skin_soft_fast", kMaliSkinVert, kMaliSoftFastFrag, m_shaderCacheDir, m_shaderCacheEnabled))
+            !linkProgCached(m_progSkinSoftFast, "skin_soft_fast", kMaliSkinVert, kMaliSoftFastFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
+            !linkProgCached(m_progArrOpaqueFast, "arr_opaque_fast", kMaliWorldArrVert, kMaliArrOpaqueFastFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
+            !linkProgCached(m_progArrCutFast, "arr_cut_fast", kMaliWorldArrVert, kMaliArrCutFastFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
+            !linkProgCached(m_progArrSoftFast, "arr_soft_fast", kMaliWorldArrVert, kMaliArrSoftFastFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
+            !linkProgCached(m_progArrOpaque, "arr_opaque", kMaliWorldArrVert, kMaliArrOpaqueFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
+            !linkProgCached(m_progArrCut, "arr_cut", kMaliWorldArrVert, kMaliArrCutFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
+            !linkProgCached(m_progArrSoft, "arr_soft", kMaliWorldArrVert, kMaliArrSoftFrag, m_shaderCacheDir, m_shaderCacheEnabled))
         {
             return false;
         }
@@ -1663,10 +1991,11 @@ private:
         makeTarget(m_bgTarget, 256, 256, true);
         m_lastPresentTime = std::chrono::steady_clock::now();
         m_initialized = true;
-        std::fprintf(stderr, "[mali] Phase 7B GLES 3.2 backend up (async=%d mailbox=%d keepCur=%d direct=%d fastSh=%d merge=%d inst=%d atPass2=%d cull=%d skin=%d drs=%d@%dfps[%.2f..%.2f] drawOnly=%d budget=%lluM)\n",
+        std::fprintf(stderr, "[mali] Phase 7C GLES 3.2 backend up (async=%d mailbox=%d keepCur=%d direct=%d fastSh=%d texArr=%d(maxL=%u) merge=%d(chunk=%u) inst=%d atPass2=%d cull=%d skin=%d drs=%d@%dfps[%.2f..%.2f] drawOnly=%d budget=%lluM)\n",
                      m_asyncEnabled ? 1 : 0, m_mailboxEnabled ? 1 : 0, m_keepCurrentEnabled ? 1 : 0,
                      m_directScanoutEnabled ? 1 : 0, m_fastShadersEnabled ? 1 : 0,
-                     m_mergeEnabled ? 1 : 0, m_instancingEnabled ? 1 : 0,
+                     m_texArrayEnabled ? 1 : 0, m_maxArrayLayers,
+                     m_mergeEnabled ? 1 : 0, m_mergeChunkMax, m_instancingEnabled ? 1 : 0,
                      m_atPass2Mode, m_cullEnabled ? 1 : 0, m_gpuSkinEnabled ? 1 : 0,
                      m_drsEnabled ? 1 : 0, m_drsTargetFps, m_drsMin, m_drsMax, m_drsDrawOnly ? 1 : 0,
                      static_cast<unsigned long long>(m_cacheBudgetBytes >> 20));
@@ -1702,6 +2031,10 @@ private:
             if (t.tex) glDeleteTextures(1, &t.tex);
         m_textures.clear();
         m_gpuTexBytes = 0;
+        for (MaliTexArray &arr : m_texArrays)
+            if (arr.tex) glDeleteTextures(1, &arr.tex);
+        m_texArrays.clear();
+        m_gpuTexArrayBytes = 0;
         destroyTarget(m_mainTarget[0]);
         destroyTarget(m_mainTarget[1]);
         destroyTarget(m_postTarget);
@@ -1722,6 +2055,12 @@ private:
         delProg(m_progSkinOpaqueFast);
         delProg(m_progSkinCutFast);
         delProg(m_progSkinSoftFast);
+        delProg(m_progArrOpaqueFast);
+        delProg(m_progArrCutFast);
+        delProg(m_progArrSoftFast);
+        delProg(m_progArrOpaque);
+        delProg(m_progArrCut);
+        delProg(m_progArrSoft);
         m_initialized = false;
     }
 
@@ -1807,6 +2146,8 @@ private:
         {
             if (auto it = m_textures.find(id); it != m_textures.end())
             {
+                if (it->second.arrayId >= 0 && static_cast<size_t>(it->second.arrayId) < m_texArrays.size())
+                    m_texArrays[it->second.arrayId].freeLayers.push_back(it->second.arrayLayer);
                 if (m_lastTex == it->second.tex && it->second.tex != 0u)
                     m_lastTex = ~0u;
                 if (it->second.tex) glDeleteTextures(1, &it->second.tex);
@@ -1947,6 +2288,95 @@ private:
         }
     }
 
+    bool allocTexArraySlot(uint32_t w, uint32_t h, uint32_t levels, uint8_t fmtCode, int16_t &outArrId, uint8_t &outLayer)
+    {
+        outArrId = -1;
+        outLayer = 0;
+        if (!m_texArrayEnabled || w < 8u || w > 256u || h < 8u || h > 256u || levels == 0u)
+            return false;
+
+        for (size_t i = 0; i < m_texArrays.size(); ++i)
+        {
+            MaliTexArray &arr = m_texArrays[i];
+            if (arr.width != w || arr.height != h || arr.levels != levels || arr.fmtCode != fmtCode)
+                continue;
+            if (!arr.freeLayers.empty())
+            {
+                outArrId = static_cast<int16_t>(i);
+                outLayer = arr.freeLayers.back();
+                arr.freeLayers.pop_back();
+                return true;
+            }
+            if (arr.used < arr.capacity)
+            {
+                outArrId = static_cast<int16_t>(i);
+                outLayer = static_cast<uint8_t>(arr.used++);
+                return true;
+            }
+        }
+
+        if (m_texArrays.size() >= 128u)
+            return false;
+        const uint32_t cap = std::min(m_maxArrayLayers, (std::max(w, h) >= 256u) ? 32u : 64u);
+        uint64_t mipBytes = 0;
+        {
+            uint32_t bw = w, bh = h;
+            const uint64_t bpp = (fmtCode < 2u) ? 2ull : 4ull;
+            for (uint32_t lv = 0; lv < levels; ++lv)
+            {
+                mipBytes += static_cast<uint64_t>(bw) * bh * bpp;
+                bw = std::max(1u, bw >> 1);
+                bh = std::max(1u, bh >> 1);
+            }
+        }
+        const uint64_t arrBytes = mipBytes * cap;
+        if (m_gpuTexArrayBytes + arrBytes > m_texArrayBudgetBytes)
+            return false;
+
+        MaliTexArray arr{};
+        arr.width = w;
+        arr.height = h;
+        arr.levels = levels;
+        arr.capacity = cap;
+        arr.used = 1u;
+        arr.fmtCode = fmtCode;
+        arr.tex16 = (fmtCode < 2u);
+        arr.gpuBytes = arrBytes;
+
+        glGenTextures(1, &arr.tex);
+        glBindTexture(GL_TEXTURE_2D_ARRAY, arr.tex);
+        m_lastTexArr = arr.tex;
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, levels > 1u ? GL_LINEAR_MIPMAP_NEAREST : GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(levels - 1u));
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        arr.wrapClamp = 0u;
+
+        const GLenum internalFmt = (fmtCode == 0u) ? GL_RGB565 : (fmtCode == 1u ? GL_RGB5_A1 : GL_RGBA8);
+#if defined(PS2X_MALI_GLES)
+        glTexStorage3D(GL_TEXTURE_2D_ARRAY, static_cast<GLsizei>(levels), internalFmt,
+                       static_cast<GLsizei>(w), static_cast<GLsizei>(h), static_cast<GLsizei>(cap));
+#else
+        const GLenum extFmt = (fmtCode == 0u) ? GL_RGB : GL_RGBA;
+        const GLenum extType = (fmtCode == 0u) ? GL_UNSIGNED_SHORT_5_6_5 : (fmtCode == 1u ? GL_UNSIGNED_SHORT_5_5_5_1 : GL_UNSIGNED_BYTE);
+        uint32_t lw = w, lh = h;
+        for (uint32_t lv = 0; lv < levels; ++lv)
+        {
+            glTexImage3D(GL_TEXTURE_2D_ARRAY, static_cast<GLint>(lv), static_cast<GLint>(internalFmt),
+                         static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), static_cast<GLsizei>(cap),
+                         0, extFmt, extType, nullptr);
+            lw = std::max(1u, lw >> 1);
+            lh = std::max(1u, lh >> 1);
+        }
+#endif
+        m_gpuTexArrayBytes += arrBytes;
+        outArrId = static_cast<int16_t>(m_texArrays.size());
+        outLayer = 0u;
+        m_texArrays.push_back(std::move(arr));
+        return true;
+    }
+
     void uploadTextureOnGl(const UploadCmd &cmd, uint64_t frameNum)
     {
         if (m_dumpTexEnabled && m_dumpedTexIds.insert(cmd.id).second)
@@ -2005,6 +2435,15 @@ private:
         const bool use5551 = m_tex16Enabled && !use565 && allBinaryAlpha;
         tx.tex16 = use565 || use5551;
         tx.pendingEvict = false;
+        if (tx.arrayId >= 0 && static_cast<size_t>(tx.arrayId) < m_texArrays.size())
+        {
+            m_texArrays[tx.arrayId].freeLayers.push_back(tx.arrayLayer);
+            tx.arrayId = -1;
+            tx.arrayLayer = 0;
+        }
+        const uint8_t fmtCode = use565 ? 0u : (use5551 ? 1u : 2u);
+        allocTexArraySlot(cmd.width, cmd.height, tx.levels, fmtCode, tx.arrayId, tx.arrayLayer);
+        glBindTexture(GL_TEXTURE_2D, tx.tex);
         uint64_t newTexBytes = 0;
         {
             uint32_t bw = cmd.width, bh = cmd.height;
@@ -2039,6 +2478,13 @@ private:
                 glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(lv), GL_RGB565,
                              static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 0,
                              GL_RGB, GL_UNSIGNED_SHORT_5_6_5, m_tex16Scratch.data());
+                if (tx.arrayId >= 0)
+                {
+                    glBindTexture(GL_TEXTURE_2D_ARRAY, m_texArrays[tx.arrayId].tex);
+                    glTexSubImage3D(GL_TEXTURE_2D_ARRAY, static_cast<GLint>(lv), 0, 0, static_cast<GLint>(tx.arrayLayer),
+                                    static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 1,
+                                    GL_RGB, GL_UNSIGNED_SHORT_5_6_5, m_tex16Scratch.data());
+                }
             }
             else if (use5551)
             {
@@ -2054,32 +2500,51 @@ private:
                 glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(lv), GL_RGB5_A1,
                              static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 0,
                              GL_RGBA, GL_UNSIGNED_SHORT_5_5_5_1, m_tex16Scratch.data());
+                if (tx.arrayId >= 0)
+                {
+                    glBindTexture(GL_TEXTURE_2D_ARRAY, m_texArrays[tx.arrayId].tex);
+                    glTexSubImage3D(GL_TEXTURE_2D_ARRAY, static_cast<GLint>(lv), 0, 0, static_cast<GLint>(tx.arrayLayer),
+                                    static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 1,
+                                    GL_RGBA, GL_UNSIGNED_SHORT_5_5_5_1, m_tex16Scratch.data());
+                }
             }
             else
             {
                 glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(lv), GL_RGBA8,
                              static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 0,
                              GL_RGBA, GL_UNSIGNED_BYTE, ptr);
+                if (tx.arrayId >= 0)
+                {
+                    glBindTexture(GL_TEXTURE_2D_ARRAY, m_texArrays[tx.arrayId].tex);
+                    glTexSubImage3D(GL_TEXTURE_2D_ARRAY, static_cast<GLint>(lv), 0, 0, static_cast<GLint>(tx.arrayLayer),
+                                    static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 1,
+                                    GL_RGBA, GL_UNSIGNED_BYTE, ptr);
+                }
             }
             ptr += n * 4u;
             lw = std::max(1u, lw >> 1);
             lh = std::max(1u, lh >> 1);
         }
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(tx.levels - 1u));
+        if (tx.arrayId >= 0)
+            m_lastTexArr = ~0u;
         if (m_uploadBudgetUs)
             m_uploadUsThisFrame += nowUs() - t0;
     }
 
-    // Phase 6C: Build or fetch a cached merged static VBO/IBO (strictly GL_UNSIGNED_INT).
-    MergeRun *getOrBuildMergeRun(size_t from, size_t to, uint64_t &mergeUsThisFrame)
+    // Phase 6C/7C: Build or fetch a cached merged static VBO/IBO (strictly GL_UNSIGNED_INT).
+    MergeRun *getOrBuildMergeRun(size_t from, size_t to, uint64_t &mergeUsThisFrame, int16_t texArrayId)
     {
         uint64_t key = 14695981039346656037ull;
+        key = fnv1aHash(&texArrayId, sizeof(texArrayId), key);
         uint32_t totalVerts = 0;
         uint32_t totalIndices = 0;
         for (size_t j = from; j < to; ++j)
         {
             const MaliMesh *m = m_qAll[j].mesh;
             key = fnv1aHash(&m_qAll[j].meshId, sizeof(uint64_t), key);
+            if (texArrayId >= 0)
+                key = fnv1aHash(&m_qAll[j].texArrayLayer, sizeof(uint8_t), key);
             totalVerts += static_cast<uint32_t>(m->srcVerts.size());
             totalIndices += static_cast<uint32_t>(m->srcIndices.size());
         }
@@ -2087,6 +2552,7 @@ private:
             return nullptr;
         MergeRun &run = m_mergeRuns[key];
         run.lastUsed = m_frameNum;
+        run.texArrayId = texArrayId;
         if (run.vao && run.indexCount == totalIndices)
             return &run;
 
@@ -2145,6 +2611,12 @@ private:
             const MaliMesh *m = m_qAll[j].mesh;
             const uint32_t baseV = static_cast<uint32_t>(m_mergeVertsScratch.size());
             m_mergeVertsScratch.insert(m_mergeVertsScratch.end(), m->srcVerts.begin(), m->srcVerts.end());
+            if (texArrayId >= 0)
+            {
+                const uint8_t layer = m_qAll[j].texArrayLayer;
+                for (size_t v = baseV; v < m_mergeVertsScratch.size(); ++v)
+                    m_mergeVertsScratch[v].texLayer = layer;
+            }
             for (uint32_t idx : m->srcIndices)
                 m_mergeIndicesScratch.push_back(baseV + idx);
         }
@@ -2314,8 +2786,13 @@ private:
 
             if (q.bucket == 0u || q.bucket == 1u)
             {
+                q.texArrayId = (m_texArrayEnabled && texPtr && texPtr->arrayId >= 0) ? texPtr->arrayId : -1;
+                q.texArrayLayer = (q.texArrayId >= 0) ? texPtr->arrayLayer : 0u;
+                const uint64_t mergeTexKey = (q.texArrayId >= 0)
+                    ? (0x8000000000000000ull | static_cast<uint64_t>(static_cast<uint16_t>(q.texArrayId)))
+                    : q.state.texture;
                 uint64_t sh = fnv1aHash(&q.psoKey, sizeof(q.psoKey));
-                sh = fnv1aHash(&q.state.texture, sizeof(q.state.texture), sh);
+                sh = fnv1aHash(&mergeTexKey, sizeof(mergeTexKey), sh);
                 sh = fnv1aHash(&q.state.clamp, sizeof(q.state.clamp), sh);
                 sh = fnv1aHash(&q.state.alphaTest, sizeof(q.state.alphaTest), sh);
                 const uint8_t flags = (q.state.lit ? 1u : 0u) | (q.state.fresnel ? 2u : 0u) |
@@ -2375,11 +2852,12 @@ private:
                 const uint32_t bPal = b.skinned ? b.state.skinPalette : 0u;
                 if (aPal != bPal) return aPal < bPal;
                 if (a.stateHash != b.stateHash) return a.stateHash < b.stateHash;
-                if (a.state.texture != b.state.texture) return a.state.texture < b.state.texture;
+                if (a.texArrayId != b.texArrayId) return a.texArrayId < b.texArrayId;
                 if (a.state.clamp != b.state.clamp) return a.state.clamp < b.state.clamp;
                 if (a.state.alphaTest != b.state.alphaTest) return a.state.alphaTest < b.state.alphaTest;
-                if (a.meshId != b.meshId) return a.meshId < b.meshId;
                 if (a.clipHash != b.clipHash) return a.clipHash < b.clipHash;
+                if (a.texArrayId < 0 && a.state.texture != b.state.texture) return a.state.texture < b.state.texture;
+                if (a.meshId != b.meshId) return a.meshId < b.meshId;
             }
             return a.seq < b.seq;
         });
@@ -2469,7 +2947,7 @@ private:
         {
             const QueuedDraw &q = m_qAll[i];
 
-            // Phase 6.1: Camera-invariant static merge sliced into fixed sub-runs + union-AABB group cull.
+            // Phase 6.1/7C: Camera-invariant static merge across GL_TEXTURE_2D_ARRAY layers + leftover singleton instancing.
             if (m_mergeEnabled && (q.bucket == 0u || q.bucket == 1u) && q.mesh && !q.mesh->dynamic && !q.skinned && !q.mesh->srcVerts.empty() &&
                 i + 1u < m_qAll.size() && canMergeStatic(q, m_qAll[i + 1u]))
             {
@@ -2477,6 +2955,7 @@ private:
                 while (groupEnd < m_qAll.size() && canMergeStatic(q, m_qAll[groupEnd]))
                     ++groupEnd;
 
+                m_instScratch.clear();
                 for (size_t s = i; s < groupEnd;)
                 {
                     const size_t e = std::min(s + static_cast<size_t>(m_mergeChunkMax), groupEnd);
@@ -2507,7 +2986,7 @@ private:
                             s = e;
                             continue;
                         }
-                        if (MergeRun *run = getOrBuildMergeRun(s, e, mergeUsThisFrame))
+                        if (MergeRun *run = getOrBuildMergeRun(s, e, mergeUsThisFrame, sq.texArrayId))
                         {
                             if (sq.bucket == 0u)
                             {
@@ -2523,7 +3002,7 @@ private:
                                 if (anyNeedPass2)
                                 {
                                     QueuedDraw p2 = sq;
-                                    const bool fastFog = ((sq.psoKey & 15u) == 7u || (sq.psoKey & 15u) == 10u);
+                                    const bool fastFog = ((sq.psoKey & 31u) == 7u || (sq.psoKey & 31u) == 10u);
                                     const uint32_t p2Prog = m_fastShadersEnabled ? (fastFog ? 8u : 12u) : 1u;
                                     p2.psoKey = makePsoKey(p2Prog, sq.state.blend, true, false, 1u);
                                     emitMergedRun(p2, *run, pkt, true, 0.02f, aref);
@@ -2548,9 +3027,63 @@ private:
                             ++m_culledThisFrame;
                             continue;
                         }
-                        emitBucketSingle(jq, pkt);
+                        m_instScratch.push_back(&jq);
                     }
                     s = e;
+                }
+
+                if (m_instancingEnabled && m_instScratch.size() >= 2u)
+                {
+                    std::sort(m_instScratch.begin(), m_instScratch.end(), [](const QueuedDraw *a, const QueuedDraw *b) {
+                        if (a->meshId != b->meshId) return a->meshId < b->meshId;
+                        if (a->state.texture != b->state.texture) return a->state.texture < b->state.texture;
+                        return a->seq < b->seq;
+                    });
+                    for (size_t k = 0; k < m_instScratch.size();)
+                    {
+                        const QueuedDraw *iq0 = m_instScratch[k];
+                        size_t kEnd = k + 1u;
+                        while (kEnd < m_instScratch.size() && (kEnd - k) < kMaxInstances && canInstanceStatic(*iq0, *m_instScratch[kEnd]))
+                            ++kEnd;
+                        const uint32_t cnt = static_cast<uint32_t>(kEnd - k);
+                        if (cnt >= 2u)
+                        {
+                            if (iq0->bucket == 0u)
+                            {
+                                emitInstanced(&m_instScratch[k], cnt, pkt, true, 0.0f, 0.0f, iq0->psoKey);
+                            }
+                            else
+                            {
+                                const float aref = static_cast<float>((iq0->state.alphaTest >> 4) & 0xFFu) / 128.0f;
+                                emitInstanced(&m_instScratch[k], cnt, pkt, true, std::max(0.02f, aref), 0.0f, iq0->psoKey);
+                                bool anyPass2 = false;
+                                for (uint32_t u = 0; u < cnt; ++u)
+                                    if (needsAlphaTestPass2(*m_instScratch[k + u], aref)) { anyPass2 = true; break; }
+                                if (anyPass2)
+                                {
+                                    const bool fastFog = ((iq0->psoKey & 31u) == 7u || (iq0->psoKey & 31u) == 10u);
+                                    const uint32_t p2Prog = m_fastShadersEnabled ? (fastFog ? 8u : 12u) : 1u;
+                                    const uint32_t p2Pso = makePsoKey(p2Prog, iq0->state.blend, true, false, 1u);
+                                    emitInstanced(&m_instScratch[k], cnt, pkt, true, 0.02f, aref, p2Pso);
+                                }
+                                else if (((iq0->state.alphaTest >> 12) & 3u) == 1u || ((iq0->state.alphaTest >> 12) & 3u) == 3u)
+                                {
+                                    m_pass2SkipThisFrame += cnt;
+                                }
+                            }
+                            m_instSavedThisFrame += cnt - 1u;
+                        }
+                        else
+                        {
+                            emitBucketSingle(*iq0, pkt);
+                        }
+                        k = kEnd;
+                    }
+                }
+                else
+                {
+                    for (const QueuedDraw *jq : m_instScratch)
+                        emitBucketSingle(*jq, pkt);
                 }
 
                 i = groupEnd;
@@ -2593,7 +3126,7 @@ private:
                                 if (needsAlphaTestPass2(*inst[k], aref)) { anyPass2 = true; break; }
                             if (anyPass2)
                             {
-                                const bool fastFog = ((iq.psoKey & 15u) == 7u || (iq.psoKey & 15u) == 10u);
+                                const bool fastFog = ((iq.psoKey & 31u) == 7u || (iq.psoKey & 31u) == 10u);
                                 const uint32_t p2Prog = m_fastShadersEnabled ? (fastFog ? 8u : 12u) : 1u;
                                 const uint32_t p2Pso = makePsoKey(p2Prog, iq.state.blend, true, false, 1u);
                                 emitInstanced(inst, count, pkt, true, 0.02f, aref, p2Pso);
@@ -2739,14 +3272,14 @@ private:
 
         if (m_statsEnabled && (m_frameNum % 120u == 0u))
         {
-            const double gpuMb = static_cast<double>(m_gpuMeshBytes + m_gpuTexBytes) / (1024.0 * 1024.0);
+            const double gpuMb = static_cast<double>(m_gpuMeshBytes + m_gpuTexBytes + m_gpuTexArrayBytes) / (1024.0 * 1024.0);
             const double budMb = static_cast<double>(m_cacheBudgetBytes) / (1024.0 * 1024.0);
-            std::fprintf(stderr, "[mali:stats] frame=%llu draws=%u mergeSaved=%u instSaved=%u pass2Skip=%u culled=%u direct=%d drop=%llu drs=%.2f drawMs=%.2f swapMs=%.2f capMs=%.2f renderMs=%.2f mem=%.1f/%.1fM skin=%u/%u/%u\n",
+            std::fprintf(stderr, "[mali:stats] frame=%llu draws=%u mergeSaved=%u instSaved=%u pass2Skip=%u culled=%u direct=%d drop=%llu drs=%.2f drawMs=%.2f swapMs=%.2f capMs=%.2f renderMs=%.2f mem=%.1f/%.1fM arr=%zu skin=%u/%u/%u\n",
                          static_cast<unsigned long long>(m_frameNum), m_drawCallsThisFrame,
                          m_mergeSavedThisFrame, m_instSavedThisFrame, m_pass2SkipThisFrame, m_culledThisFrame,
                          m_lastPresentedDirect ? 1 : 0,
                          static_cast<unsigned long long>(m_droppedFrames.load(std::memory_order_relaxed)),
-                         m_drsScale, m_emaDrawMs, m_emaSwapMs, m_emaCapMs, m_emaFrameMs, gpuMb, budMb,
+                         m_drsScale, m_emaDrawMs, m_emaSwapMs, m_emaCapMs, m_emaFrameMs, gpuMb, budMb, m_texArrays.size(),
                          m_skinGpuDrawsThisFrame, m_skinCpuDrawsThisFrame, m_skinMaxQwordsThisFrame);
         }
 
@@ -2776,6 +3309,8 @@ private:
         glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_FALSE, sizeof(CompactVertex), reinterpret_cast<const void *>(offsetof(CompactVertex, r)));
         glEnableVertexAttribArray(3);
         glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, sizeof(CompactVertex), reinterpret_cast<const void *>(offsetof(CompactVertex, u)));
+        glEnableVertexAttribArray(4);
+        glVertexAttribPointer(4, 1, GL_UNSIGNED_BYTE, GL_FALSE, sizeof(CompactVertex), reinterpret_cast<const void *>(offsetof(CompactVertex, texLayer)));
     }
 
     static void setupSkinVertexAttribs()
@@ -2911,6 +3446,7 @@ private:
     {
         m_lastPso = ~0u;
         m_lastTex = ~0u;
+        m_lastTexArr = ~0u;
         m_lastVao = ~0u;
         m_progOpaque.shadow.reset();
         m_progCut.shadow.reset();
@@ -2925,6 +3461,12 @@ private:
         m_progSkinOpaqueFast.shadow.reset();
         m_progSkinCutFast.shadow.reset();
         m_progSkinSoftFast.shadow.reset();
+        m_progArrOpaqueFast.shadow.reset();
+        m_progArrCutFast.shadow.reset();
+        m_progArrSoftFast.shadow.reset();
+        m_progArrOpaque.shadow.reset();
+        m_progArrCut.shadow.reset();
+        m_progArrSoft.shadow.reset();
         glDisable(GL_CULL_FACE);
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, m_bgTarget.color ? m_bgTarget.color : m_whiteTex);
@@ -2947,22 +3489,28 @@ private:
         case 10u: return m_progSkinCutFast;
         case 11u: return m_progSkinSoftFast;
         case 12u: return m_progSoft;
+        case 13u: return m_progArrOpaqueFast;
+        case 14u: return m_progArrCutFast;
+        case 15u: return m_progArrSoftFast;
+        case 16u: return m_progArrOpaque;
+        case 17u: return m_progArrCut;
+        case 18u: return m_progArrSoft;
         default: return m_progDepth;
         }
     }
 
     const ShaderProg &applyPso(uint32_t psoKey)
     {
-        const uint32_t progIdx = psoKey & 15u;
+        const uint32_t progIdx = psoKey & 31u;
         const ShaderProg &prog = progForIdx(progIdx);
         if (psoKey == m_lastPso)
             return prog;
 
-        if ((m_lastPso == ~0u) || ((m_lastPso & 15u) != progIdx))
+        if ((m_lastPso == ~0u) || ((m_lastPso & 31u) != progIdx))
             glUseProgram(prog.id);
 
-        const Blend blend = static_cast<Blend>((psoKey >> 4) & 3u);
-        if ((m_lastPso == ~0u) || (((m_lastPso >> 4) & 3u) != static_cast<uint32_t>(blend)))
+        const Blend blend = static_cast<Blend>((psoKey >> 5) & 3u);
+        if ((m_lastPso == ~0u) || (((m_lastPso >> 5) & 3u) != static_cast<uint32_t>(blend)))
         {
             if (blend == Blend::Opaque)
             {
@@ -2989,19 +3537,19 @@ private:
             }
         }
 
-        const bool depthTest = ((psoKey >> 6) & 1u) != 0u;
-        if ((m_lastPso == ~0u) || (((m_lastPso >> 6) & 1u) != (depthTest ? 1u : 0u)))
+        const bool depthTest = ((psoKey >> 7) & 1u) != 0u;
+        if ((m_lastPso == ~0u) || (((m_lastPso >> 7) & 1u) != (depthTest ? 1u : 0u)))
         {
             if (depthTest) glEnable(GL_DEPTH_TEST);
             else glDisable(GL_DEPTH_TEST);
         }
 
-        const bool depthWrite = ((psoKey >> 7) & 1u) != 0u;
-        if ((m_lastPso == ~0u) || (((m_lastPso >> 7) & 1u) != (depthWrite ? 1u : 0u)))
+        const bool depthWrite = ((psoKey >> 8) & 1u) != 0u;
+        if ((m_lastPso == ~0u) || (((m_lastPso >> 8) & 1u) != (depthWrite ? 1u : 0u)))
             glDepthMask(depthWrite ? GL_TRUE : GL_FALSE);
 
-        const uint32_t df = (psoKey >> 8) & 3u;
-        if ((m_lastPso == ~0u) || (((m_lastPso >> 8) & 3u) != df))
+        const uint32_t df = (psoKey >> 9) & 3u;
+        if ((m_lastPso == ~0u) || (((m_lastPso >> 9) & 3u) != df))
         {
             const GLenum fn = (df == 1u) ? GL_LESS : (df == 2u ? GL_EQUAL : (df == 3u ? GL_ALWAYS : GL_LEQUAL));
             glDepthFunc(fn);
@@ -3012,22 +3560,44 @@ private:
     }
 
     void bindCommonUniforms(const ShaderProg &prog, const QueuedDraw &q, const FramePacket &pkt,
-                            bool allowBgFog, float minAlpha, float maxAlpha, int instCount = 1)
+                            bool allowBgFog, float minAlpha, float maxAlpha, int instCount = 1, int16_t texArrayId = -1)
     {
-        // Phase 5.1: Pre-resolved MaliTex* + per-texture wrapClamp cache (eliminates glTexParameteri storm).
-        const GLuint glTex = q.tex ? q.tex->tex : m_whiteTex;
-        const bool hasTex = (q.tex != nullptr);
-        if (glTex != m_lastTex)
+        float texAlphaScale = 0.0f;
+        if (texArrayId >= 0 && static_cast<size_t>(texArrayId) < m_texArrays.size())
         {
-            glBindTexture(GL_TEXTURE_2D, glTex);
-            m_lastTex = glTex;
+            MaliTexArray &arr = m_texArrays[texArrayId];
+            if (arr.tex != m_lastTexArr)
+            {
+                glBindTexture(GL_TEXTURE_2D_ARRAY, arr.tex);
+                m_lastTexArr = arr.tex;
+            }
+            if (arr.wrapClamp != q.state.clamp)
+            {
+                glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, (q.state.clamp & 1u) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
+                glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, (q.state.clamp & 2u) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
+                arr.wrapClamp = q.state.clamp;
+                ++m_texWrapThisFrame;
+            }
+            texAlphaScale = arr.tex16 ? 1.0f : 2.0f;
         }
-        if (q.tex && q.tex->wrapClamp != q.state.clamp)
+        else
         {
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, (q.state.clamp & 1u) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, (q.state.clamp & 2u) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
-            q.tex->wrapClamp = q.state.clamp;
-            ++m_texWrapThisFrame;
+            // Phase 5.1: Pre-resolved MaliTex* + per-texture wrapClamp cache (eliminates glTexParameteri storm).
+            const GLuint glTex = q.tex ? q.tex->tex : m_whiteTex;
+            const bool hasTex = (q.tex != nullptr);
+            if (glTex != m_lastTex)
+            {
+                glBindTexture(GL_TEXTURE_2D, glTex);
+                m_lastTex = glTex;
+            }
+            if (q.tex && q.tex->wrapClamp != q.state.clamp)
+            {
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, (q.state.clamp & 1u) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, (q.state.clamp & 2u) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
+                q.tex->wrapClamp = q.state.clamp;
+                ++m_texWrapThisFrame;
+            }
+            texAlphaScale = !hasTex ? 0.0f : (q.tex->tex16 ? 1.0f : 2.0f);
         }
 
         UniformShadow &sh = prog.shadow;
@@ -3086,7 +3656,6 @@ private:
         const bool vfog = m_fog.vertexFog && (!q.state.background || q.state.backgroundFge);
         setCached4f(prog.uFogB, sh.fogB, v, 0.0f, 0.0f, vfog ? 1.0f : 0.0f, m_fog.base);
         setCached4f(prog.uFogC, sh.fogC, v, m_fog.scale, q.state.lodK, q.state.lodScale, q.state.maxLod);
-        const float texAlphaScale = !hasTex ? 0.0f : (q.tex->tex16 ? 1.0f : 2.0f);
         setCached4f(prog.uFogCol, sh.fogCol, v, m_fog.colour[0], m_fog.colour[1], m_fog.colour[2], texAlphaScale);
 
         const bool bgFog = allowBgFog && m_fog.enabled && q.state.fogged && !q.state.background;
@@ -3124,8 +3693,11 @@ private:
     void emitMergedRun(const QueuedDraw &q, const MergeRun &run, const FramePacket &pkt,
                        bool allowBgFog, float minAlpha, float maxAlpha)
     {
-        const ShaderProg &prog = applyPso(q.psoKey);
-        bindCommonUniforms(prog, q, pkt, allowBgFog, minAlpha, maxAlpha);
+        uint32_t psoKey = q.psoKey;
+        if (run.texArrayId >= 0)
+            psoKey = (psoKey & ~31u) | (toArrayProg(psoKey & 31u) & 31u);
+        const ShaderProg &prog = applyPso(psoKey);
+        bindCommonUniforms(prog, q, pkt, allowBgFog, minAlpha, maxAlpha, 1, run.texArrayId);
         if (run.vao != m_lastVao)
         {
             glBindVertexArray(run.vao);
@@ -3184,7 +3756,7 @@ private:
             if (needsAlphaTestPass2(q, aref))
             {
                 QueuedDraw pass2 = q;
-                const bool fastFog = ((q.psoKey & 15u) == 7u || (q.psoKey & 15u) == 10u);
+                const bool fastFog = ((q.psoKey & 31u) == 7u || (q.psoKey & 31u) == 10u);
                 const uint32_t p2Prog = m_fastShadersEnabled ? (q.skinned ? (fastFog ? 11u : 4u) : (fastFog ? 8u : 12u))
                                                              : (q.skinned ? 4u : 1u);
                 pass2.psoKey = makePsoKey(p2Prog, q.state.blend, true, false, 1u);
@@ -3374,6 +3946,8 @@ private:
                     m_knownTextures.erase(id);
                     if (auto it = m_textures.find(id); it != m_textures.end())
                     {
+                        if (it->second.arrayId >= 0 && static_cast<size_t>(it->second.arrayId) < m_texArrays.size())
+                            m_texArrays[it->second.arrayId].freeLayers.push_back(it->second.arrayLayer);
                         if (m_lastTex == it->second.tex && it->second.tex != 0u)
                             m_lastTex = ~0u;
                         if (it->second.tex) glDeleteTextures(1, &it->second.tex);
@@ -3400,6 +3974,7 @@ private:
     bool m_shaderCacheEnabled = true;
     bool m_gpuSkinEnabled = true;
     bool m_mergeEnabled = true;
+    bool m_texArrayEnabled = true;
     bool m_instancingEnabled = true;
     bool m_keepCurrentEnabled = true;
     bool m_directScanoutEnabled = true;
@@ -3422,8 +3997,10 @@ private:
     uint64_t m_uploadBudgetUs = 1500;
     uint64_t m_uploadUsThisFrame = 0;
     uint64_t m_mergeBudgetUs = 2500;
-    uint32_t m_mergeChunkMax = 24u;
+    uint32_t m_mergeChunkMax = 48u;
+    uint32_t m_maxArrayLayers = 64u;
     uint64_t m_cacheBudgetBytes = 128ull * 1024ull * 1024ull;
+    uint64_t m_texArrayBudgetBytes = 48ull * 1024ull * 1024ull;
     uint32_t m_bgRate = 2;
     int m_targetFps = 30;
     int m_drsTargetFps = 30;
@@ -3484,6 +4061,7 @@ private:
     uint64_t m_mergeRunBytes = 0;
     uint64_t m_gpuMeshBytes = 0;
     uint64_t m_gpuTexBytes = 0;
+    uint64_t m_gpuTexArrayBytes = 0;
     std::vector<uint64_t> m_pendingEvictMeshes;
     std::vector<uint64_t> m_pendingEvictTex;
 
@@ -3491,6 +4069,8 @@ private:
     ShaderProg m_progSkinOpaque{}, m_progSkinCut{}, m_progDepth{}, m_progPost{};
     ShaderProg m_progOpaqueFast{}, m_progCutFast{}, m_progSoftFast{}, m_progSoft{};
     ShaderProg m_progSkinOpaqueFast{}, m_progSkinCutFast{}, m_progSkinSoftFast{};
+    ShaderProg m_progArrOpaqueFast{}, m_progArrCutFast{}, m_progArrSoftFast{};
+    ShaderProg m_progArrOpaque{}, m_progArrCut{}, m_progArrSoft{};
     GLuint m_emptyVao = 0;
     GLuint m_whiteTex = 0;
     MaliTarget m_mainTarget[2]{}, m_postTarget{}, m_bgTarget{};
@@ -3503,6 +4083,7 @@ private:
 
     uint32_t m_lastPso = ~0u;
     GLuint m_lastTex = ~0u;
+    GLuint m_lastTexArr = ~0u;
     GLuint m_lastVao = ~0u;
 
     Fog m_fog{};
@@ -3512,10 +4093,12 @@ private:
     std::vector<CompactVertex> m_mergeVertsScratch;
     std::vector<uint32_t> m_mergeIndicesScratch;
     std::vector<std::pair<uint64_t, uint64_t>> m_evictRunsScratch;
+    std::vector<const QueuedDraw *> m_instScratch;
     std::vector<QueuedDraw> m_qBg, m_qAll;
     std::unordered_set<uint64_t> m_dumpedTexIds;
     std::unordered_map<uint64_t, MaliMesh> m_meshes;
     std::unordered_map<uint64_t, MaliTex> m_textures;
+    std::vector<MaliTexArray> m_texArrays;
     std::unordered_map<uint64_t, MergeRun> m_mergeRuns;
 };
 
