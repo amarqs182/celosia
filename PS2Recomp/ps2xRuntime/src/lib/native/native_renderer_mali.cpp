@@ -15,6 +15,7 @@
 //   palette-grouped sort + GL skin error & [mali:stats] skin=gpu/cpu/maxQ telemetry.
 
 #include "native_backend.h"
+#include "runtime/host_menu.h"
 #include "runtime/native_tuning.h"
 
 #if defined(__linux__) || defined(__APPLE__)
@@ -3510,6 +3511,21 @@ private:
             m_waterEnabled = liveTune.maliWater;
             m_fxaaEnabled = liveTune.maliFxaa;
             m_rcasEnabled = liveTune.maliRcas;
+            m_drsEnabled = liveTune.maliDrs;
+            m_atPass2Mode = !liveTune.alphaTest ? 0 : std::clamp(static_cast<int>(liveTune.maliAtPass2 + 0.5f), 0, 2);
+            m_fastShadersEnabled = liveTune.maliFastShaders;
+            m_cullEnabled = liveTune.maliCull;
+            m_mergeEnabled = liveTune.maliMerge;
+            m_instancingEnabled = liveTune.maliInstancing;
+            m_screenMode = hostmenu::settings().screenMode.load(std::memory_order_relaxed);
+            {
+                const float userScale = std::clamp(liveTune.renderScale, 0.50f, 2.00f);
+                if (std::fabs(userScale - m_drsMax) > 1e-3f)
+                {
+                    m_drsMax = userScale;
+                    m_drsScale = std::clamp(m_drsScale, std::min(m_drsMin, m_drsMax), m_drsMax);
+                }
+            }
             const bool wantTrilinear = liveTune.maliTrilinear;
             const int wantAnisoIdx = std::clamp(static_cast<int>(liveTune.maliAniso + 0.5f), 0, 2);
             const int wantAniso = wantAnisoIdx == 2 ? 4 : (wantAnisoIdx == 1 ? 2 : 0);
@@ -3759,7 +3775,7 @@ private:
             return a.seq < b.seq;
         });
 
-        const float scale = m_drsEnabled ? m_drsScale : 1.0f;
+        const float scale = m_drsEnabled ? m_drsScale : m_drsMax;
         const uint32_t rw = std::max(320u, static_cast<uint32_t>(std::lround(pkt.width * scale)) & ~3u);
         const uint32_t rh = std::max(240u, static_cast<uint32_t>(std::lround(pkt.height * scale)) & ~3u);
 
@@ -3791,11 +3807,11 @@ private:
 #if defined(PS2X_LINUX_SDL2_SHIM)
         ps2xLinuxGetDrawableSize(drawW, drawH);
 #endif
-        const bool fullViewportMatch = (m_screenMode == 1) || (drawW * 3u == drawH * 4u);
+        const bool fullViewportMatch = (m_screenMode == 1) || (m_screenMode == 0 && drawW * 3u == drawH * 4u);
         const bool directScanout =
 #if defined(PS2X_LINUX_SDL2_SHIM)
             m_directScanoutEnabled && !m_hasLetterboxCrop && !runPost && !pkt.hold &&
-            (!m_drsEnabled || m_drsScale >= 0.99f) && fullViewportMatch &&
+            std::fabs(scale - 1.0f) <= 0.01f && fullViewportMatch &&
             static_cast<bool>(presentHook()) && drawW > 0u && drawH > 0u;
 #else
             false;

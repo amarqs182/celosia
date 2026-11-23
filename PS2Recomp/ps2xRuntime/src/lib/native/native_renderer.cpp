@@ -83,10 +83,57 @@ namespace native_renderer
 #if defined(__linux__)
         d.holdIncomplete = false;
         d.holdFrames = 0.0f;
+        d.renderScale = 1.0f;
+        d.textureFilter = 1.0f;
+        d.bloom = true;
+        d.bloomStrength = 1.0f;
+        d.glow = false;
+        d.depthOfField = true;
+        d.shadows = false;
+        d.bodyShadows = false;
+        d.particles = false;
+        d.screenBlur = true;
+        d.feedback = false;
+        d.reflections = false;
+        d.refraction = false;
+        d.heatHaze = false;
+        d.vertexFog = false;
+        d.zFog = false;
+        d.alphaTest = true;
+        d.sacParticles = false;
+        d.sacLod = false;
+        d.sacCamColl = true;
+        d.sacFarChara = false;
+        d.sacFxHalf = false;
+        d.sacDrawDist = false;
+        d.frameCap30 = true;
+        d.trustFinite = true;
+        d.maliBloom = true;
+        d.maliExposure = true;
+        d.maliDof = true;
+        d.maliMotionBlur = 1.0f;
+        d.maliCa = true;
+        d.maliLensFlare = true;
+        d.maliAo = true;
+        d.maliWater = true;
+        d.maliTrilinear = false;
+        d.maliAniso = 0.0f;
+        d.maliFxaa = false;
+        d.maliRcas = false;
+        d.maliDrs = true;
+        d.maliAtPass2 = 1.0f;
+        d.maliFastShaders = true;
+        d.maliCull = true;
+        d.maliMerge = true;
+        d.maliInstancing = true;
+        d.p4Move = true;
+        d.p2Ptcl = true;
+        d.p1Chara = true;
 #else
         d.holdIncomplete = true;
 #endif
         d.warmShaders = true;
+#if !defined(__linux__)
         // Round 36: the picture at most every other refresh (round 62: a menu
         // item on the Vita again, "30 fps cap"; round 64: off by default, as
         // the user asked; a saved value honoured, SOTC_CAP30 over it). On, a
@@ -98,6 +145,7 @@ namespace native_renderer
         d.sacFarChara = true;
         d.sacFxHalf = true;
         d.sacDrawDist = true;
+#endif
         // Round 37 had the body shadows off by default here until measured;
         // round 38 turns them on (Tuning::bodyShadows' default, a menu item).
         // Round 36: the particle sacrifice on by default (half the emitters'
@@ -240,6 +288,18 @@ namespace native_renderer
                 d.maliRcas = std::atoi(std::getenv("SOTC_MALI_RCAS")) != 0;
             else if (on("SOTC_MALI_FSR_RCAS"))
                 d.maliRcas = std::atoi(std::getenv("SOTC_MALI_FSR_RCAS")) != 0;
+            if (on("SOTC_MALI_DRS"))
+                d.maliDrs = std::atoi(std::getenv("SOTC_MALI_DRS")) != 0;
+            if (on("SOTC_MALI_AT_PASS2"))
+                d.maliAtPass2 = static_cast<float>(std::clamp(std::atoi(std::getenv("SOTC_MALI_AT_PASS2")), 0, 2));
+            if (on("SOTC_MALI_FAST_SHADERS"))
+                d.maliFastShaders = std::atoi(std::getenv("SOTC_MALI_FAST_SHADERS")) != 0;
+            if (on("SOTC_MALI_CULL"))
+                d.maliCull = std::atoi(std::getenv("SOTC_MALI_CULL")) != 0;
+            if (on("SOTC_MALI_MERGE"))
+                d.maliMerge = std::atoi(std::getenv("SOTC_MALI_MERGE")) != 0;
+            if (on("SOTC_MALI_INSTANCING"))
+                d.maliInstancing = std::atoi(std::getenv("SOTC_MALI_INSTANCING")) != 0;
             if (on("SOTC_P4MOVE"))
                 d.p4Move = std::atoi(std::getenv("SOTC_P4MOVE")) != 0;
             if (on("SOTC_P2PTCL"))
@@ -557,6 +617,30 @@ namespace native_renderer
              "5-tap Robust Contrast-Adaptive Sharpening in FP16 fused into the post-process pass.",
              "Nitidez adaptativa de contraste AMD FSR 1.0 RCAS de 5 amostras em FP16 integrada no pós-processamento.",
              &Tuning::maliRcas, nullptr, 0, 1, 1, "SOTC_MALI_RCAS"},
+            {"mali_drs", "Mali Dynamic Resolution (DRS)", "Resolução Dinâmica Mali (DRS)",
+             "Automatically scales internal 3D resolution between 60% and the Resolution cap above to hold 30 FPS. Off: fixed at Resolution.",
+             "Ajusta automaticamente a resolução 3D interna entre 60% e o limite de Resolução acima para manter 30 FPS. Desligado: fixa na Resolução.",
+             &Tuning::maliDrs, nullptr, 0, 1, 1, "SOTC_MALI_DRS"},
+            {"mali_at_pass2", "Mali Foliage Edge Pass 2", "Passe 2 de Folhagem Mali",
+             "Second alpha-test pass for soft foliage/hair edges. Off: fastest (1 pass). Auto: only on textures with intermediate alpha. Always: 2 passes.",
+             "Segunda passada de alfa para bordas suaves de folhagem/crina. Desligado: mais rápido. Auto: só onde há alfa intermediário. Sempre: 2 passadas.",
+             nullptr, &Tuning::maliAtPass2, 0.0f, 2.0f, 1.0f, "SOTC_MALI_AT_PASS2"},
+            {"mali_fast_shaders", "Mali Fast Shaders", "Shaders Rápidos Mali",
+             "Uses simplified fragment shaders on draws without fog or hard cut-out.",
+             "Usa shaders de fragmento simplificados nos desenhos sem névoa ou recorte duro.",
+             &Tuning::maliFastShaders, nullptr, 0, 1, 1, "SOTC_MALI_FAST_SHADERS"},
+            {"mali_cull", "Mali Frustum Culling", "Culling de Frustum Mali",
+             "Skips static 3D meshes whose bounding box lies outside the camera frustum.",
+             "Descarta malhas 3D estáticas cuja caixa delimitadora está fora do campo de visão da câmera.",
+             &Tuning::maliCull, nullptr, 0, 1, 1, "SOTC_MALI_CULL"},
+            {"mali_merge", "Mali Static Draw Merge", "Merge Estático Mali",
+             "Combines consecutive static draws sharing a texture array and state into a single cached VBO/IBO draw call.",
+             "Combina desenhos estáticos consecutivos do mesmo array de textura e estado em uma única chamada de desenho.",
+             &Tuning::maliMerge, nullptr, 0, 1, 1, "SOTC_MALI_MERGE"},
+            {"mali_instancing", "Mali Static Instancing", "Instancing Estático Mali",
+             "Draws repeated static meshes with a single instanced draw call.",
+             "Desenha malhas estáticas repetidas em uma única chamada instanciada.",
+             &Tuning::maliInstancing, nullptr, 0, 1, 1, "SOTC_MALI_INSTANCING"},
             {"p4_move", "P4 Selective Move Join", "P4 Join Seletivo (Memória)",
              "Heap garbage moves wait only for queued hook jobs whose guest reads touch the moved range.",
              "Movimentos de memória do heap esperam apenas os jobs da fila cujas leituras tocam a faixa movida.",
@@ -900,6 +984,12 @@ namespace native_renderer
             {"mali_aniso", 2, "Cost: low-medium GPU (2x/4x anisotropic taps).", "Custo: GPU baixo a médio (amostras anisotrópicas 2x/4x)."},
             {"mali_fxaa", 2, "Cost: low GPU (fused in post pass).", "Custo: GPU baixo (fundido no passe pós)."},
             {"mali_rcas", 2, "Cost: very low GPU (<0.5 ms fused in post pass).", "Custo: GPU muito baixo (<0,5 ms fundido no passe pós)."},
+            {"mali_drs", 2, "Cost: saves GPU fillrate in heavy scenes.", "Custo: economiza fillrate da GPU nas cenas pesadas."},
+            {"mali_at_pass2", 6, "Cost: GPU (skipping pass 2 saves ~300+ draws/frame).", "Custo: GPU (pular o passe 2 economiza ~300+ draws/quadro)."},
+            {"mali_fast_shaders", 8, "Cost: saves GPU ALU cycles per fragment.", "Custo: economiza ciclos de ALU da GPU por fragmento."},
+            {"mali_cull", 8, "Cost: saves vertex & fragment work off-screen.", "Custo: economiza vértices e fragmentos fora da tela."},
+            {"mali_merge", 8, "Cost: cuts CPU driver draw-call overhead.", "Custo: reduz drasticamente o número de draw calls na CPU."},
+            {"mali_instancing", 8, "Cost: cuts CPU draw calls on repeated props.", "Custo: reduz draw calls em objetos repetidos."},
             {"shadows", 4, "Cost: GPU (the shadow mask: reduction, blur, darkening) and the model worker.",
              "Custo: GPU (a máscara de sombra: redução, borrão, escurecimento) e a thread dos modelos."},
             {"body_shadows", 4, "Cost: GPU (stencil volumes) and the model worker (volumes built each frame).",
@@ -951,10 +1041,16 @@ namespace native_renderer
             if (key == "bloom_rounds" || key == "bloom_spread" || key == "dbg_haze_source" || key == "dbg_water_source" || key == "dbg_redraw_mode0" || key == "dbg_glow_vita" || key == "dbg_bloom_sameframe" ||
                 key == "dbg_gpu_skin" || key == "dbg_render_thread" || key == "dbg_gl_pools" || key == "dbg_gl_merge" || key == "dbg_gl_lean" ||
                 key == "dbg_gl_nodiscard" ||
-                key == "mali_bloom" || key == "mali_exposure" || key == "mali_dof" || key == "mali_motion_blur" ||
-                key == "mali_ca" || key == "mali_lens_flare" || key == "mali_ao" || key == "mali_water" ||
-                key == "mali_trilinear" || key == "mali_aniso" || key == "mali_fxaa" || key == "mali_rcas")
+                key == "texture_filter" || key == "bloom" || key == "glow" || key == "dof" ||
+                key == "screen_blur" || key == "feedback" || key == "shadows" || key == "body_shadows" ||
+                key == "reflections" || key == "refraction")
                 item.backends = 2;
+            if (key == "mali_bloom" || key == "mali_exposure" || key == "mali_dof" || key == "mali_motion_blur" ||
+                key == "mali_ca" || key == "mali_lens_flare" || key == "mali_ao" || key == "mali_water" ||
+                key == "mali_trilinear" || key == "mali_aniso" || key == "mali_fxaa" || key == "mali_rcas" ||
+                key == "mali_drs" || key == "mali_at_pass2" || key == "mali_fast_shaders" ||
+                key == "mali_cull" || key == "mali_merge" || key == "mali_instancing")
+                item.backends = 4;
         }
         return v;
         }();
@@ -1065,6 +1161,10 @@ namespace native_renderer
             static const char *mbPt[] = {"Desligado", "Jogo (ScreenBlur)", "Jogo + rastro"};
             static const char *maliAnisoEn[] = {"Off", "2x", "4x"};
             static const char *maliAnisoPt[] = {"Desligado", "2x", "4x"};
+            static const char *maliAtPass2En[] = {"Off", "Smart Auto", "Always"};
+            static const char *maliAtPass2Pt[] = {"Desligado", "Auto inteligente", "Sempre"};
+            if (item.number == &Tuning::maliAtPass2)
+                return {3, maliAtPass2En, maliAtPass2Pt};
             if (item.number == &Tuning::maliAniso)
                 return {3, maliAnisoEn, maliAnisoPt};
             if (item.number == &Tuning::maliMotionBlur)
@@ -1104,6 +1204,18 @@ namespace native_renderer
             else
                 t.*f.number = v;
         }
+        t.maliBloom = preset >= kPresetMedium;
+        t.maliExposure = preset >= kPresetLow;
+        t.maliDof = preset >= kPresetHigh;
+        t.maliMotionBlur = preset >= kPresetHigh ? 2.0f : (preset >= kPresetMedium ? 1.0f : 0.0f);
+        t.maliCa = preset >= kPresetHigh;
+        t.maliLensFlare = preset >= kPresetMedium;
+        t.maliAo = preset >= kPresetHigh;
+        t.maliWater = preset >= kPresetLow;
+        t.maliTrilinear = preset >= kPresetHigh;
+        t.maliAniso = preset >= kPresetMax ? 2.0f : (preset >= kPresetHigh ? 1.0f : 0.0f);
+        t.maliFxaa = preset >= kPresetHigh;
+        t.maliRcas = preset >= kPresetMedium;
         t.preset = static_cast<float>(preset);
     }
 
@@ -1162,6 +1274,13 @@ namespace native_renderer
 
     bool tuningFromEnv(const TuningItem &item)
     {
+#if defined(PS2X_LINUX_SDL2_SHIM)
+        // On R36S / Linux SDL2, user settings saved in celosia_settings.cfg
+        // take precedence over launcher script defaults unless SOTC_FORCE_ENV=1.
+        static const bool forceEnv = std::getenv("SOTC_FORCE_ENV") && std::atoi(std::getenv("SOTC_FORCE_ENV")) != 0;
+        if (!forceEnv)
+            return false;
+#endif
         if (item.env && std::getenv(item.env))
             return true;
         if (item.inPreset && std::getenv("SOTC_PRESET"))
@@ -1230,6 +1349,10 @@ namespace native_renderer
         if (item.toggle)
         {
             t.*item.toggle = !(t.*item.toggle);
+            if (item.toggle == &Tuning::maliBloom)
+                t.bloom = t.maliBloom;
+            else if (item.toggle == &Tuning::maliDof)
+                t.depthOfField = t.maliDof;
             t.preset = static_cast<float>(matchingPreset(t)); // (round 124: saved as the preset shown)
             return;
         }
@@ -1255,6 +1378,11 @@ namespace native_renderer
         float &v = t.*item.number;
         const float n = std::round((v + item.step * static_cast<float>(dir > 0 ? 1 : -1)) / item.step) * item.step;
         v = std::clamp(n, item.min, item.max);
+        if (item.number == &Tuning::maliMotionBlur)
+        {
+            t.screenBlur = v >= 0.5f;
+            t.feedback = v >= 1.5f;
+        }
         t.preset = static_cast<float>(matchingPreset(t));
     }
 
@@ -1307,7 +1435,21 @@ namespace native_renderer
             if (item.number == &Tuning::preset)
             {
                 tuningChanged(item); // the preset (saved first) applies; the items saved after it override,
+#if defined(PS2X_LINUX_SDL2_SHIM)
+                if (std::getenv("SOTC_FORCE_ENV") && std::atoi(std::getenv("SOTC_FORCE_ENV")) != 0)
+                    presetEnv(tuning());
+#else
                 presetEnv(tuning());      // and so do the variables set at start
+#endif
+            }
+            if (item.toggle == &Tuning::maliBloom)
+                tuning().bloom = tuning().maliBloom;
+            else if (item.toggle == &Tuning::maliDof)
+                tuning().depthOfField = tuning().maliDof;
+            else if (item.number == &Tuning::maliMotionBlur)
+            {
+                tuning().screenBlur = tuning().maliMotionBlur >= 0.5f;
+                tuning().feedback = tuning().maliMotionBlur >= 1.5f;
             }
             tuning().preset = static_cast<float>(matchingPreset(tuning()));
             return true;
@@ -1375,9 +1517,26 @@ namespace native_renderer::detail
 
 namespace native_renderer
 {
-    const char *backendName() { return !wantGl() ? "None" : (g_isMali ? "Mali-G31 (GLES)" : "OpenGL"); }
+    namespace
+    {
+        bool wantMaliBackend()
+        {
+            if (g_isMali)
+                return true;
+            const char *r = std::getenv("SOTC_RENDERER");
+            return r && (r[0] == 'm' || r[0] == 'M') && (r[1] == 'a' || r[1] == 'A') && (r[2] == 'l' || r[2] == 'L') && (r[3] == 'i' || r[3] == 'I') && r[4] == '\0';
+        }
+    }
+    const char *backendName() { return !wantGl() ? "None" : (wantMaliBackend() ? "Mali-G31 (GLES)" : "OpenGL"); }
     bool inEmulator() { return detail::g_inEmulator.load(std::memory_order_relaxed); }
-    bool tuningApplies(const TuningItem &item) { return (item.backends & (wantGl() ? 2u : 1u)) != 0u; }
+    bool tuningApplies(const TuningItem &item)
+    {
+        if (item.backends == 4u)
+            return wantGl() && wantMaliBackend();
+        if (item.backends == 2u && wantMaliBackend())
+            return false;
+        return (item.backends & (wantGl() ? 2u : 1u)) != 0u;
+    }
 
     void setGlContext(std::function<void()> makeCurrent)
     {

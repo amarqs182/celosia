@@ -170,9 +170,11 @@ namespace
     };
 
     const Item kVideoItems[] = {
+#if !defined(PS2X_LINUX_SDL2_SHIM)
         {kExactAlpha, "Exact transparency",
          "Draws the effects that use the alpha test exactly like the PS2 (clouds, mist, shadows). "
          "Turning it off gains a few frames per second; some mist and edges look harder."},
+#endif
         {kShowFps, "Show FPS", "Shows the game's frame rate in the corner of the screen."},
         {kScreen, "Screen",
          "Fit keeps the original 4:3 picture with bars on the sides. Stretch fills the screen. "
@@ -192,7 +194,7 @@ namespace
     // Debug what to draw at all, the layers; Frame rate the rest.
     constexpr int kQualityTab = 1, kRendererTab = 2, kDebugTab = 3;
     const Tab kTabs[] = {
-        {"Video", kVideoItems, 3},
+        {"Video", kVideoItems, static_cast<int>(sizeof(kVideoItems) / sizeof(kVideoItems[0]))},
         {"Graphics", nullptr, -1},
         {"Frame rate", nullptr, -1},
         {"Debug", nullptr, -1},
@@ -532,6 +534,10 @@ void saveSettings() { save(); }
 
 void load()
 {
+    if (const char *sm = std::getenv("SOTC_SCREEN_MODE"); sm && sm[0])
+        g_settings.screenMode = std::clamp(std::atoi(sm), 0, 2);
+    else if (std::getenv("SOTC_STRETCH"))
+        g_settings.screenMode = kScreenStretch;
     if (const char *open = std::getenv("PS2X_SETTINGS_OPEN")) // development: open at start on tab N
     {
         g_open = true;
