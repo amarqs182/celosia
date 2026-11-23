@@ -221,6 +221,19 @@ namespace native_renderer
                 d.maliAo = std::atoi(std::getenv("SOTC_MALI_AO")) != 0;
             if (on("SOTC_MALI_WATER"))
                 d.maliWater = std::atoi(std::getenv("SOTC_MALI_WATER")) != 0;
+            if (on("SOTC_MALI_TRILINEAR"))
+                d.maliTrilinear = std::atoi(std::getenv("SOTC_MALI_TRILINEAR")) != 0;
+            if (on("SOTC_MALI_ANISO"))
+            {
+                const int an = std::atoi(std::getenv("SOTC_MALI_ANISO"));
+                d.maliAniso = an >= 4 ? 2.0f : (an >= 2 ? 1.0f : 0.0f);
+            }
+            if (on("SOTC_MALI_FXAA"))
+                d.maliFxaa = std::atoi(std::getenv("SOTC_MALI_FXAA")) != 0;
+            if (on("SOTC_MALI_RCAS"))
+                d.maliRcas = std::atoi(std::getenv("SOTC_MALI_RCAS")) != 0;
+            else if (on("SOTC_MALI_FSR_RCAS"))
+                d.maliRcas = std::atoi(std::getenv("SOTC_MALI_FSR_RCAS")) != 0;
             if (on("SOTC_P4MOVE"))
                 d.p4Move = std::atoi(std::getenv("SOTC_P4MOVE")) != 0;
             if (on("SOTC_P2PTCL"))
@@ -522,6 +535,22 @@ namespace native_renderer
              "Lightweight Fresnel-modulated water tint without an extra reflection render pass.",
              "Superfície de água leve com Fresnel e cor do céu sem passe extra de reflexão.",
              &Tuning::maliWater, nullptr, 0, 1, 1, "SOTC_MALI_WATER"},
+            {"mali_trilinear", "Mali Trilinear Filtering", "Filtro Trilinear Mali",
+             "Smooths mipmap transitions on multi-mip textures via hardware sampler objects.",
+             "Suaviza transições entre níveis de mipmap nas texturas usando objetos sampler da GPU.",
+             &Tuning::maliTrilinear, nullptr, 0, 1, 1, "SOTC_MALI_TRILINEAR"},
+            {"mali_aniso", "Mali Anisotropic Filter", "Filtro Anisotrópico Mali",
+             "Sharpens ground, stone, and slope textures viewed at shallow angles (Off, 2x, 4x).",
+             "Aumenta a nitidez do chão, pedras e encostas vistas em ângulo raso (Desligado, 2x, 4x).",
+             nullptr, &Tuning::maliAniso, 0.0f, 2.0f, 1.0f, "SOTC_MALI_ANISO"},
+            {"mali_fxaa", "Mali Fast FXAA (FP16)", "FXAA Leve Mali (FP16)",
+             "Lightweight mediump 5-tap edge anti-aliasing fused into the single post-process pass.",
+             "Anti-aliasing leve de 5 amostras em FP16 integrado diretamente no passe de pós-processamento.",
+             &Tuning::maliFxaa, nullptr, 0, 1, 1, "SOTC_MALI_FXAA"},
+            {"mali_rcas", "Mali AMD FSR 1.0 RCAS", "AMD FSR 1.0 RCAS Mali",
+             "5-tap Robust Contrast-Adaptive Sharpening in FP16 fused into the post-process pass.",
+             "Nitidez adaptativa de contraste AMD FSR 1.0 RCAS de 5 amostras em FP16 integrada no pós-processamento.",
+             &Tuning::maliRcas, nullptr, 0, 1, 1, "SOTC_MALI_RCAS"},
             {"p4_move", "P4 Selective Move Join", "P4 Join Seletivo (Memória)",
              "Heap garbage moves wait only for queued hook jobs whose guest reads touch the moved range.",
              "Movimentos de memória do heap esperam apenas os jobs da fila cujas leituras tocam a faixa movida.",
@@ -861,6 +890,10 @@ namespace native_renderer
             {"mali_lens_flare", 3, "Cost: near zero (reuses bloom buffer).", "Custo: quase zero (reutiliza buffer do bloom)."},
             {"mali_ao", 3, "Cost: medium GPU (160x120 4-tap depth SSAO + blur).", "Custo: GPU médio (SSAO 160x120 + borrão)."},
             {"mali_water", 3, "Cost: very low GPU (no reflection pass).", "Custo: GPU muito baixo (sem passe de reflexão)."},
+            {"mali_trilinear", 2, "Cost: low GPU (mip interpolation).", "Custo: GPU baixo (interpolação entre mips)."},
+            {"mali_aniso", 2, "Cost: low-medium GPU (2x/4x anisotropic taps).", "Custo: GPU baixo a médio (amostras anisotrópicas 2x/4x)."},
+            {"mali_fxaa", 2, "Cost: low GPU (fused in post pass).", "Custo: GPU baixo (fundido no passe pós)."},
+            {"mali_rcas", 2, "Cost: very low GPU (<0.5 ms fused in post pass).", "Custo: GPU muito baixo (<0,5 ms fundido no passe pós)."},
             {"shadows", 4, "Cost: GPU (the shadow mask: reduction, blur, darkening) and the model worker.",
              "Custo: GPU (a máscara de sombra: redução, borrão, escurecimento) e a thread dos modelos."},
             {"body_shadows", 4, "Cost: GPU (stencil volumes) and the model worker (volumes built each frame).",
@@ -913,7 +946,8 @@ namespace native_renderer
                 key == "dbg_gpu_skin" || key == "dbg_render_thread" || key == "dbg_gl_pools" || key == "dbg_gl_merge" || key == "dbg_gl_lean" ||
                 key == "dbg_gl_nodiscard" ||
                 key == "mali_bloom" || key == "mali_exposure" || key == "mali_dof" || key == "mali_motion_blur" ||
-                key == "mali_ca" || key == "mali_lens_flare" || key == "mali_ao" || key == "mali_water")
+                key == "mali_ca" || key == "mali_lens_flare" || key == "mali_ao" || key == "mali_water" ||
+                key == "mali_trilinear" || key == "mali_aniso" || key == "mali_fxaa" || key == "mali_rcas")
                 item.backends = 2;
         }
         return v;
@@ -1023,6 +1057,10 @@ namespace native_renderer
             static const char *sourcePt[] = {"cópia pequena", "cópia inteira", "quadro anterior"};
             static const char *mbEn[] = {"Off", "Game blur", "Game + trail"};
             static const char *mbPt[] = {"Desligado", "Jogo (ScreenBlur)", "Jogo + rastro"};
+            static const char *maliAnisoEn[] = {"Off", "2x", "4x"};
+            static const char *maliAnisoPt[] = {"Desligado", "2x", "4x"};
+            if (item.number == &Tuning::maliAniso)
+                return {3, maliAnisoEn, maliAnisoPt};
             if (item.number == &Tuning::maliMotionBlur)
                 return {3, mbEn, mbPt};
             if (item.number == &Tuning::frameRate)

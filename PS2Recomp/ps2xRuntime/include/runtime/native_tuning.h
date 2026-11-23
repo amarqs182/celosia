@@ -75,6 +75,10 @@ namespace native_renderer
         bool maliLensFlare = false;     // SOTC_MALI_LENS_FLARE
         bool maliAo = false;            // SOTC_MALI_AO
         bool maliWater = true;          // SOTC_MALI_WATER
+        bool maliTrilinear = false;     // SOTC_MALI_TRILINEAR
+        float maliAniso = 0.0f;         // SOTC_MALI_ANISO (0 off, 1 2x, 2 4x)
+        bool maliFxaa = false;          // SOTC_MALI_FXAA
+        bool maliRcas = false;          // SOTC_MALI_RCAS / SOTC_MALI_FSR_RCAS
         bool p4Move = false;            // SOTC_P4MOVE
         bool p2Ptcl = false;            // SOTC_P2PTCL
         bool p1Chara = false;           // SOTC_P1CHARA

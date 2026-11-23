@@ -201,7 +201,7 @@ export SOTC_COLLISION_STATS=0
 export SOTC_COLL115_LOG=0
 export SOTC_SEG123=0
 export SOTC_RENDERER="${SOTC_RENDERER:-mali}"
-# Mali-G31 Team ICO Pseudo-HDR & Post-FX (Fase 9 — alternar 0/1 para testar custo/visual)
+# Mali-G31 Team ICO Pseudo-HDR, Post-FX & Fase E (alternar 0/1 ou pelo menu FN in-game)
 export SOTC_MALI_BLOOM=1
 export SOTC_MALI_EXPOSURE=1
 export SOTC_MALI_DOF=1
@@ -209,6 +209,10 @@ export SOTC_MALI_MOTION_BLUR=1
 export SOTC_MALI_CA=1
 export SOTC_MALI_LENS_FLARE=1
 export SOTC_MALI_AO=1
+export SOTC_MALI_TRILINEAR=0
+export SOTC_MALI_ANISO=0
+export SOTC_MALI_FXAA=0
+export SOTC_MALI_RCAS=0
 # export SOTC_MALI_STATS=1
 export SOTC_GL_SHOTS=0
 export SOTC_GL_SHOT_DIR=/tmp/shots
