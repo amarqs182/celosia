@@ -65,6 +65,10 @@ double ps2xLinuxLastCapSleepMs();
 #include <sys/stat.h>
 #endif
 
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
+
 #ifndef GL_COMPRESSED_RGBA_ASTC_4x4_KHR
 #define GL_COMPRESSED_RGBA_ASTC_4x4_KHR 0x93B0
 #define GL_COMPRESSED_RGBA_ASTC_5x4_KHR 0x93B1
@@ -2176,11 +2180,7 @@ private:
     void renderThreadMain()
     {
 #if defined(__linux__)
-        cpu_set_t cpuset;
-        CPU_ZERO(&cpuset);
-        CPU_SET(2, &cpuset);
-        CPU_SET(3, &cpuset);
-        pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
+        native_renderer::threads::place(native_renderer::threads::kRender);
 #endif
         const bool ok = initGlOnCurrentThread();
         {
@@ -2738,7 +2738,7 @@ private:
         }
         pkt.uploads.clear();
 
-        const uint64_t uploadStartUs = m_uploadBudgetUs ? nowUs() : 0u;
+        const uint64_t uploadStartUs = (m_uploadBudgetUs || m_mergeBudgetUs) ? nowUs() : 0u;
         uint32_t uploadedCount = 0u;
         while (!m_deferredUploads.empty())
         {
@@ -2756,37 +2756,47 @@ private:
 
         // Never leave a mesh or texture in m_deferredUploads if it is actually drawn in pkt.draws
         // this frame (since m_knownMeshes/m_knownTextures already marked it ready on the game thread).
+        // Index the remaining deferred items first (typically a few entries) instead of probing
+        // m_meshes/m_textures for every draw before executeFrame does the same.
         if (!m_deferredUploads.empty() && !pkt.draws.empty())
         {
             m_drawnMeshIdsScratch.clear();
             m_drawnTexIdsScratch.clear();
+            for (const UploadCmd &u : m_deferredUploads)
+            {
+                if (u.kind == UploadCmd::Texture)
+                    m_drawnTexIdsScratch.insert(u.id);
+                else
+                    m_drawnMeshIdsScratch.insert(u.id);
+            }
             for (const RawDraw &rd : pkt.draws)
             {
-                if (m_meshes.find(rd.meshId) == m_meshes.end())
-                    m_drawnMeshIdsScratch.insert(rd.meshId);
-                if (rd.state.texture && m_textures.find(rd.state.texture) == m_textures.end())
-                    m_drawnTexIdsScratch.insert(rd.state.texture);
+                if (!m_drawnMeshIdsScratch.empty())
+                    m_drawnMeshIdsScratch.erase(rd.meshId);
+                if (rd.state.texture && !m_drawnTexIdsScratch.empty())
+                    m_drawnTexIdsScratch.erase(rd.state.texture);
+                if (m_drawnMeshIdsScratch.empty() && m_drawnTexIdsScratch.empty())
+                    break;
             }
-            if (!m_drawnMeshIdsScratch.empty() || !m_drawnTexIdsScratch.empty())
+            for (auto it = m_deferredUploads.begin(); it != m_deferredUploads.end();)
             {
-                for (auto it = m_deferredUploads.begin(); it != m_deferredUploads.end();)
+                const bool stillDeferred = (it->kind == UploadCmd::Texture)
+                    ? (m_drawnTexIdsScratch.count(it->id) != 0u)
+                    : (m_drawnMeshIdsScratch.count(it->id) != 0u);
+                if (!stillDeferred)
                 {
-                    const bool needed = (it->kind == UploadCmd::Texture)
-                        ? (m_drawnTexIdsScratch.count(it->id) != 0u)
-                        : (m_drawnMeshIdsScratch.count(it->id) != 0u);
-                    if (needed)
-                    {
-                        UploadCmd cmd = std::move(*it);
-                        it = m_deferredUploads.erase(it);
-                        uploadCmdOnGl(cmd);
-                    }
-                    else
-                    {
-                        ++it;
-                    }
+                    UploadCmd cmd = std::move(*it);
+                    it = m_deferredUploads.erase(it);
+                    uploadCmdOnGl(cmd);
+                }
+                else
+                {
+                    ++it;
                 }
             }
         }
+        if (uploadStartUs)
+            m_uploadUsThisFrame = nowUs() - uploadStartUs;
 
         for (const DynMeshRec &rec : pkt.dynMeshes)
         {
@@ -3095,7 +3105,7 @@ private:
         std::vector<uint32_t>().swap(tx.astcLevelSizes);
     }
 
-    void uploadTextureOnGl(const UploadCmd &cmd, uint64_t frameNum)
+    void uploadTextureOnGl(UploadCmd &cmd, uint64_t frameNum)
     {
         const uint64_t contentHash = (m_dumpTexEnabled || (m_hasAstc && !m_astcFiles.empty()))
             ? computeTexContentHash(cmd.rgba.data(), cmd.rgba.size(), cmd.width, cmd.height, cmd.levels)
@@ -3143,9 +3153,30 @@ private:
         uint8_t maxA = 0;
         bool allBinaryAlpha = true;
         const uint8_t *rgba = cmd.rgba.data();
-        for (size_t i = 0; i < pxCount; ++i)
+        size_t aIdx = 0;
+#if defined(__aarch64__)
+        uint8x16_t vMinA = vdupq_n_u8(0xFFu);
+        uint8x16_t vMaxA = vdupq_n_u8(0u);
+        uint8x16_t vInterMask = vdupq_n_u8(0u);
+        const uint8x16_t vFour = vdupq_n_u8(4u);
+        const uint8x16_t v124 = vdupq_n_u8(124u);
+        for (; aIdx + 16u <= pxCount; aIdx += 16u)
         {
-            const uint8_t a = rgba[i * 4 + 3];
+            const uint8x16x4_t px = vld4q_u8(rgba + aIdx * 4u);
+            const uint8x16_t a = px.val[3];
+            vMinA = vminq_u8(vMinA, a);
+            vMaxA = vmaxq_u8(vMaxA, a);
+            const uint8x16_t inter = vandq_u8(vcgtq_u8(a, vFour), vcltq_u8(a, v124));
+            vInterMask = vorrq_u8(vInterMask, inter);
+        }
+        minA = vminvq_u8(vMinA);
+        maxA = vmaxvq_u8(vMaxA);
+        if (vmaxvq_u8(vInterMask) != 0u)
+            allBinaryAlpha = false;
+#endif
+        for (; aIdx < pxCount; ++aIdx)
+        {
+            const uint8_t a = rgba[aIdx * 4 + 3];
             if (a < minA) minA = a;
             if (a > maxA) maxA = a;
             if (a > 4u && a < 124u) allBinaryAlpha = false;
@@ -3206,63 +3237,92 @@ private:
         {
             glBindTexture(GL_TEXTURE_2D_ARRAY, m_texArrays[tx.arrayId].tex);
             m_lastTexArr = m_texArrays[tx.arrayId].tex;
-            tx.rawData.reserve(static_cast<size_t>(newTexBytes));
+            if (use565 || use5551)
+                tx.rawData.resize(static_cast<size_t>(newTexBytes));
         }
 
         const uint8_t *ptr = rgba;
         uint32_t lw = cmd.width, lh = cmd.height;
+        size_t rawOffset = 0u;
         for (uint32_t lv = 0; lv < tx.levels; ++lv)
         {
             const size_t n = static_cast<size_t>(lw) * lh;
             if (use565)
             {
-                m_tex16Scratch.resize(n);
-                for (size_t i = 0; i < n; ++i)
+                uint16_t *dst16 = nullptr;
+                if (tx.arrayId >= 0)
+                {
+                    dst16 = reinterpret_cast<uint16_t *>(tx.rawData.data() + rawOffset);
+                    rawOffset += n * sizeof(uint16_t);
+                }
+                else
+                {
+                    m_tex16Scratch.resize(n);
+                    dst16 = m_tex16Scratch.data();
+                }
+                size_t i = 0;
+#if defined(__aarch64__)
+                for (; i + 8u <= n; i += 8u)
+                {
+                    const uint8x8x4_t px = vld4_u8(ptr + i * 4u);
+                    const uint16x8_t r = vshlq_n_u16(vmovl_u8(vshr_n_u8(px.val[0], 3)), 11);
+                    const uint16x8_t g = vshll_n_u8(vshr_n_u8(px.val[1], 2), 5);
+                    const uint16x8_t b = vmovl_u8(vshr_n_u8(px.val[2], 3));
+                    vst1q_u16(dst16 + i, vorrq_u16(vorrq_u16(r, g), b));
+                }
+#endif
+                for (; i < n; ++i)
                 {
                     const uint16_t r = static_cast<uint16_t>(ptr[i * 4 + 0] >> 3);
                     const uint16_t g = static_cast<uint16_t>(ptr[i * 4 + 1] >> 2);
                     const uint16_t b = static_cast<uint16_t>(ptr[i * 4 + 2] >> 3);
-                    m_tex16Scratch[i] = static_cast<uint16_t>((r << 11) | (g << 5) | b);
+                    dst16[i] = static_cast<uint16_t>((r << 11) | (g << 5) | b);
                 }
                 if (tx.arrayId >= 0)
                 {
                     glTexSubImage3D(GL_TEXTURE_2D_ARRAY, static_cast<GLint>(lv), 0, 0, static_cast<GLint>(tx.arrayLayer),
                                     static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 1,
-                                    GL_RGB, GL_UNSIGNED_SHORT_5_6_5, m_tex16Scratch.data());
-                    const auto *bPtr = reinterpret_cast<const uint8_t *>(m_tex16Scratch.data());
-                    tx.rawData.insert(tx.rawData.end(), bPtr, bPtr + n * sizeof(uint16_t));
+                                    GL_RGB, GL_UNSIGNED_SHORT_5_6_5, dst16);
                 }
                 else
                 {
                     glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(lv), GL_RGB565,
                                  static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 0,
-                                 GL_RGB, GL_UNSIGNED_SHORT_5_6_5, m_tex16Scratch.data());
+                                 GL_RGB, GL_UNSIGNED_SHORT_5_6_5, dst16);
                 }
             }
             else if (use5551)
             {
-                m_tex16Scratch.resize(n);
+                uint16_t *dst16 = nullptr;
+                if (tx.arrayId >= 0)
+                {
+                    dst16 = reinterpret_cast<uint16_t *>(tx.rawData.data() + rawOffset);
+                    rawOffset += n * sizeof(uint16_t);
+                }
+                else
+                {
+                    m_tex16Scratch.resize(n);
+                    dst16 = m_tex16Scratch.data();
+                }
                 for (size_t i = 0; i < n; ++i)
                 {
                     const uint16_t r = static_cast<uint16_t>(ptr[i * 4 + 0] >> 3);
                     const uint16_t g = static_cast<uint16_t>(ptr[i * 4 + 1] >> 3);
                     const uint16_t b = static_cast<uint16_t>(ptr[i * 4 + 2] >> 3);
                     const uint16_t a = ptr[i * 4 + 3] >= 64u ? 1u : 0u;
-                    m_tex16Scratch[i] = static_cast<uint16_t>((r << 11) | (g << 6) | (b << 1) | a);
+                    dst16[i] = static_cast<uint16_t>((r << 11) | (g << 6) | (b << 1) | a);
                 }
                 if (tx.arrayId >= 0)
                 {
                     glTexSubImage3D(GL_TEXTURE_2D_ARRAY, static_cast<GLint>(lv), 0, 0, static_cast<GLint>(tx.arrayLayer),
                                     static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 1,
-                                    GL_RGBA, GL_UNSIGNED_SHORT_5_5_5_1, m_tex16Scratch.data());
-                    const auto *bPtr = reinterpret_cast<const uint8_t *>(m_tex16Scratch.data());
-                    tx.rawData.insert(tx.rawData.end(), bPtr, bPtr + n * sizeof(uint16_t));
+                                    GL_RGBA, GL_UNSIGNED_SHORT_5_5_5_1, dst16);
                 }
                 else
                 {
                     glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(lv), GL_RGB5_A1,
                                  static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 0,
-                                 GL_RGBA, GL_UNSIGNED_SHORT_5_5_5_1, m_tex16Scratch.data());
+                                 GL_RGBA, GL_UNSIGNED_SHORT_5_5_5_1, dst16);
                 }
             }
             else
@@ -3272,7 +3332,6 @@ private:
                     glTexSubImage3D(GL_TEXTURE_2D_ARRAY, static_cast<GLint>(lv), 0, 0, static_cast<GLint>(tx.arrayLayer),
                                     static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 1,
                                     GL_RGBA, GL_UNSIGNED_BYTE, ptr);
-                    tx.rawData.insert(tx.rawData.end(), ptr, ptr + n * 4u);
                 }
                 else
                 {
@@ -3285,6 +3344,8 @@ private:
             lw = std::max(1u, lw >> 1);
             lh = std::max(1u, lh >> 1);
         }
+        if (tx.arrayId >= 0 && !use565 && !use5551)
+            tx.rawData = std::move(cmd.rgba);
         if (m_uploadBudgetUs)
             m_uploadUsThisFrame += nowUs() - t0;
     }
@@ -3318,8 +3379,13 @@ private:
         ++run.frames;
         if (run.frames < 2u)
             return nullptr;
-        if (m_mergeBudgetUs && mergeUsThisFrame >= m_mergeBudgetUs)
-            return nullptr;
+        if (m_mergeBudgetUs)
+        {
+            if (mergeUsThisFrame >= m_mergeBudgetUs)
+                return nullptr;
+            if (m_uploadBudgetUs && (m_uploadUsThisFrame + mergeUsThisFrame) >= std::max(m_uploadBudgetUs, m_mergeBudgetUs))
+                return nullptr;
+        }
 
         const uint64_t bytes = static_cast<uint64_t>(totalVerts) * sizeof(CompactVertex) +
                                static_cast<uint64_t>(totalIndices) * sizeof(uint32_t);

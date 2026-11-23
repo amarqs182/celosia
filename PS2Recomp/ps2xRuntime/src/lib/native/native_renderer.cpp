@@ -39,6 +39,7 @@ extern "C" unsigned int _pthread_stack_default_user; // ps2_vita_runtime.cpp
 #elif defined(__linux__)
 #include <pthread.h>
 #include <sched.h>
+#include <sys/resource.h>
 #endif
 
 #if defined(__APPLE__) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM)) || defined(__linux__)
@@ -79,7 +80,12 @@ namespace native_renderer
         // stalled ~80 ms on them at a camera cut, throttled).
         d.asyncBuilds = true;
         d.hookWorker = true;
+#if defined(__linux__)
+        d.holdIncomplete = false;
+        d.holdFrames = 0.0f;
+#else
         d.holdIncomplete = true;
+#endif
         d.warmShaders = true;
         // Round 36: the picture at most every other refresh (round 62: a menu
         // item on the Vita again, "30 fps cap"; round 64: off by default, as
@@ -1674,9 +1680,10 @@ namespace native_renderer
 #if defined(__linux__)
             if (layout() == 0)
                 return;
-            static const char *const kNames[kKinds] = {"game", "worker", "render", "build", "audio", "main", "loader", "recorder", "log", "dma", "lane", "offload"};
+            static const char *const kNames[kKinds] = {"game", "worker", "render", "build", "audio", "main", "loader", "recorder", "log", "dma", "lane", "offload", "guest"};
             cpu_set_t cpuset;
             CPU_ZERO(&cpuset);
+            int niceDelta = 0;
             switch (kind)
             {
             case kGame:
@@ -1684,25 +1691,44 @@ namespace native_renderer
                 CPU_SET(0, &cpuset);
                 break;
             case kWorker:
-            case kLane:
-            case kOffload:
-                // Fast parallel scene/mesh/texture lanes on Cores 1 & 2
+                // HookWorker on Cores 1 & 2
                 CPU_SET(1, &cpuset);
                 CPU_SET(2, &cpuset);
+                break;
+            case kLane:
+            case kOffload:
+            case kGuest:
+                // Parallel scene/guest helpers on Cores 1-3 so mdslane can spill to Core 3
+                // when HookWorker occupies Core 1-2 and RenderThread is blocked in swap
+                CPU_SET(1, &cpuset);
+                CPU_SET(2, &cpuset);
+                CPU_SET(3, &cpuset);
                 break;
             case kRender:
                 // OpenGL ES 3.2 RenderThread on Core 3 (and Core 2 fallback)
                 CPU_SET(2, &cpuset);
                 CPU_SET(3, &cpuset);
                 break;
+            case kBuild:
+            case kLog:
+            case kRecorder:
+                // Background asset builds and logging on Cores 1-3 at lower CFS priority
+                // so they never starve HookWorker, mdslane, Audio, or RenderThread
+                CPU_SET(1, &cpuset);
+                CPU_SET(2, &cpuset);
+                CPU_SET(3, &cpuset);
+                niceDelta = 10;
+                break;
             default:
-                // BuildWorker, Audio, Main, Loader, DMA, Log on Cores 1-3 (never preempt Core 0)
+                // Audio, Main, Loader, DMA on Cores 1-3 (never preempt Core 0)
                 CPU_SET(1, &cpuset);
                 CPU_SET(2, &cpuset);
                 CPU_SET(3, &cpuset);
                 break;
             }
             const int rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+            if (niceDelta > 0)
+                (void)setpriority(PRIO_PROCESS, 0, niceDelta);
             unsigned mask = 0;
             for (int c = 0; c < 4; ++c)
                 if (CPU_ISSET(c, &cpuset))
@@ -2327,7 +2353,9 @@ namespace native_renderer
         // meanwhile. SOTC_TAKEUP_MS (the Vita: 8; 0: all at once, as before).
         static uint64_t takeUpUs()
         {
-#if defined(__vita__) || defined(__linux__)
+#if defined(__linux__)
+            constexpr double kDefault = 2.0;
+#elif defined(__vita__)
             constexpr double kDefault = 8.0;
 #else
             constexpr double kDefault = 0.0;
@@ -2359,7 +2387,7 @@ namespace native_renderer
             size_t taken = 0;
             for (Job &job : finished)
             {
-                if (limitUs && taken && (taken & 7u) == 0u && nowUs() - start >= limitUs)
+                if (limitUs && taken && (taken & 3u) == 0u && nowUs() - start >= limitUs)
                     break;
                 ++taken;
                 AsyncWork *w = job.w;
@@ -3057,12 +3085,16 @@ namespace native_renderer
             // and they were shown with holes. Past that time the frame is
             // shown as it is (a worker that never catches up must not freeze
             // the picture).
+#if defined(__linux__)
+            static const uint64_t terrainMs = std::getenv("SOTC_HOLD_TERRAIN_MS") ? static_cast<uint64_t>(std::max(0, std::atoi(std::getenv("SOTC_HOLD_TERRAIN_MS")))) : 0u;
+#else
             static const uint64_t terrainMs = std::getenv("SOTC_HOLD_TERRAIN_MS") ? static_cast<uint64_t>(std::max(0, std::atoi(std::getenv("SOTC_HOLD_TERRAIN_MS")))) : 1500u;
+#endif
             const uint32_t holdFrames = static_cast<uint32_t>(tuning().holdFrames + 0.5f);
             const uint64_t now = nowUs();
             const bool on = tuning().asyncBuilds && tuning().holdIncomplete;
             const bool many = c.heldDraws * 8u > c.draws + c.heldDraws && heldRun < holdFrames;
-            const bool terrain = terrainMs && c.heldTerrain != 0u && (heldRun == 0u || now - heldSince < terrainMs * 1000u);
+            const bool terrain = terrainMs && c.heldTerrain != 0u && heldRun < holdFrames && (heldRun == 0u || now - heldSince < terrainMs * 1000u);
             const bool hold = on && (many || terrain);
             if (hold && heldRun == 0u)
                 heldSince = now;

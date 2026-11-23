@@ -741,12 +741,16 @@ namespace sotc_native
         uint64_t maxBytes = 96ull * 1024ull * 1024ull;
         uint64_t hits = 0;
         uint64_t stores = 0;
+        uint32_t unflushedStores = 0;
         std::unordered_map<uint64_t, uint64_t> offsets;
 
         ~StaticMeshDiskCache()
         {
             if (fp)
+            {
+                std::fflush(fp);
                 std::fclose(fp);
+            }
         }
 
         void ensureInit()
@@ -867,7 +871,11 @@ namespace sotc_native
             {
                 return;
             }
-            std::fflush(fp);
+            if (++unflushedStores >= 64u)
+            {
+                std::fflush(fp);
+                unflushedStores = 0;
+            }
             offsets[key] = fileBytes;
             fileBytes += sizeof(RecHdr) + payloadLen;
             ++stores;
@@ -10769,7 +10777,12 @@ namespace sotc_native
     TerrainBuilds g_terrainBuilds;
     bool terrainBuildBudgetLeft()
     {
-        static const uint64_t budget = std::getenv("SOTC_TERRAIN_BUILD_US") ? static_cast<uint64_t>(std::max(0, std::atoi(std::getenv("SOTC_TERRAIN_BUILD_US")))) : 2500u;
+#if defined(__linux__)
+        constexpr uint64_t kDefaultBudget = 0u;
+#else
+        constexpr uint64_t kDefaultBudget = 2500u;
+#endif
+        static const uint64_t budget = std::getenv("SOTC_TERRAIN_BUILD_US") ? static_cast<uint64_t>(std::max(0, std::atoi(std::getenv("SOTC_TERRAIN_BUILD_US")))) : kDefaultBudget;
         if (!budget)
             return false;
         if (g_terrainBuilds.frame.load(std::memory_order_relaxed) != g_frame)
@@ -12837,7 +12850,10 @@ namespace sotc_native
             {
                 SOTC_PROF_SCOPE(kHookBuild);
                 const int mode = meshoptMode();
-                const uint64_t syncCacheKey = (!changedInPlace && ((data & 0x1FFFFFFu) + size <= 0x2000000u))
+                // Never stall the synchronous drawPacket hot path on SD-card I/O or mutex contention
+                // when asyncBuilds is enabled; only use the disk cache synchronously when asyncBuilds is off.
+                const bool useSyncDiskCache = !native_renderer::tuning().asyncBuilds;
+                const uint64_t syncCacheKey = (useSyncDiskCache && !changedInPlace && ((data & 0x1FFFFFFu) + size <= 0x2000000u))
                     ? staticMeshContentKey(g_ram + (data & 0x1FFFFFFu), size, twoPasses, reorderSafe, mode)
                     : 0ull;
                 bool syncHit = false;
