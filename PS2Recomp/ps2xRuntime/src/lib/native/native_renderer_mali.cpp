@@ -76,6 +76,11 @@ double ps2xLinuxLastCapSleepMs();
 #define GL_COMPRESSED_RGBA_ASTC_8x8_KHR 0x93B7
 #endif
 
+#ifndef GL_TEXTURE_MAX_ANISOTROPY_EXT
+#define GL_TEXTURE_MAX_ANISOTROPY_EXT 0x84FE
+#define GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT 0x84FF
+#endif
+
 namespace native_renderer::detail
 {
 namespace
@@ -657,11 +662,15 @@ uniform highp sampler2D uDepth;
 uniform highp vec4 uMisc;  // invW, invH, caStrength, lensFlareStrength
 uniform highp vec4 uPostA; // bloomAddR, bloomAddG, bloomAddB, bloomAddA
 uniform highp vec4 uPostB; // expStrength, aoEnabled, prevBlurWeight, dofEnabled
-uniform highp vec4 uPostC; // dofFocusZ, dofZA, dofZB, dofSlices
+uniform highp vec4 uPostC; // dofFocusZ, dofZA, dofZB, (bit0=fxaa, bit1=rcas)
 uniform highp vec4 uPostD; // sblurScale, sblurAngle, sblurDx, sblurDy
 out mediump vec4 oColor;
+mediump float lumaFast(mediump vec3 rgb) { return rgb.g * 1.963 + rgb.r; }
 void main()
 {
+    highp vec2 tx = uMisc.xy;
+    mediump vec3 cN = vec3(0.0), cS = vec3(0.0), cW = vec3(0.0), cE = vec3(0.0);
+    bool haveCross = false;
     mediump vec3 c;
     if (uMisc.z > 0.0001)
     {
@@ -674,6 +683,65 @@ void main()
     else
     {
         c = texture(uTex, vUV).rgb;
+    }
+    if (uPostC.w > 0.5)
+    {
+        cN = texture(uTex, vUV + vec2(0.0, -tx.y)).rgb;
+        cS = texture(uTex, vUV + vec2(0.0,  tx.y)).rgb;
+        cW = texture(uTex, vUV + vec2(-tx.x, 0.0)).rgb;
+        cE = texture(uTex, vUV + vec2( tx.x, 0.0)).rgb;
+        haveCross = true;
+    }
+    if (uPostC.w == 1.0 || uPostC.w == 3.0)
+    {
+        mediump float lM = lumaFast(c);
+        mediump float lN = lumaFast(cN);
+        mediump float lS = lumaFast(cS);
+        mediump float lW = lumaFast(cW);
+        mediump float lE = lumaFast(cE);
+        mediump float lMin = min(lM, min(min(lN, lS), min(lW, lE)));
+        mediump float lMax = max(lM, max(max(lN, lS), max(lW, lE)));
+        mediump float lRange = lMax - lMin;
+        if (lRange > max(0.0625, lMax * 0.125))
+        {
+            highp vec2 dir = vec2(-(lN - lS), lW - lE);
+            highp float dirReduce = max((lN + lS + lW + lE) * 0.03125, 0.0078125);
+            highp float rcpDirMin = 1.0 / (min(abs(dir.x), abs(dir.y)) + dirReduce);
+            dir = clamp(dir * rcpDirMin, vec2(-4.0), vec2(4.0)) * tx;
+            mediump vec3 rgbA = 0.5 * (
+                texture(uTex, vUV + dir * (-0.166667)).rgb +
+                texture(uTex, vUV + dir * ( 0.166667)).rgb);
+            mediump vec3 rgbB = rgbA * 0.5 + 0.25 * (
+                texture(uTex, vUV + dir * (-0.5)).rgb +
+                texture(uTex, vUV + dir * ( 0.5)).rgb);
+            mediump float lB = lumaFast(rgbB);
+            c = (lB < lMin || lB > lMax) ? rgbA : rgbB;
+        }
+    }
+    if (uPostC.w >= 1.5)
+    {
+        if (!haveCross)
+        {
+            cN = texture(uTex, vUV + vec2(0.0, -tx.y)).rgb;
+            cS = texture(uTex, vUV + vec2(0.0,  tx.y)).rgb;
+            cW = texture(uTex, vUV + vec2(-tx.x, 0.0)).rgb;
+            cE = texture(uTex, vUV + vec2( tx.x, 0.0)).rgb;
+        }
+        mediump float lM = lumaFast(c);
+        mediump float lN = lumaFast(cN);
+        mediump float lS = lumaFast(cS);
+        mediump float lW = lumaFast(cW);
+        mediump float lE = lumaFast(cE);
+        mediump float mn4 = min(min(lN, lS), min(lW, lE));
+        mediump float mx4 = max(max(lN, lS), max(lW, lE));
+        mediump float mnL = min(mn4, lM);
+        mediump float mxL = max(mx4, lM);
+        mediump float hitMin = mnL / max(4.0 * mxL, 1e-4);
+        mediump float hitMax = (2.963 - mxL) / max(4.0 * mnL - 11.852, -11.852);
+        mediump float lobe = max(-hitMin, hitMax);
+        mediump float w = clamp(lobe, -0.18, 0.0) * 0.85;
+        mediump float rcpW = 1.0 / (4.0 * w + 1.0);
+        c = clamp((c + (cN + cS + cW + cE) * w) * rcpW, 0.0, 1.0);
     }
     if (abs(uPostD.x) > 0.0001 || abs(uPostD.y) > 0.0001 || abs(uPostD.z) > 0.0001 || abs(uPostD.w) > 0.0001)
     {
@@ -856,7 +924,7 @@ void main()
 }
 )";
 
-// Phase 7C: GL_TEXTURE_2D_ARRAY shaders for cross-texture static MergeRuns.
+// Phase 7C/7G: GL_TEXTURE_2D_ARRAY shaders for cross-texture static MergeRuns, singletons, and instanced draws.
 static const char *kMaliWorldArrVert = MALI_VERT_HDR R"(
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
@@ -867,6 +935,7 @@ layout(location = 4) in float aTexLayer;
 uniform vec4 uClip[4];
 uniform vec4 uInstanceClips[64];
 uniform int uInstanceCount;
+uniform float uTexLayerBias;
 uniform vec4 uDirections[4];
 uniform vec4 uColours[4];
 uniform vec4 uMisc;
@@ -898,7 +967,7 @@ void main()
     float fog = uFogB.z > 0.5 ? clamp(uFogB.w + uFogC.x / wSafe, 0.0, 255.0) / 255.0 : 1.0;
     vUV = vec4(aUV + uMisc.zw, c.w, fog * c.w);
     vLogW = log2(wSafe);
-    vTexLayer = aTexLayer;
+    vTexLayer = aTexLayer + uTexLayerBias;
 
     vec4 col = aColor * (1.0 / 128.0);
     col.a *= uMisc.y;
@@ -1167,6 +1236,7 @@ struct UniformShadow
     bool lightValid = false;
     uint32_t lastSkinPalette = 0u;
     int instCount = -1;
+    float texLayerBias = -1.0f;
     float clip[16] = {};
     float misc[4] = {};
     float fogA[4] = {};
@@ -1184,13 +1254,14 @@ struct UniformShadow
         lightValid = false;
         lastSkinPalette = 0u;
         instCount = -1;
+        texLayerBias = -1.0f;
     }
 };
 
 struct ShaderProg
 {
     GLuint id = 0;
-    GLint uClip = -1, uInstanceClips = -1, uInstanceCount = -1;
+    GLint uClip = -1, uInstanceClips = -1, uInstanceCount = -1, uTexLayerBias = -1;
     GLint uBones = -1, uDirections = -1, uColours = -1, uMisc = -1;
     GLint uFogA = -1, uFogB = -1, uFogC = -1, uFogCol = -1, uGuard = -1, uAlpha = -1;
     GLint uPostA = -1, uPostB = -1, uPostC = -1, uPostD = -1;
@@ -1237,6 +1308,7 @@ void bindProgUniforms(ShaderProg &out, GLuint p)
     out.uClip = glGetUniformLocation(p, "uClip");
     out.uInstanceClips = glGetUniformLocation(p, "uInstanceClips");
     out.uInstanceCount = glGetUniformLocation(p, "uInstanceCount");
+    out.uTexLayerBias = glGetUniformLocation(p, "uTexLayerBias");
     out.uBones = glGetUniformLocation(p, "uBones");
     out.uDirections = glGetUniformLocation(p, "uDirections");
     out.uColours = glGetUniformLocation(p, "uColours");
@@ -1279,7 +1351,7 @@ bool linkProgCached(ShaderProg &out, const char *name, const char *vsSrc, const 
     std::string binPath;
     if (useCache && !cacheDir.empty())
     {
-        binPath = cacheDir + "/" + name + "_v13.bin";
+        binPath = cacheDir + "/" + name + "_v14.bin";
         if (FILE *fp = std::fopen(binPath.c_str(), "rb"))
         {
             GLenum fmt = 0;
@@ -1386,6 +1458,8 @@ struct GlContextGuard
             ps2xLinuxGlUnlock();
 #endif
     }
+    GlContextGuard(const GlContextGuard &) = delete;
+    GlContextGuard &operator=(const GlContextGuard &) = delete;
     bool m_locked = false;
 };
 
@@ -1430,8 +1504,12 @@ struct MaliTex
     bool pendingEvict = false;
     bool astc = false;
     bool tex16 = false;
+    bool has2D = false;       // Phase 7G: true only when standalone GL_TEXTURE_2D is allocated
+    uint8_t fmtCode = 2;      // 0 = RGB565, 1 = RGB5_A1, 2 = RGBA8, 3..10 = ASTC
     uint64_t gpuBytes = 0;
     uint64_t lastUsed = 0;
+    std::vector<uint8_t> rawData; // Phase 7G: kept for lazy 2D upload if a non-array draw needs tx.tex
+    std::vector<uint32_t> astcLevelSizes;
 };
 
 struct MaliTexArray
@@ -1662,6 +1740,8 @@ inline bool canInstanceStatic(const QueuedDraw &a, const QueuedDraw &b)
            a.stateHash == b.stateHash &&
            a.state.order == b.state.order &&
            a.psoKey == b.psoKey &&
+           a.texArrayId == b.texArrayId &&
+           a.texArrayLayer == b.texArrayLayer &&
            a.state.texture == b.state.texture &&
            a.state.clamp == b.state.clamp &&
            a.state.alphaTest == b.state.alphaTest &&
@@ -1730,13 +1810,23 @@ public:
         m_caEnabled = envBool("SOTC_MALI_CA", false);
         m_lensFlareEnabled = envBool("SOTC_MALI_LENS_FLARE", false);
         m_aoEnabled = envBool("SOTC_MALI_AO", false);
+        m_trilinearEnabled = envBool("SOTC_MALI_TRILINEAR", false);
+        {
+            const int an = envInt("SOTC_MALI_ANISO", 0);
+            m_anisoLevel = an >= 4 ? 4 : (an >= 2 ? 2 : 0);
+        }
+        m_fxaaEnabled = envBool("SOTC_MALI_FXAA", false);
+        m_rcasEnabled = envBool("SOTC_MALI_RCAS", envBool("SOTC_MALI_FSR_RCAS", false));
         m_postUpscaleEnabled = envBool("SOTC_MALI_POST_UPSCALE", false);
         m_dumpTexEnabled = envBool("SOTC_MALI_DUMP_TEX", false);
         m_paceEnabled = envBool("SOTC_MALI_PACE", false);
         m_statsEnabled = envBool("SOTC_MALI_STATS", false);
         m_uploadBudgetUs = static_cast<uint64_t>(std::max(0, envInt("SOTC_MALI_UPLOAD_BUDGET_US", 4000)));
         m_bgRate = static_cast<uint32_t>(std::max(1, envInt("SOTC_MALI_BG_RATE", 2)));
-        m_targetFps = std::max(20, envInt("SOTC_FPS_CAP", 30));
+        {
+            const int cap = envInt("SOTC_FPS_CAP", 30);
+            m_targetFps = cap <= 0 ? 0 : std::max(20, cap);
+        }
         m_drsTargetFps = std::max(15, envInt("SOTC_MALI_DRS_TARGET_FPS", 30));
 
         if (const char *tc = std::getenv("SOTC_MALI_TEX_CACHE"); tc && tc[0])
@@ -2223,11 +2313,18 @@ private:
         for (GLint i = 0; i < numExt; ++i)
         {
             const char *ext = reinterpret_cast<const char *>(glGetStringi(GL_EXTENSIONS, static_cast<GLuint>(i)));
-            if (ext && std::strcmp(ext, "GL_KHR_texture_compression_astc_ldr") == 0)
-            {
+            if (!ext)
+                continue;
+            if (std::strcmp(ext, "GL_KHR_texture_compression_astc_ldr") == 0)
                 m_hasAstc = true;
-                break;
-            }
+            else if (std::strcmp(ext, "GL_EXT_texture_filter_anisotropic") == 0)
+                m_hasAniso = true;
+        }
+        if (m_hasAniso)
+        {
+            GLfloat maxAniso = 1.0f;
+            glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &maxAniso);
+            m_maxAniso = std::clamp(maxAniso, 1.0f, 16.0f);
         }
 
         GLint maxLayers = 64;
@@ -2301,6 +2398,8 @@ private:
         }
 
         glGenVertexArrays(1, &m_emptyVao);
+        glGenSamplers(8, m_samplers);
+        updateSamplersOnGl();
 
         glGenTextures(1, &m_whiteTex);
         glBindTexture(GL_TEXTURE_2D, m_whiteTex);
@@ -2322,7 +2421,7 @@ private:
         makeTarget(m_bgTarget, 256, 256, true);
         m_lastPresentTime = std::chrono::steady_clock::now();
         m_initialized = true;
-        std::fprintf(stderr, "[mali] Phase 10 GLES 3.2 backend up (async=%d mailbox=%d keepCur=%d direct=%d fastSh=%d shCache=%u/%u astcIdx=%zu texArr=%d(maxL=%u,bud=%lluM) merge=%d(chunk=%u) inst=%d atPass2=%d cull=%d skin=%d tex5551=%d water=%d bloom=%d exp=%d dof=%d mb=%d ca=%d flare=%d ao=%d upBud=%llu drs=%d@%dfps[%.2f..%.2f] drawOnly=%d budget=%lluM)\n",
+        std::fprintf(stderr, "[mali] Phase 7G+E GLES 3.2 backend up (async=%d mailbox=%d keepCur=%d direct=%d fastSh=%d shCache=%u/%u astcIdx=%zu texArr=%d(maxL=%u,bud=%lluM) merge=%d(chunk=%u) inst=%d atPass2=%d cull=%d skin=%d tex5551=%d water=%d trilin=%d aniso=%d(max=%.0f) fxaa=%d rcas=%d bloom=%d exp=%d dof=%d mb=%d ca=%d flare=%d ao=%d upBud=%llu drs=%d@%dfps[%.2f..%.2f] drawOnly=%d budget=%lluM)\n",
                      m_asyncEnabled ? 1 : 0, m_mailboxEnabled ? 1 : 0, m_keepCurrentEnabled ? 1 : 0,
                      m_directScanoutEnabled ? 1 : 0, m_fastShadersEnabled ? 1 : 0,
                      shHits, shMisses, m_astcFiles.size(),
@@ -2331,6 +2430,8 @@ private:
                      m_mergeEnabled ? 1 : 0, m_mergeChunkMax, m_instancingEnabled ? 1 : 0,
                      m_atPass2Mode, m_cullEnabled ? 1 : 0, m_gpuSkinEnabled ? 1 : 0,
                      m_tex5551Enabled ? 1 : 0, m_waterEnabled ? 1 : 0,
+                     m_trilinearEnabled ? 1 : 0, m_anisoLevel, m_maxAniso,
+                     m_fxaaEnabled ? 1 : 0, m_rcasEnabled ? 1 : 0,
                      m_postBloomEnabled ? 1 : 0, m_exposureEnabled ? 1 : 0,
                      m_dofEnabled ? 1 : 0, m_motionBlurMode, m_caEnabled ? 1 : 0,
                      m_lensFlareEnabled ? 1 : 0, m_aoEnabled ? 1 : 0,
@@ -2347,6 +2448,7 @@ private:
         GlContextGuard guard;
         glDeleteVertexArrays(3, m_arenaVao);
         glDeleteBuffers(3, m_arenaVbo);
+        if (m_samplers[0]) { glBindSampler(0, 0); glDeleteSamplers(8, m_samplers); std::memset(m_samplers, 0, sizeof(m_samplers)); }
         if (m_emptyVao) { glDeleteVertexArrays(1, &m_emptyVao); m_emptyVao = 0; }
         for (auto &[k, r] : m_mergeRuns)
         {
@@ -2663,6 +2765,30 @@ private:
         }
     }
 
+    void updateSamplersOnGl()
+    {
+        if (!m_samplers[0])
+            return;
+        const GLfloat aniso = (m_hasAniso && m_anisoLevel > 0)
+            ? std::min(m_maxAniso, static_cast<GLfloat>(m_anisoLevel))
+            : 1.0f;
+        for (uint32_t i = 0; i < 8u; ++i)
+        {
+            const bool hasMips = (i >= 4u);
+            const uint32_t clamp = i & 3u;
+            const GLint minFilter = hasMips
+                ? (m_trilinearEnabled ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR_MIPMAP_NEAREST)
+                : GL_LINEAR;
+            glSamplerParameteri(m_samplers[i], GL_TEXTURE_MIN_FILTER, minFilter);
+            glSamplerParameteri(m_samplers[i], GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glSamplerParameteri(m_samplers[i], GL_TEXTURE_WRAP_S, (clamp & 1u) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
+            glSamplerParameteri(m_samplers[i], GL_TEXTURE_WRAP_T, (clamp & 2u) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
+            if (m_hasAniso)
+                glSamplerParameterf(m_samplers[i], GL_TEXTURE_MAX_ANISOTROPY_EXT, aniso);
+        }
+        m_lastSamplerIdx = ~0u;
+    }
+
     void releaseTexArrayLayer(int16_t arrayId, uint8_t layer)
     {
         if (arrayId >= 0 && static_cast<size_t>(arrayId) < m_texArrays.size() && m_texArrays[arrayId].tex != 0u)
@@ -2810,9 +2936,18 @@ private:
         arr.wrapClamp = 0u;
 
 #if defined(PS2X_MALI_GLES)
+        while (glGetError() != GL_NO_ERROR) {}
         glTexStorage3D(GL_TEXTURE_2D_ARRAY, static_cast<GLsizei>(levels), internalFmt,
                        static_cast<GLsizei>(w), static_cast<GLsizei>(h), static_cast<GLsizei>(cap));
+        if (glGetError() != GL_NO_ERROR)
+        {
+            glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+            m_lastTexArr = ~0u;
+            glDeleteTextures(1, &arr.tex);
+            return false;
+        }
 #else
+        while (glGetError() != GL_NO_ERROR) {}
         const GLenum extFmt = (fmtCode == 0u) ? GL_RGB : GL_RGBA;
         const GLenum extType = (fmtCode == 0u) ? GL_UNSIGNED_SHORT_5_6_5 : (fmtCode == 1u ? GL_UNSIGNED_SHORT_5_5_5_1 : GL_UNSIGNED_BYTE);
         uint32_t lw = w, lh = h;
@@ -2823,6 +2958,13 @@ private:
                          0, extFmt, extType, nullptr);
             lw = std::max(1u, lw >> 1);
             lh = std::max(1u, lh >> 1);
+        }
+        if (glGetError() != GL_NO_ERROR)
+        {
+            glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+            m_lastTexArr = ~0u;
+            glDeleteTextures(1, &arr.tex);
+            return false;
         }
 #endif
         m_gpuTexArrayBytes += arrBytes;
@@ -2838,6 +2980,80 @@ private:
             m_texArrays.push_back(std::move(arr));
         }
         return true;
+    }
+
+    void ensureStandalone2D(MaliTex &tx)
+    {
+        if (tx.has2D || tx.rawData.empty() || !tx.width || !tx.height)
+            return;
+        if (!tx.tex)
+            glGenTextures(1, &tx.tex);
+        glBindTexture(GL_TEXTURE_2D, tx.tex);
+        m_lastTex = tx.tex;
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                        tx.levels > 1u ? (m_trilinearEnabled ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR_MIPMAP_NEAREST) : GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(tx.levels - 1u));
+
+        uint64_t newTexBytes = 0;
+        if (tx.astc)
+        {
+            uint8_t bx = 0, by = 0;
+            const GLenum fmt = fmtCodeToGlInternal(tx.fmtCode, bx, by);
+            size_t off = 0;
+            uint32_t lw = tx.width, lh = tx.height;
+            for (uint32_t lv = 0; lv < tx.levels && lv < tx.astcLevelSizes.size(); ++lv)
+            {
+                const uint32_t lvBytes = tx.astcLevelSizes[lv];
+                if (off + lvBytes <= tx.rawData.size())
+                {
+                    glCompressedTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(lv), fmt,
+                                           static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 0,
+                                           static_cast<GLsizei>(lvBytes), tx.rawData.data() + off);
+                }
+                off += lvBytes;
+                lw = std::max(1u, lw >> 1);
+                lh = std::max(1u, lh >> 1);
+            }
+            newTexBytes = static_cast<uint64_t>(tx.rawData.size());
+        }
+        else
+        {
+            const uint64_t bpp = tx.tex16 ? 2ull : 4ull;
+            const uint8_t *ptr = tx.rawData.data();
+            uint32_t lw = tx.width, lh = tx.height;
+            for (uint32_t lv = 0; lv < tx.levels; ++lv)
+            {
+                const size_t nBytes = static_cast<size_t>(lw) * lh * static_cast<size_t>(bpp);
+                if (tx.fmtCode == 0u)
+                {
+                    glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(lv), GL_RGB565,
+                                 static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 0,
+                                 GL_RGB, GL_UNSIGNED_SHORT_5_6_5, ptr);
+                }
+                else if (tx.fmtCode == 1u)
+                {
+                    glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(lv), GL_RGB5_A1,
+                                 static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 0,
+                                 GL_RGBA, GL_UNSIGNED_SHORT_5_5_5_1, ptr);
+                }
+                else
+                {
+                    glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(lv), GL_RGBA8,
+                                 static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 0,
+                                 GL_RGBA, GL_UNSIGNED_BYTE, ptr);
+                }
+                newTexBytes += nBytes;
+                ptr += nBytes;
+                lw = std::max(1u, lw >> 1);
+                lh = std::max(1u, lh >> 1);
+            }
+        }
+        tx.has2D = true;
+        tx.gpuBytes = newTexBytes;
+        m_gpuTexBytes += newTexBytes;
+        std::vector<uint8_t>().swap(tx.rawData);
+        std::vector<uint32_t>().swap(tx.astcLevelSizes);
     }
 
     void uploadTextureOnGl(const UploadCmd &cmd, uint64_t frameNum)
@@ -2867,9 +3083,21 @@ private:
         tx.wrapClamp = 0xFF;
         tx.astc = false;
         tx.tex16 = false;
-        if (!tx.tex)
-            glGenTextures(1, &tx.tex);
-        glBindTexture(GL_TEXTURE_2D, tx.tex);
+        if (tx.has2D && tx.tex)
+        {
+            if (m_lastTex == tx.tex)
+                m_lastTex = ~0u;
+            glDeleteTextures(1, &tx.tex);
+            tx.tex = 0;
+        }
+        if (m_gpuTexBytes >= tx.gpuBytes)
+            m_gpuTexBytes -= tx.gpuBytes;
+        else
+            m_gpuTexBytes = 0;
+        tx.gpuBytes = 0;
+        tx.has2D = false;
+        tx.rawData.clear();
+        tx.astcLevelSizes.clear();
 
         const size_t pxCount = static_cast<size_t>(cmd.width) * cmd.height;
         uint8_t minA = 0xFF;
@@ -2895,9 +3123,6 @@ private:
             return;
         }
 
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, tx.levels > 1u ? GL_LINEAR_MIPMAP_NEAREST : GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
         const bool use565 = m_tex16Enabled && minA >= 124u;
         const bool use5551 = m_tex16Enabled && m_tex5551Enabled && !use565 && allBinaryAlpha;
         tx.tex16 = use565 || use5551;
@@ -2906,11 +3131,12 @@ private:
         tx.arrayId = -1;
         tx.arrayLayer = 0;
         const uint8_t fmtCode = use565 ? 0u : (use5551 ? 1u : 2u);
+        tx.fmtCode = fmtCode;
         const bool arrEligible = m_texArrayEnabled && cmd.width >= 8u && cmd.width <= 256u &&
                                  cmd.height >= 8u && cmd.height <= 256u && tx.levels > 0u;
         if (arrEligible && !allocTexArraySlot(cmd.width, cmd.height, tx.levels, fmtCode, tx.arrayId, tx.arrayLayer))
             ++m_arrMissUploads;
-        glBindTexture(GL_TEXTURE_2D, tx.tex);
+
         uint64_t newTexBytes = 0;
         {
             uint32_t bw = cmd.width, bh = cmd.height;
@@ -2922,10 +3148,27 @@ private:
                 bh = std::max(1u, bh >> 1);
             }
         }
-        if (m_gpuTexBytes >= tx.gpuBytes)
-            m_gpuTexBytes -= tx.gpuBytes;
-        tx.gpuBytes = newTexBytes;
-        m_gpuTexBytes += newTexBytes;
+
+        if (tx.arrayId < 0)
+        {
+            if (!tx.tex)
+                glGenTextures(1, &tx.tex);
+            glBindTexture(GL_TEXTURE_2D, tx.tex);
+            m_lastTex = tx.tex;
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                            tx.levels > 1u ? (m_trilinearEnabled ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR_MIPMAP_NEAREST) : GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(tx.levels - 1u));
+            tx.has2D = true;
+            tx.gpuBytes = newTexBytes;
+            m_gpuTexBytes += newTexBytes;
+        }
+        else
+        {
+            glBindTexture(GL_TEXTURE_2D_ARRAY, m_texArrays[tx.arrayId].tex);
+            m_lastTexArr = m_texArrays[tx.arrayId].tex;
+            tx.rawData.reserve(static_cast<size_t>(newTexBytes));
+        }
 
         const uint8_t *ptr = rgba;
         uint32_t lw = cmd.width, lh = cmd.height;
@@ -2942,15 +3185,19 @@ private:
                     const uint16_t b = static_cast<uint16_t>(ptr[i * 4 + 2] >> 3);
                     m_tex16Scratch[i] = static_cast<uint16_t>((r << 11) | (g << 5) | b);
                 }
-                glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(lv), GL_RGB565,
-                             static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 0,
-                             GL_RGB, GL_UNSIGNED_SHORT_5_6_5, m_tex16Scratch.data());
                 if (tx.arrayId >= 0)
                 {
-                    glBindTexture(GL_TEXTURE_2D_ARRAY, m_texArrays[tx.arrayId].tex);
                     glTexSubImage3D(GL_TEXTURE_2D_ARRAY, static_cast<GLint>(lv), 0, 0, static_cast<GLint>(tx.arrayLayer),
                                     static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 1,
                                     GL_RGB, GL_UNSIGNED_SHORT_5_6_5, m_tex16Scratch.data());
+                    const auto *bPtr = reinterpret_cast<const uint8_t *>(m_tex16Scratch.data());
+                    tx.rawData.insert(tx.rawData.end(), bPtr, bPtr + n * sizeof(uint16_t));
+                }
+                else
+                {
+                    glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(lv), GL_RGB565,
+                                 static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 0,
+                                 GL_RGB, GL_UNSIGNED_SHORT_5_6_5, m_tex16Scratch.data());
                 }
             }
             else if (use5551)
@@ -2964,37 +3211,41 @@ private:
                     const uint16_t a = ptr[i * 4 + 3] >= 64u ? 1u : 0u;
                     m_tex16Scratch[i] = static_cast<uint16_t>((r << 11) | (g << 6) | (b << 1) | a);
                 }
-                glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(lv), GL_RGB5_A1,
-                             static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 0,
-                             GL_RGBA, GL_UNSIGNED_SHORT_5_5_5_1, m_tex16Scratch.data());
                 if (tx.arrayId >= 0)
                 {
-                    glBindTexture(GL_TEXTURE_2D_ARRAY, m_texArrays[tx.arrayId].tex);
                     glTexSubImage3D(GL_TEXTURE_2D_ARRAY, static_cast<GLint>(lv), 0, 0, static_cast<GLint>(tx.arrayLayer),
                                     static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 1,
                                     GL_RGBA, GL_UNSIGNED_SHORT_5_5_5_1, m_tex16Scratch.data());
+                    const auto *bPtr = reinterpret_cast<const uint8_t *>(m_tex16Scratch.data());
+                    tx.rawData.insert(tx.rawData.end(), bPtr, bPtr + n * sizeof(uint16_t));
+                }
+                else
+                {
+                    glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(lv), GL_RGB5_A1,
+                                 static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 0,
+                                 GL_RGBA, GL_UNSIGNED_SHORT_5_5_5_1, m_tex16Scratch.data());
                 }
             }
             else
             {
-                glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(lv), GL_RGBA8,
-                             static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 0,
-                             GL_RGBA, GL_UNSIGNED_BYTE, ptr);
                 if (tx.arrayId >= 0)
                 {
-                    glBindTexture(GL_TEXTURE_2D_ARRAY, m_texArrays[tx.arrayId].tex);
                     glTexSubImage3D(GL_TEXTURE_2D_ARRAY, static_cast<GLint>(lv), 0, 0, static_cast<GLint>(tx.arrayLayer),
                                     static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 1,
                                     GL_RGBA, GL_UNSIGNED_BYTE, ptr);
+                    tx.rawData.insert(tx.rawData.end(), ptr, ptr + n * 4u);
+                }
+                else
+                {
+                    glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(lv), GL_RGBA8,
+                                 static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 0,
+                                 GL_RGBA, GL_UNSIGNED_BYTE, ptr);
                 }
             }
             ptr += n * 4u;
             lw = std::max(1u, lw >> 1);
             lh = std::max(1u, lh >> 1);
         }
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(tx.levels - 1u));
-        if (tx.arrayId >= 0)
-            m_lastTexArr = ~0u;
         if (m_uploadBudgetUs)
             m_uploadUsThisFrame += nowUs() - t0;
     }
@@ -3017,7 +3268,9 @@ private:
         }
         if (!totalVerts || !totalIndices)
             return nullptr;
-        MergeRun &run = m_mergeRuns[key];
+        auto [runIt, inserted] = m_mergeRuns.try_emplace(key);
+        (void)inserted;
+        MergeRun &run = runIt->second;
         run.lastUsed = m_frameNum;
         run.texArrayId = texArrayId;
         if (run.vao && run.indexCount == totalIndices)
@@ -3041,7 +3294,7 @@ private:
             m_evictRunsScratch.clear();
             for (const auto &[rk, rr] : m_mergeRuns)
             {
-                if (rr.vao && rr.lastUsed + 16u < m_frameNum)
+                if (rk != key && rr.vao && rr.lastUsed + 16u < m_frameNum)
                     m_evictRunsScratch.push_back({rr.lastUsed, rk});
             }
             std::sort(m_evictRunsScratch.begin(), m_evictRunsScratch.end());
@@ -3060,10 +3313,9 @@ private:
                 if (er.ibo) glDeleteBuffers(1, &er.ibo);
                 if (m_mergeRunBytes >= er.bytes)
                     m_mergeRunBytes -= er.bytes;
-                er.vao = er.vbo = er.ibo = 0;
-                er.indexCount = 0;
-                er.bytes = 0;
-                er.frames = 0;
+                else
+                    m_mergeRunBytes = 0;
+                m_mergeRuns.erase(it);
             }
             if (m_mergeRunBytes + bytes > kMaxMergeRunBytes)
                 return nullptr;
@@ -3151,6 +3403,17 @@ private:
             m_lensFlareEnabled = liveTune.maliLensFlare;
             m_aoEnabled = liveTune.maliAo;
             m_waterEnabled = liveTune.maliWater;
+            m_fxaaEnabled = liveTune.maliFxaa;
+            m_rcasEnabled = liveTune.maliRcas;
+            const bool wantTrilinear = liveTune.maliTrilinear;
+            const int wantAnisoIdx = std::clamp(static_cast<int>(liveTune.maliAniso + 0.5f), 0, 2);
+            const int wantAniso = wantAnisoIdx == 2 ? 4 : (wantAnisoIdx == 1 ? 2 : 0);
+            if (wantTrilinear != m_trilinearEnabled || wantAniso != m_anisoLevel)
+            {
+                m_trilinearEnabled = wantTrilinear;
+                m_anisoLevel = wantAniso;
+                updateSamplersOnGl();
+            }
             if (!m_postBloomEnabled && !m_lensFlareEnabled)
                 m_bloomHistValid = false;
         }
@@ -3194,7 +3457,7 @@ private:
             if (!rd.state.reflectionSample && rd.state.texture)
             {
                 auto tit = m_textures.find(rd.state.texture);
-                if (tit != m_textures.end() && tit->second.tex)
+                if (tit != m_textures.end() && (tit->second.tex != 0u || tit->second.arrayId >= 0))
                 {
                     texPtr = &tit->second;
                     texPtr->lastUsed = m_frameNum;
@@ -3412,9 +3675,11 @@ private:
         const bool wantCa = has3D && m_postEnabled && m_caEnabled;
         const bool wantLensFlare = has3D && m_postEnabled && m_lensFlareEnabled;
         const bool wantAo = has3D && m_postEnabled && m_aoEnabled;
+        const bool wantFxaa = has3D && m_postEnabled && m_fxaaEnabled;
+        const bool wantRcas = has3D && m_postEnabled && m_rcasEnabled;
         const bool needBloomChain = wantTeamIcoBloom || wantLensFlare;
         const bool needDepthTex = needBloomChain || wantDof || wantAo;
-        const bool wantAnyFx = wantTeamIcoBloom || wantDof || wantScreenBlur || wantPrevBlur || wantCa || wantLensFlare || wantAo;
+        const bool wantAnyFx = wantTeamIcoBloom || wantDof || wantScreenBlur || wantPrevBlur || wantCa || wantLensFlare || wantAo || wantFxaa || wantRcas;
         const bool runPost = wantAnyFx || (m_postEnabled && m_postUpscaleEnabled && (rw != pkt.width || rh != pkt.height));
 
         uint32_t drawW = 0u, drawH = 0u;
@@ -3798,6 +4063,11 @@ private:
             if (runPost)
             {
                 const uint64_t postStartUs = nowUs();
+                if (m_lastSamplerIdx != 0u)
+                {
+                    glBindSampler(0, 0);
+                    m_lastSamplerIdx = 0u;
+                }
                 glDisable(GL_DEPTH_TEST);
                 glDepthMask(GL_FALSE);
                 glDisable(GL_BLEND);
@@ -3906,8 +4176,9 @@ private:
                 if (m_progPost.uPostB >= 0)
                     glUniform4f(m_progPost.uPostB, wantExposure ? 0.35f : 0.0f, wantAo ? 1.0f : 0.0f,
                                 wantPrevBlur ? 0.22f : 0.0f, wantDof ? 1.0f : 0.0f);
+                const float fxaaRcasMode = (wantFxaa ? 1.0f : 0.0f) + (wantRcas ? 2.0f : 0.0f);
                 if (m_progPost.uPostC >= 0)
-                    glUniform4f(m_progPost.uPostC, static_cast<float>(pkt.dof.focusZ), pkt.dof.zA, pkt.dof.zB, static_cast<float>(pkt.dof.slices));
+                    glUniform4f(m_progPost.uPostC, static_cast<float>(pkt.dof.focusZ), pkt.dof.zA, pkt.dof.zB, fxaaRcasMode);
                 float sbScale = 0.0f, sbAngle = 0.0f, sbDx = 0.0f, sbDy = 0.0f;
                 if (wantScreenBlur)
                 {
@@ -3973,7 +4244,7 @@ private:
         const double drawMs = static_cast<double>(nowUs() - frameStartUs) * 0.001;
         m_emaDrawMs = m_emaDrawMs > 0.0 ? (m_emaDrawMs * 0.85 + drawMs * 0.15) : drawMs;
         double pacerSleepMs = 0.0;
-        if (m_paceEnabled && !pkt.hold)
+        if (m_paceEnabled && !pkt.hold && m_targetFps > 0)
         {
             const auto period = std::chrono::microseconds(1000000 / m_targetFps);
             const auto target = m_lastPresentTime + period;
@@ -4287,6 +4558,7 @@ private:
         std::fclose(fp);
 
         const uint8_t fmtCode = astcBlockToFmtCode(bx, by);
+        tx.fmtCode = fmtCode;
         tx.pendingEvict = false;
         releaseTexArrayLayer(tx.arrayId, tx.arrayLayer);
         tx.arrayId = -1;
@@ -4295,38 +4567,64 @@ private:
         if (arrEligible && !allocTexArraySlot(w, h, levels, fmtCode, tx.arrayId, tx.arrayLayer))
             ++m_arrMissUploads;
 
-        glBindTexture(GL_TEXTURE_2D, tx.tex);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, levels > 1u ? GL_LINEAR_MIPMAP_NEAREST : GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(levels - 1u));
-
-        size_t off = 0;
-        uint32_t lw = w, lh = h;
-        for (uint32_t lv = 0; lv < levels; ++lv)
+        while (glGetError() != GL_NO_ERROR) {}
+        if (tx.arrayId >= 0)
         {
-            const uint32_t lvBytes = levelSizes[lv];
-            glCompressedTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(lv), fmt,
-                                   static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 0,
-                                   static_cast<GLsizei>(lvBytes), m_astcScratch.data() + off);
-            if (tx.arrayId >= 0)
+            glBindTexture(GL_TEXTURE_2D_ARRAY, m_texArrays[tx.arrayId].tex);
+            m_lastTexArr = m_texArrays[tx.arrayId].tex;
+            size_t off = 0;
+            uint32_t lw = w, lh = h;
+            for (uint32_t lv = 0; lv < levels; ++lv)
             {
-                glBindTexture(GL_TEXTURE_2D_ARRAY, m_texArrays[tx.arrayId].tex);
+                const uint32_t lvBytes = levelSizes[lv];
                 glCompressedTexSubImage3D(GL_TEXTURE_2D_ARRAY, static_cast<GLint>(lv),
                                           0, 0, static_cast<GLint>(tx.arrayLayer),
                                           static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 1,
                                           fmt, static_cast<GLsizei>(lvBytes), m_astcScratch.data() + off);
+                off += lvBytes;
+                lw = std::max(1u, lw >> 1);
+                lh = std::max(1u, lh >> 1);
             }
-            off += lvBytes;
-            lw = std::max(1u, lw >> 1);
-            lh = std::max(1u, lh >> 1);
+            if (glGetError() != GL_NO_ERROR)
+            {
+                releaseTexArrayLayer(tx.arrayId, tx.arrayLayer);
+                tx.arrayId = -1;
+                tx.arrayLayer = 0;
+                return false;
+            }
+            tx.has2D = false;
+            tx.gpuBytes = 0;
+            tx.rawData = m_astcScratch;
+            tx.astcLevelSizes = std::move(levelSizes);
         }
-        if (tx.arrayId >= 0)
-            m_lastTexArr = ~0u;
-
-        if (m_gpuTexBytes >= tx.gpuBytes)
-            m_gpuTexBytes -= tx.gpuBytes;
-        tx.gpuBytes = static_cast<uint64_t>(m_astcScratch.size());
-        m_gpuTexBytes += tx.gpuBytes;
+        else
+        {
+            if (!tx.tex)
+                glGenTextures(1, &tx.tex);
+            glBindTexture(GL_TEXTURE_2D, tx.tex);
+            m_lastTex = tx.tex;
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                            levels > 1u ? (m_trilinearEnabled ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR_MIPMAP_NEAREST) : GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(levels - 1u));
+            size_t off = 0;
+            uint32_t lw = w, lh = h;
+            for (uint32_t lv = 0; lv < levels; ++lv)
+            {
+                const uint32_t lvBytes = levelSizes[lv];
+                glCompressedTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(lv), fmt,
+                                       static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 0,
+                                       static_cast<GLsizei>(lvBytes), m_astcScratch.data() + off);
+                off += lvBytes;
+                lw = std::max(1u, lw >> 1);
+                lh = std::max(1u, lh >> 1);
+            }
+            if (glGetError() != GL_NO_ERROR)
+                return false;
+            tx.has2D = true;
+            tx.gpuBytes = static_cast<uint64_t>(m_astcScratch.size());
+            m_gpuTexBytes += tx.gpuBytes;
+        }
         tx.width = w;
         tx.height = h;
         tx.levels = levels;
@@ -4426,6 +4724,7 @@ private:
         m_lastPso = ~0u;
         m_lastTex = ~0u;
         m_lastTexArr = ~0u;
+        m_lastSamplerIdx = ~0u;
         m_lastVao = ~0u;
         m_progOpaque.shadow.reset();
         m_progCut.shadow.reset();
@@ -4541,9 +4840,11 @@ private:
     }
 
     void bindCommonUniforms(const ShaderProg &prog, const QueuedDraw &q, const FramePacket &pkt,
-                            bool allowBgFog, float minAlpha, float maxAlpha, int instCount = 1, int16_t texArrayId = -1)
+                            bool allowBgFog, float minAlpha, float maxAlpha, int instCount = 1,
+                            int16_t texArrayId = -1, float texLayerBias = 0.0f)
     {
         float texAlphaScale = 0.0f;
+        uint32_t texLevels = 1u;
         if (texArrayId >= 0 && static_cast<size_t>(texArrayId) < m_texArrays.size())
         {
             MaliTexArray &arr = m_texArrays[texArrayId];
@@ -4552,36 +4853,39 @@ private:
                 glBindTexture(GL_TEXTURE_2D_ARRAY, arr.tex);
                 m_lastTexArr = arr.tex;
             }
-            if (arr.wrapClamp != q.state.clamp)
-            {
-                glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, (q.state.clamp & 1u) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
-                glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, (q.state.clamp & 2u) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
-                arr.wrapClamp = q.state.clamp;
-                ++m_texWrapThisFrame;
-            }
+            texLevels = arr.levels;
             texAlphaScale = arr.tex16 ? 1.0f : 2.0f;
         }
         else
         {
-            // Phase 5.1: Pre-resolved MaliTex* + per-texture wrapClamp cache (eliminates glTexParameteri storm).
-            const GLuint glTex = q.tex ? q.tex->tex : m_whiteTex;
-            const bool hasTex = (q.tex != nullptr);
+            if (q.tex && !q.tex->has2D)
+                ensureStandalone2D(*q.tex);
+            const bool hasTex = (q.tex != nullptr && q.tex->tex != 0u);
+            const GLuint glTex = hasTex ? q.tex->tex : m_whiteTex;
             if (glTex != m_lastTex)
             {
                 glBindTexture(GL_TEXTURE_2D, glTex);
                 m_lastTex = glTex;
             }
-            if (q.tex && q.tex->wrapClamp != q.state.clamp)
-            {
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, (q.state.clamp & 1u) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, (q.state.clamp & 2u) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
-                q.tex->wrapClamp = q.state.clamp;
-                ++m_texWrapThisFrame;
-            }
+            texLevels = hasTex ? q.tex->levels : 1u;
             texAlphaScale = !hasTex ? 0.0f : (q.tex->tex16 ? 1.0f : 2.0f);
+        }
+        if (m_samplers[0])
+        {
+            const uint32_t sampIdx = ((texLevels > 1u) ? 4u : 0u) | (q.state.clamp & 3u);
+            if (sampIdx != m_lastSamplerIdx)
+            {
+                glBindSampler(0, m_samplers[sampIdx]);
+                m_lastSamplerIdx = sampIdx;
+            }
         }
 
         UniformShadow &sh = prog.shadow;
+        if (prog.uTexLayerBias >= 0 && sh.texLayerBias != texLayerBias)
+        {
+            sh.texLayerBias = texLayerBias;
+            glUniform1f(prog.uTexLayerBias, texLayerBias);
+        }
         if (prog.uClip >= 0 && (!sh.clipValid || std::memcmp(sh.clip, q.clip, sizeof(sh.clip)) != 0))
         {
             std::memcpy(sh.clip, q.clip, sizeof(sh.clip));
@@ -4664,8 +4968,22 @@ private:
             return;
         const MaliMesh &mesh = *q.mesh;
 
-        const ShaderProg &prog = applyPso(q.psoKey);
-        bindCommonUniforms(prog, q, pkt, allowBgFog, minAlpha, maxAlpha);
+        uint32_t psoKey = q.psoKey;
+        int16_t useArrId = -1;
+        float layerBias = 0.0f;
+        if (q.texArrayId >= 0 && !mesh.dynamic && !q.skinned)
+        {
+            const uint32_t baseProg = psoKey & 31u;
+            const uint32_t arrProg = toArrayProg(baseProg);
+            if (arrProg != baseProg)
+            {
+                psoKey = (psoKey & ~31u) | (arrProg & 31u);
+                useArrId = q.texArrayId;
+                layerBias = static_cast<float>(q.texArrayLayer);
+            }
+        }
+        const ShaderProg &prog = applyPso(psoKey);
+        bindCommonUniforms(prog, q, pkt, allowBgFog, minAlpha, maxAlpha, 1, useArrId, layerBias);
 
         const GLuint targetVao = mesh.dynamic ? m_arenaVao[m_arenaSlot] : mesh.vao;
         if (targetVao != m_lastVao)
@@ -4687,7 +5005,7 @@ private:
         if (run.texArrayId >= 0)
             psoKey = (psoKey & ~31u) | (toArrayProg(psoKey & 31u) & 31u);
         const ShaderProg &prog = applyPso(psoKey);
-        bindCommonUniforms(prog, q, pkt, allowBgFog, minAlpha, maxAlpha, 1, run.texArrayId);
+        bindCommonUniforms(prog, q, pkt, allowBgFog, minAlpha, maxAlpha, 1, run.texArrayId, 0.0f);
         if (run.vao != m_lastVao)
         {
             glBindVertexArray(run.vao);
@@ -4704,8 +5022,21 @@ private:
             return;
         const QueuedDraw &q0 = *draws[0];
         const MaliMesh &mesh = *q0.mesh;
+        int16_t useArrId = -1;
+        float layerBias = 0.0f;
+        if (q0.texArrayId >= 0 && !mesh.dynamic && !q0.skinned)
+        {
+            const uint32_t baseProg = psoKey & 31u;
+            const uint32_t arrProg = toArrayProg(baseProg);
+            if (arrProg != baseProg)
+            {
+                psoKey = (psoKey & ~31u) | (arrProg & 31u);
+                useArrId = q0.texArrayId;
+                layerBias = static_cast<float>(q0.texArrayLayer);
+            }
+        }
         const ShaderProg &prog = applyPso(psoKey);
-        bindCommonUniforms(prog, q0, pkt, allowBgFog, minAlpha, maxAlpha, static_cast<int>(count));
+        bindCommonUniforms(prog, q0, pkt, allowBgFog, minAlpha, maxAlpha, static_cast<int>(count), useArrId, layerBias);
 
         if (prog.uInstanceClips >= 0 && prog.uInstanceCount >= 0)
         {
@@ -4840,7 +5171,8 @@ private:
             }
         }
 
-        // Phase 1 of 2-phase tombstone eviction: select stale or over-budget meshes & textures.
+        // Phase 1 of 2-phase tombstone eviction: reclaim empty texture arrays before computing projectedBytes.
+        reclaimEmptyTexArrays();
         std::vector<uint64_t> candMeshes;
         std::vector<uint64_t> candTex;
         uint64_t projectedBytes = m_gpuMeshBytes + m_gpuTexBytes + m_gpuTexArrayBytes;
@@ -4985,6 +5317,12 @@ private:
     bool m_caEnabled = false;
     bool m_lensFlareEnabled = false;
     bool m_aoEnabled = false;
+    bool m_trilinearEnabled = false;
+    bool m_hasAniso = false;
+    int m_anisoLevel = 0;
+    float m_maxAniso = 1.0f;
+    bool m_fxaaEnabled = false;
+    bool m_rcasEnabled = false;
     bool m_postUpscaleEnabled = false;
     bool m_lastPresentedPost = false;
     bool m_lastPresentedDirect = false;
@@ -5092,11 +5430,13 @@ private:
 
     GLuint m_arenaVao[3] = {};
     GLuint m_arenaVbo[3] = {};
+    GLuint m_samplers[8] = {};
     int m_arenaSlot = 0;
 
     uint32_t m_lastPso = ~0u;
     GLuint m_lastTex = ~0u;
     GLuint m_lastTexArr = ~0u;
+    uint32_t m_lastSamplerIdx = ~0u;
     GLuint m_lastVao = ~0u;
 
     Fog m_fog{};
