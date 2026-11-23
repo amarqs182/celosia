@@ -81,8 +81,8 @@ namespace
 
 constexpr uint32_t kMaxSkinQwords = native_renderer::kSkinPaletteQwords; // 48 bones * 4 vec4s via glUniform4fv (libMali r13p0 safe)
 constexpr uint32_t kMaxInstances = 16u;
-constexpr uint64_t kMaxMergeSrcBytes = 24ull * 1024ull * 1024ull;
-constexpr uint64_t kMaxMergeRunBytes = 24ull * 1024ull * 1024ull;
+constexpr uint64_t kMaxMergeSrcBytes = 40ull * 1024ull * 1024ull;
+constexpr uint64_t kMaxMergeRunBytes = 32ull * 1024ull * 1024ull;
 
 inline uint64_t nowUs()
 {
@@ -1344,7 +1344,7 @@ inline bool cullAabb(const float *c, const float *lo, const float *hi, float &ou
 inline bool canMergeStatic(const QueuedDraw &a, const QueuedDraw &b)
 {
     return a.bucket == b.bucket &&
-           (a.bucket == 0u || a.bucket == 1u) &&
+           a.bucket <= 2u &&
            a.mesh && b.mesh &&
            !a.mesh->dynamic && !b.mesh->dynamic &&
            !a.skinned && !b.skinned &&
@@ -1374,7 +1374,7 @@ inline bool canMergeStatic(const QueuedDraw &a, const QueuedDraw &b)
 inline bool canInstanceStatic(const QueuedDraw &a, const QueuedDraw &b)
 {
     return a.bucket == b.bucket &&
-           (a.bucket == 0u || a.bucket == 1u) &&
+           a.bucket <= 2u &&
            a.mesh && b.mesh &&
            a.mesh == b.mesh &&
            !a.mesh->dynamic && !b.mesh->dynamic &&
@@ -1382,8 +1382,7 @@ inline bool canInstanceStatic(const QueuedDraw &a, const QueuedDraw &b)
            a.stateHash == b.stateHash &&
            a.state.order == b.state.order &&
            a.psoKey == b.psoKey &&
-           ((a.texArrayId >= 0 && a.texArrayId == b.texArrayId) ||
-            (a.texArrayId < 0 && b.texArrayId < 0)) && a.state.texture == b.state.texture &&
+           a.state.texture == b.state.texture &&
            a.state.clamp == b.state.clamp &&
            a.state.alphaTest == b.state.alphaTest &&
            a.state.lit == b.state.lit &&
@@ -1991,7 +1990,7 @@ private:
         makeTarget(m_bgTarget, 256, 256, true);
         m_lastPresentTime = std::chrono::steady_clock::now();
         m_initialized = true;
-        std::fprintf(stderr, "[mali] Phase 7E GLES 3.2 backend up (async=%d mailbox=%d keepCur=%d direct=%d fastSh=%d texArr=%d(maxL=%u,bud=%lluM) merge=%d(chunk=%u) inst=%d atPass2=%d cull=%d skin=%d drs=%d@%dfps[%.2f..%.2f] drawOnly=%d budget=%lluM)\n",
+        std::fprintf(stderr, "[mali] Phase 8 GLES 3.2 backend up (async=%d mailbox=%d keepCur=%d direct=%d fastSh=%d texArr=%d(maxL=%u,bud=%lluM) merge=%d(chunk=%u) inst=%d atPass2=%d cull=%d skin=%d drs=%d@%dfps[%.2f..%.2f] drawOnly=%d budget=%lluM)\n",
                      m_asyncEnabled ? 1 : 0, m_mailboxEnabled ? 1 : 0, m_keepCurrentEnabled ? 1 : 0,
                      m_directScanoutEnabled ? 1 : 0, m_fastShadersEnabled ? 1 : 0,
                      m_texArrayEnabled ? 1 : 0, m_maxArrayLayers,
@@ -2759,6 +2758,7 @@ private:
         m_culledThisFrame = 0;
         m_drawCallsThisFrame = 0;
         m_mergeSavedThisFrame = 0;
+        m_b2SavedThisFrame = 0;
         m_instSavedThisFrame = 0;
         m_pass2SkipThisFrame = 0;
         m_texWrapThisFrame = 0;
@@ -2829,14 +2829,18 @@ private:
                 const uint32_t afail = (rd.state.alphaTest >> 12) & 3u;
                 if (ate && atst == 0u && afail == 0u)
                     continue;
-                const bool hasAnyAlphaTest = ate && (atst != 1u);
+                const uint32_t aref8 = (rd.state.alphaTest >> 4) & 0xFFu;
                 const bool canAlphaTestBucket = ate && (atst == 5u || atst == 6u) &&
                                                 !rd.state.background && !rd.state.overlay && !rd.state.noDepthWrite &&
                                                 rd.state.blend != Blend::Additive && rd.state.blend != Blend::Subtract;
-                const bool texOpaque = !texPtr || texPtr->minAlpha >= 124u;
-                const bool isOpaque = !hasAnyAlphaTest && !rd.state.background && !rd.state.overlay && !rd.state.noDepthWrite &&
+                const bool texOpaque = (texPtr != nullptr && texPtr->minAlpha >= 124u);
+                const bool fullAlpha = !rd.state.fresnel && rd.state.opacity >= 0.99f && mesh.minAlpha >= 124u && texOpaque;
+                const bool alphaTestAlwaysPasses = !ate || (atst == 1u) ||
+                                                   (fullAlpha && ((atst == 5u && aref8 <= 120u) ||
+                                                                  (atst == 6u && aref8 <= 116u)));
+                const bool isOpaque = alphaTestAlwaysPasses && !rd.state.background && !rd.state.overlay && !rd.state.noDepthWrite &&
                                       (rd.state.blend == Blend::Opaque ||
-                                       (rd.state.blend == Blend::Normal && rd.state.opacity >= 0.99f && mesh.minAlpha >= 124u && texOpaque));
+                                       (rd.state.blend == Blend::Normal && fullAlpha));
                 const bool needBgFog = m_fog.enabled && rd.state.fogged && !rd.state.background;
                 const bool needVFog = m_fog.vertexFog && (!rd.state.background || rd.state.backgroundFge);
                 const bool fastFog = m_fastShadersEnabled && !needBgFog && !needVFog;
@@ -2867,7 +2871,7 @@ private:
                 }
             }
 
-            if (q.bucket == 0u || q.bucket == 1u)
+            if (q.bucket <= 2u)
             {
                 q.texArrayId = (m_texArrayEnabled && texPtr && texPtr->arrayId >= 0) ? texPtr->arrayId : -1;
                 q.texArrayLayer = (q.texArrayId >= 0) ? texPtr->arrayLayer : 0u;
@@ -2897,7 +2901,7 @@ private:
                 q.stateHash = sh;
             }
 
-            const bool mergeCandidate = m_mergeEnabled && (q.bucket == 0u || q.bucket == 1u) && !mesh.dynamic && !q.skinned && !mesh.srcVerts.empty();
+            const bool mergeCandidate = m_mergeEnabled && q.bucket <= 2u && !mesh.dynamic && !q.skinned && !mesh.srcVerts.empty();
             if (m_cullEnabled && mesh.hasBox && !mesh.dynamic && !mesh.skinned && !rd.state.screen && !rd.state.overlay && !rd.state.background)
             {
                 if (mergeCandidate)
@@ -3031,12 +3035,23 @@ private:
             glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         }
 
+        auto b2MinAlpha = [](const QueuedDraw &dq) noexcept -> float {
+            float minA = 0.02f;
+            const uint32_t at = dq.state.alphaTest;
+            const uint32_t atst = (at >> 1) & 7u;
+            const uint32_t afail = (at >> 12) & 3u;
+            if ((at & 1u) && (atst == 5u || atst == 6u) && afail == 0u)
+                minA = std::max(0.02f, static_cast<float>((at >> 4) & 0xFFu) / 128.0f);
+            return minA;
+        };
+
         for (size_t i = 0; i < m_qAll.size();)
         {
             const QueuedDraw &q = m_qAll[i];
 
-            // Phase 6.1/7C: Camera-invariant static merge across GL_TEXTURE_2D_ARRAY layers + leftover singleton instancing.
-            if (m_mergeEnabled && (q.bucket == 0u || q.bucket == 1u) && q.mesh && !q.mesh->dynamic && !q.skinned && !q.mesh->srcVerts.empty() &&
+            // Phase 6.1/7C/8: Camera-invariant static merge across GL_TEXTURE_2D_ARRAY layers + leftover singleton instancing.
+            // Bucket 2 stays strictly in original seq order (painter's order); only consecutive compatible draws merge/instance.
+            if (m_mergeEnabled && q.bucket <= 2u && q.mesh && !q.mesh->dynamic && !q.skinned && !q.mesh->srcVerts.empty() &&
                 i + 1u < m_qAll.size() && canMergeStatic(q, m_qAll[i + 1u]))
             {
                 size_t groupEnd = i + 2u;
@@ -3068,7 +3083,7 @@ private:
                             }
                         }
                         float dummyW = 0.0f;
-                        if (m_cullEnabled && allBox && cullAabb(sq.clip, runLo, runHi, dummyW))
+                        if (m_cullEnabled && allBox && !sq.state.background && !sq.state.overlay && cullAabb(sq.clip, runLo, runHi, dummyW))
                         {
                             m_culledThisFrame += static_cast<uint32_t>(e - s);
                             s = e;
@@ -3079,6 +3094,10 @@ private:
                             if (sq.bucket == 0u)
                             {
                                 emitMergedRun(sq, *run, pkt, true, 0.0f, 0.0f);
+                            }
+                            else if (sq.bucket == 2u)
+                            {
+                                emitMergedRun(sq, *run, pkt, true, b2MinAlpha(sq), 0.0f);
                             }
                             else
                             {
@@ -3100,7 +3119,10 @@ private:
                                     m_pass2SkipThisFrame += static_cast<uint32_t>(e - s);
                                 }
                             }
-                            m_mergeSavedThisFrame += static_cast<uint32_t>(e - s - 1u);
+                            const uint32_t saved = static_cast<uint32_t>(e - s - 1u);
+                            m_mergeSavedThisFrame += saved;
+                            if (sq.bucket == 2u)
+                                m_b2SavedThisFrame += saved;
                             s = e;
                             continue;
                         }
@@ -3122,11 +3144,14 @@ private:
 
                 if (m_instancingEnabled && m_instScratch.size() >= 2u)
                 {
-                    std::sort(m_instScratch.begin(), m_instScratch.end(), [](const QueuedDraw *a, const QueuedDraw *b) {
-                        if (a->meshId != b->meshId) return a->meshId < b->meshId;
-                        if (a->state.texture != b->state.texture) return a->state.texture < b->state.texture;
-                        return a->seq < b->seq;
-                    });
+                    if (q.bucket != 2u)
+                    {
+                        std::sort(m_instScratch.begin(), m_instScratch.end(), [](const QueuedDraw *a, const QueuedDraw *b) {
+                            if (a->meshId != b->meshId) return a->meshId < b->meshId;
+                            if (a->state.texture != b->state.texture) return a->state.texture < b->state.texture;
+                            return a->seq < b->seq;
+                        });
+                    }
                     for (size_t k = 0; k < m_instScratch.size();)
                     {
                         const QueuedDraw *iq0 = m_instScratch[k];
@@ -3140,6 +3165,10 @@ private:
                             {
                                 emitInstanced(&m_instScratch[k], cnt, pkt, true, 0.0f, 0.0f, iq0->psoKey);
                             }
+                            else if (iq0->bucket == 2u)
+                            {
+                                emitInstanced(&m_instScratch[k], cnt, pkt, true, b2MinAlpha(*iq0), 0.0f, iq0->psoKey);
+                            }
                             else
                             {
                                 const float aref = static_cast<float>((iq0->state.alphaTest >> 4) & 0xFFu) / 128.0f;
@@ -3150,7 +3179,7 @@ private:
                                 if (anyPass2)
                                 {
                                     const bool fastFog = ((iq0->psoKey & 31u) == 7u || (iq0->psoKey & 31u) == 10u);
-                                    const uint32_t p2ProgBase = m_fastShadersEnabled ? (fastFog ? 8u : 12u) : 1u; const uint32_t p2Prog = (iq0->texArrayId >= 0) ? toArrayProg(p2ProgBase) : p2ProgBase;
+                                    const uint32_t p2Prog = m_fastShadersEnabled ? (fastFog ? 8u : 12u) : 1u;
                                     const uint32_t p2Pso = makePsoKey(p2Prog, iq0->state.blend, true, false, 1u);
                                     emitInstanced(&m_instScratch[k], cnt, pkt, true, 0.02f, aref, p2Pso);
                                 }
@@ -3160,6 +3189,8 @@ private:
                                 }
                             }
                             m_instSavedThisFrame += cnt - 1u;
+                            if (iq0->bucket == 2u)
+                                m_b2SavedThisFrame += cnt - 1u;
                         }
                         else
                         {
@@ -3178,7 +3209,7 @@ private:
                 continue;
             }
 
-            if (m_instancingEnabled && (q.bucket == 0u || q.bucket == 1u) && q.mesh && !q.mesh->dynamic && !q.skinned)
+            if (m_instancingEnabled && q.bucket <= 2u && q.mesh && !q.mesh->dynamic && !q.skinned)
             {
                 size_t instEnd = i + 1u;
                 while (instEnd < m_qAll.size() && (instEnd - i) < kMaxInstances && canInstanceStatic(q, m_qAll[instEnd]))
@@ -3205,6 +3236,10 @@ private:
                         {
                             emitInstanced(inst, count, pkt, true, 0.0f, 0.0f, iq.psoKey);
                         }
+                        else if (iq.bucket == 2u)
+                        {
+                            emitInstanced(inst, count, pkt, true, b2MinAlpha(iq), 0.0f, iq.psoKey);
+                        }
                         else
                         {
                             const float aref = static_cast<float>((iq.state.alphaTest >> 4) & 0xFFu) / 128.0f;
@@ -3215,7 +3250,7 @@ private:
                             if (anyPass2)
                             {
                                 const bool fastFog = ((iq.psoKey & 31u) == 7u || (iq.psoKey & 31u) == 10u);
-                                const uint32_t p2ProgBase = m_fastShadersEnabled ? (fastFog ? 8u : 12u) : 1u; const uint32_t p2Prog = (iq.texArrayId >= 0) ? toArrayProg(p2ProgBase) : p2ProgBase;
+                                const uint32_t p2Prog = m_fastShadersEnabled ? (fastFog ? 8u : 12u) : 1u;
                                 const uint32_t p2Pso = makePsoKey(p2Prog, iq.state.blend, true, false, 1u);
                                 emitInstanced(inst, count, pkt, true, 0.02f, aref, p2Pso);
                             }
@@ -3225,6 +3260,8 @@ private:
                             }
                         }
                         m_instSavedThisFrame += count - 1u;
+                        if (iq.bucket == 2u)
+                            m_b2SavedThisFrame += count - 1u;
                     }
                     else if (count == 1u)
                     {
@@ -3296,22 +3333,21 @@ private:
             m_mainIdx ^= 1;
         }
         m_arenaSlot = (m_arenaSlot + 1) % 3;
-const double drawMs = static_cast<double>(nowUs() - frameStartUs) * 0.001;
+
+        const double drawMs = static_cast<double>(nowUs() - frameStartUs) * 0.001;
         m_emaDrawMs = m_emaDrawMs > 0.0 ? (m_emaDrawMs * 0.85 + drawMs * 0.15) : drawMs;
         double pacerSleepMs = 0.0;
-        
         if (m_paceEnabled && !pkt.hold)
         {
             const auto period = std::chrono::microseconds(1000000 / m_targetFps);
             const auto target = m_lastPresentTime + period;
             const auto now = std::chrono::steady_clock::now();
             if (target > now + std::chrono::microseconds(600))
-                { std::this_thread::sleep_until(target - std::chrono::microseconds(400)); pacerSleepMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - now).count(); }
-            
+            {
+                std::this_thread::sleep_until(target - std::chrono::microseconds(400));
+                pacerSleepMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - now).count();
+            }
         }
-
-        
-        
 
         double lastCapMs = 0.0;
         if (!pkt.hold)
@@ -3319,7 +3355,7 @@ const double drawMs = static_cast<double>(nowUs() - frameStartUs) * 0.001;
             if (const auto &hook = presentHook())
                 hook(outTex, outW, outH);
             m_lastPresentTime = std::chrono::steady_clock::now();
-            #if defined(PS2X_LINUX_SDL2_SHIM)
+#if defined(PS2X_LINUX_SDL2_SHIM)
             const double swapMs = ps2xLinuxLastSwapMs();
             lastCapMs = ps2xLinuxLastCapSleepMs();
             m_emaSwapMs = m_emaSwapMs > 0.0 ? (m_emaSwapMs * 0.85 + swapMs * 0.15) : swapMs;
@@ -3412,14 +3448,14 @@ const double drawMs = static_cast<double>(nowUs() - frameStartUs) * 0.001;
                 }
                 prevStatic = &q;
             }
-            std::fprintf(stderr, "[mali:stats] frame=%llu draws=%u mergeSaved=%u instSaved=%u pass2Skip=%u culled=%u direct=%d drop=%llu drs=%.2f drawMs=%.2f swapMs=%.2f capMs=%.2f renderMs=%.2f mem=%.1f/%.1fM arr=%u arrMiss=%u/%llu b=%u/%u/%u/%u brk=%u/%u/%u/%u/%u/%u skin=%u/%u/%u\n",
+            std::fprintf(stderr, "[mali:stats] frame=%llu draws=%u mergeSaved=%u instSaved=%u pass2Skip=%u culled=%u direct=%d drop=%llu drs=%.2f drawMs=%.2f swapMs=%.2f capMs=%.2f renderMs=%.2f mem=%.1f/%.1fM arr=%u arrMiss=%u/%llu b=%u/%u/%u/%u b2s=%u brk=%u/%u/%u/%u/%u/%u skin=%u/%u/%u\n",
                          static_cast<unsigned long long>(m_frameNum), m_drawCallsThisFrame,
                          m_mergeSavedThisFrame, m_instSavedThisFrame, m_pass2SkipThisFrame, m_culledThisFrame,
                          m_lastPresentedDirect ? 1 : 0,
                          static_cast<unsigned long long>(m_droppedFrames.load(std::memory_order_relaxed)),
                          m_drsScale, m_emaDrawMs, m_emaSwapMs, m_emaCapMs, m_emaFrameMs, gpuMb, budMb, liveArrays,
                          m_arrMissDrawsThisFrame, static_cast<unsigned long long>(m_arrMissUploads),
-                         bCnt[0], bCnt[1], bCnt[2], bCnt[3],
+                         bCnt[0], bCnt[1], bCnt[2], bCnt[3], m_b2SavedThisFrame,
                          brkClip, brkArr, brkState, brkDyn, brkSkin, brkNoSrc,
                          m_skinGpuDrawsThisFrame, m_skinCpuDrawsThisFrame, m_skinMaxQwordsThisFrame);
         }
@@ -3969,7 +4005,8 @@ const double drawMs = static_cast<double>(nowUs() - frameStartUs) * 0.001;
                 ++it;
             }
         }
-        evictOldMergeSrc(m_frameNum, 600u, 0u);
+        if (m_mergeSrcBytes > (kMaxMergeSrcBytes * 7ull) / 8ull)
+            evictOldMergeSrc(m_frameNum, 1200u, kMaxMergeSrcBytes / 4ull);
         for (auto it = m_mergeRuns.begin(); it != m_mergeRuns.end();)
         {
             if (it->second.lastUsed + 120u < m_frameNum)
@@ -4190,6 +4227,7 @@ const double drawMs = static_cast<double>(nowUs() - frameStartUs) * 0.001;
     uint32_t m_culledThisFrame = 0;
     uint32_t m_drawCallsThisFrame = 0;
     uint32_t m_mergeSavedThisFrame = 0;
+    uint32_t m_b2SavedThisFrame = 0;
     uint32_t m_instSavedThisFrame = 0;
     uint32_t m_pass2SkipThisFrame = 0;
     uint32_t m_texWrapThisFrame = 0;
