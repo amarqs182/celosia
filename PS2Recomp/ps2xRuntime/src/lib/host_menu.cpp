@@ -659,6 +659,9 @@ void update()
 
     if (!g_open)
     {
+#if defined(PS2X_LINUX_SDL2_SHIM)
+        const bool open = IsKeyPressed(KEY_F1) || pressed(kGuide);
+#else
         bool open = IsKeyPressed(KEY_F1) || (g_down[kGuide] && pressed(kSelect));
         if (pressed(kSelect) && !g_down[kGuide])
         {
@@ -666,6 +669,7 @@ void update()
             open |= g_lastSelect >= 0.0 && now - g_lastSelect < kDoubleTapSeconds;
             g_lastSelect = open ? -1.0 : now;
         }
+#endif
         if (open)
         {
             g_open = true;
@@ -675,7 +679,11 @@ void update()
         return;
     }
 
+#if defined(PS2X_LINUX_SDL2_SHIM)
+    if (IsKeyPressed(KEY_F1) || pressed(kGuide))
+#else
     if (IsKeyPressed(KEY_F1) || pressed(kSelect))
+#endif
     {
         close();
         return;
