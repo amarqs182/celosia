@@ -3353,12 +3353,12 @@ namespace sotc_native
         }
         return &p;
     }
-    // Plans no draw used for 10 s go (every 256 frames).
+    // Plans no draw used for 60 s go (every 256 frames).
     void sweepPlans()
     {
         planCache97Clear();
         for (auto it = g_plans.begin(); it != g_plans.end();)
-            if (it->second.used + 600u < g_frame)
+            if (it->second.used + 3600u < g_frame)
                 it = g_plans.erase(it);
             else
                 ++it;
