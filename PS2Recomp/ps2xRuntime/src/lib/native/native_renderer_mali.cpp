@@ -341,7 +341,7 @@ void main()
     highp float lod = uFogC.w > 0.0 ? clamp(vLogW * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
     mediump vec4 t = uFogCol.w > 0.5 ? textureLod(uTex, vUV.xy, lod) : vec4(vec3(128.0 / 255.0), 1.0);
     mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
-    mediump vec3 rgb = raw / (vec3(1.0) + raw * 0.35);
+    mediump vec3 rgb = clamp(raw, 0.0, 1.0);
     rgb = mix(uFogCol.rgb, rgb, clamp(vUV.w / max(depth, 1e-3), 0.0, 1.0));
     if (uFogA.w > 0.5)
     {
@@ -381,7 +381,7 @@ void main()
     if (alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y))
         discard;
     mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
-    mediump vec3 rgb = raw / (vec3(1.0) + raw * 0.35);
+    mediump vec3 rgb = clamp(raw, 0.0, 1.0);
     rgb = mix(uFogCol.rgb, rgb, clamp(vUV.w / max(depth, 1e-3), 0.0, 1.0));
     if (uFogA.w > 0.5)
     {
@@ -428,7 +428,7 @@ void main()
         t = vec4(vec3(128.0 / 255.0), 1.0);
     }
     mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
-    oColor = vec4(raw / (vec3(1.0) + raw * 0.35), 1.0);
+    oColor = vec4(clamp(raw, 0.0, 1.0), 1.0);
 }
 )";
 
@@ -470,7 +470,7 @@ void main()
     if (alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y))
         discard;
     mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
-    oColor = vec4(raw / (vec3(1.0) + raw * 0.35), alpha);
+    oColor = vec4(clamp(raw, 0.0, 1.0), alpha);
 }
 )";
 
@@ -509,7 +509,7 @@ void main()
     if (alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y))
         alpha = 0.0;
     mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
-    oColor = vec4(raw / (vec3(1.0) + raw * 0.35), alpha);
+    oColor = vec4(clamp(raw, 0.0, 1.0), alpha);
 }
 )";
 
@@ -537,7 +537,7 @@ void main()
     if (alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y))
         alpha = 0.0;
     mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
-    mediump vec3 rgb = raw / (vec3(1.0) + raw * 0.35);
+    mediump vec3 rgb = clamp(raw, 0.0, 1.0);
     rgb = mix(uFogCol.rgb, rgb, clamp(vUV.w / max(depth, 1e-3), 0.0, 1.0));
     if (uFogA.w > 0.5)
     {
@@ -591,7 +591,7 @@ void main()
     if (alpha < 0.01)
         discard;
     mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
-    oColor = vec4(raw / (vec3(1.0) + raw * 0.35), alpha);
+    oColor = vec4(clamp(raw, 0.0, 1.0), alpha);
 }
 )";
 
@@ -608,24 +608,210 @@ void main()
 static const char *kMaliPostFrag = MALI_FRAG_HDR R"(
 in highp vec2 vUV;
 uniform sampler2D uTex;
-uniform highp vec4 uMisc;
+uniform sampler2D uBackground;
+uniform sampler2D uDofTex;
+uniform sampler2D uAoTex;
+uniform sampler2D uPrevTex;
+uniform highp sampler2D uDepth;
+uniform highp vec4 uMisc;  // invW, invH, caStrength, lensFlareStrength
+uniform highp vec4 uPostA; // bloomAddR, bloomAddG, bloomAddB, bloomAddA
+uniform highp vec4 uPostB; // expStrength, aoEnabled, prevBlurWeight, dofEnabled
+uniform highp vec4 uPostC; // dofFocusZ, dofZA, dofZB, dofSlices
+uniform highp vec4 uPostD; // sblurScale, sblurAngle, sblurDx, sblurDy
 out mediump vec4 oColor;
 void main()
 {
-    mediump vec3 c = texture(uTex, vUV).rgb;
-    if (uMisc.z > 0.001)
+    mediump vec3 c;
+    if (uMisc.z > 0.0001)
     {
-        highp vec2 o = uMisc.xy * 1.75;
-        mediump vec3 b0 = texture(uTex, vUV + vec2(-o.x, -o.y)).rgb;
-        mediump vec3 b1 = texture(uTex, vUV + vec2( o.x, -o.y)).rgb;
-        mediump vec3 b2 = texture(uTex, vUV + vec2(-o.x,  o.y)).rgb;
-        mediump vec3 b3 = texture(uTex, vUV + vec2( o.x,  o.y)).rgb;
-        mediump vec3 avg = (b0 + b1 + b2 + b3) * 0.25;
-        mediump float lum = dot(avg, vec3(0.299, 0.587, 0.114));
-        mediump float soft = clamp((lum - uMisc.w) / max(1.0 - uMisc.w, 0.1), 0.0, 1.0);
-        c += avg * soft * uMisc.z;
+        highp vec2 dir = vUV - vec2(0.5);
+        highp vec2 off = dir * dot(dir, dir) * uMisc.z;
+        c.r = texture(uTex, vUV + off).r;
+        c.g = texture(uTex, vUV).g;
+        c.b = texture(uTex, vUV - off).b;
+    }
+    else
+    {
+        c = texture(uTex, vUV).rgb;
+    }
+    if (abs(uPostD.x) > 0.0001 || abs(uPostD.y) > 0.0001 || abs(uPostD.z) > 0.0001 || abs(uPostD.w) > 0.0001)
+    {
+        highp vec2 p = vUV - vec2(0.5);
+        highp float s = sin(uPostD.y * 0.5);
+        highp float k = cos(uPostD.y * 0.5);
+        highp vec2 rot = vec2(p.x * k - p.y * s, p.x * s + p.y * k) * (1.0 + uPostD.x * 0.5) + vec2(0.5) + uPostD.zw * 0.5;
+        highp vec2 stepUv = (rot - vUV) * 0.3333;
+        c = c * 0.34
+          + texture(uTex, vUV + stepUv).rgb * 0.26
+          + texture(uTex, vUV + stepUv * 2.0).rgb * 0.22
+          + texture(uTex, vUV + stepUv * 3.0).rgb * 0.18;
+    }
+    if (uPostB.w > 0.5)
+    {
+        highp float d = texture(uDepth, vUV).r;
+        highp float z = d >= 0.99999 ? 0.0 : uPostC.y + uPostC.z * (1.0 - d) / 0.1;
+        if (z <= uPostC.x)
+        {
+            mediump float coc = clamp((uPostC.x - z) / max(uPostC.x, 1.0), 0.0, 1.0) * 0.85;
+            c = mix(c, texture(uDofTex, vUV).rgb, coc);
+        }
+    }
+    if (uPostB.y > 0.5)
+    {
+        c *= texture(uAoTex, vUV).r;
+    }
+    if (uPostB.x > 0.001)
+    {
+        mediump float avgLuma = 0.25 * (
+            texture(uBackground, vec2(0.25, 0.25)).a +
+            texture(uBackground, vec2(0.75, 0.25)).a +
+            texture(uBackground, vec2(0.25, 0.75)).a +
+            texture(uBackground, vec2(0.75, 0.75)).a);
+        mediump float expGain = clamp(1.0 + (0.42 - avgLuma) * uPostB.x, 0.82, 1.22);
+        c *= expGain;
+    }
+    if (uPostA.a > 0.001)
+    {
+        mediump vec3 b = texture(uBackground, vUV).rgb * uPostA.rgb * uPostA.a;
+        c = c + b * (vec3(1.0) - clamp(c, 0.0, 1.0) * 0.35);
+    }
+    if (uMisc.w > 0.001)
+    {
+        highp vec2 dv = vUV - vec2(0.5);
+        mediump float vig = 1.0 - clamp(length(dv) * 1.35, 0.0, 1.0);
+        mediump vec3 f1 = texture(uBackground, clamp(vec2(0.5) - dv * 0.55, vec2(0.02), vec2(0.98))).rgb * vec3(1.0, 0.78, 0.48);
+        mediump vec3 f2 = texture(uBackground, clamp(vec2(0.5) - dv * 0.25, vec2(0.02), vec2(0.98))).rgb * vec3(0.45, 0.78, 1.0);
+        mediump vec3 f3 = texture(uBackground, clamp(vec2(0.5) + dv * 0.35, vec2(0.02), vec2(0.98))).rgb * vec3(0.95, 0.65, 0.35);
+        c += (f1 * 0.45 + f2 * 0.30 + f3 * 0.25) * vig * uMisc.w;
+    }
+    if (uPostB.z > 0.001)
+    {
+        c = mix(c, texture(uPrevTex, vUV).rgb, uPostB.z);
     }
     oColor = vec4(clamp(c, 0.0, 1.0), 1.0);
+}
+)";
+
+// Phase 9: Team ICO Pseudo-HDR Bloom Mask + Bright Extract + Luma (128x96)
+static const char *kMaliBloomMaskFrag = MALI_FRAG_HDR R"(
+in highp vec2 vUV;
+uniform sampler2D uTex;
+uniform highp sampler2D uDepth;
+uniform highp vec4 uMisc;  // texelX, texelY, 0, 0
+uniform highp vec4 uPostA; // threshold, zA, zB, bloomEnabled
+uniform mediump vec4 uPostB; // maskColor.rgb, brightWeight
+out mediump vec4 oColor;
+highp float gsZ(highp float d, highp float zA, highp float zB) { return d >= 0.99999 ? 0.0 : zA + zB * (1.0 - d) / 0.1; }
+void main()
+{
+    highp vec2 o = uMisc.xy * 0.5;
+    highp float d0 = texture(uDepth, vUV + vec2(-o.x, -o.y)).r;
+    highp float d1 = texture(uDepth, vUV + vec2( o.x, -o.y)).r;
+    highp float d2 = texture(uDepth, vUV + vec2(-o.x,  o.y)).r;
+    highp float d3 = texture(uDepth, vUV + vec2( o.x,  o.y)).r;
+    mediump float mask = 0.0;
+    if (uPostA.w > 0.5)
+    {
+        highp float thr = uPostA.x + 1.0;
+        mask = 0.25 * (
+            (gsZ(d0, uPostA.y, uPostA.z) <= thr ? 1.0 : 0.0) +
+            (gsZ(d1, uPostA.y, uPostA.z) <= thr ? 1.0 : 0.0) +
+            (gsZ(d2, uPostA.y, uPostA.z) <= thr ? 1.0 : 0.0) +
+            (gsZ(d3, uPostA.y, uPostA.z) <= thr ? 1.0 : 0.0));
+    }
+    mediump vec3 c = texture(uTex, vUV).rgb;
+    mediump float luma = dot(c, vec3(0.299, 0.587, 0.114));
+    mediump vec3 hi = max(c - vec3(0.75), vec3(0.0)) * uPostB.w;
+    oColor = vec4(clamp(uPostB.rgb * mask + hi, 0.0, 1.5), clamp(luma, 0.0, 1.0));
+}
+)";
+
+// Phase 9: 5-tap Dual-Kawase blur (used for 64x48 Bloom and 160x120 DoF)
+static const char *kMaliKawaseFrag = MALI_FRAG_HDR R"(
+in highp vec2 vUV;
+uniform sampler2D uTex;
+uniform highp vec4 uMisc; // offsetX, offsetY, 0, 0
+out mediump vec4 oColor;
+void main()
+{
+    highp vec2 o = uMisc.xy;
+    mediump vec4 c = texture(uTex, vUV) * 0.40;
+    c += texture(uTex, vUV + vec2(-o.x, -o.y)) * 0.15;
+    c += texture(uTex, vUV + vec2( o.x, -o.y)) * 0.15;
+    c += texture(uTex, vUV + vec2(-o.x,  o.y)) * 0.15;
+    c += texture(uTex, vUV + vec2( o.x,  o.y)) * 0.15;
+    oColor = c;
+}
+)";
+
+// Phase 9: Team ICO Temporal Persistence / Eye-Adaptation Blend (64x48)
+static const char *kMaliTemporalFrag = MALI_FRAG_HDR R"(
+in highp vec2 vUV;
+uniform sampler2D uTex;
+uniform sampler2D uBackground;
+uniform highp vec4 uMisc; // blendFactor, 0, 0, 0
+out mediump vec4 oColor;
+void main()
+{
+    oColor = mix(texture(uBackground, vUV), texture(uTex, vUV), uMisc.x);
+}
+)";
+
+// Phase 9: Quarter-Res 4-Tap Contact SSAO (160x120)
+static const char *kMaliAoFrag = MALI_FRAG_HDR R"(
+in highp vec2 vUV;
+uniform highp sampler2D uDepth;
+uniform highp vec4 uMisc; // texelX, texelY, radiusPx, strength
+out mediump vec4 oColor;
+highp float linW(highp float d) { return 0.1 / max(1.0 - d, 1e-5); }
+void main()
+{
+    highp float d0 = texture(uDepth, vUV).r;
+    if (d0 >= 0.99995)
+    {
+        oColor = vec4(1.0);
+        return;
+    }
+    highp float w0 = linW(d0);
+    highp float rad = clamp(uMisc.z / max(w0 * 0.08, 1.0), 1.5, 6.0);
+    highp vec2 stepUv = uMisc.xy * rad;
+    highp vec2 par = mod(floor(gl_FragCoord.xy), 2.0);
+    bool rot = abs(par.x - par.y) > 0.5;
+    highp vec2 o0 = rot ? vec2( 0.707,  0.707) : vec2( 1.0,  0.0);
+    highp vec2 o1 = rot ? vec2(-0.707,  0.707) : vec2( 0.0,  1.0);
+    highp vec2 o2 = rot ? vec2(-0.707, -0.707) : vec2(-1.0,  0.0);
+    highp vec2 o3 = rot ? vec2( 0.707, -0.707) : vec2( 0.0, -1.0);
+    highp float maxRange = max(w0 * 0.22, 1.8);
+    mediump float occ = 0.0;
+    highp float ws;
+    highp float diff;
+    ws = linW(texture(uDepth, vUV + o0 * stepUv).r); diff = w0 - ws;
+    if (diff > 0.15 && diff < maxRange) occ += smoothstep(0.15, maxRange * 0.5, diff) * (1.0 - smoothstep(maxRange * 0.5, maxRange, diff));
+    ws = linW(texture(uDepth, vUV + o1 * stepUv).r); diff = w0 - ws;
+    if (diff > 0.15 && diff < maxRange) occ += smoothstep(0.15, maxRange * 0.5, diff) * (1.0 - smoothstep(maxRange * 0.5, maxRange, diff));
+    ws = linW(texture(uDepth, vUV + o2 * stepUv).r); diff = w0 - ws;
+    if (diff > 0.15 && diff < maxRange) occ += smoothstep(0.15, maxRange * 0.5, diff) * (1.0 - smoothstep(maxRange * 0.5, maxRange, diff));
+    ws = linW(texture(uDepth, vUV + o3 * stepUv).r); diff = w0 - ws;
+    if (diff > 0.15 && diff < maxRange) occ += smoothstep(0.15, maxRange * 0.5, diff) * (1.0 - smoothstep(maxRange * 0.5, maxRange, diff));
+    oColor = vec4(vec3(clamp(1.0 - occ * uMisc.w, 0.35, 1.0)), 1.0);
+}
+)";
+
+// Phase 9: 4-Tap 2x2 Dither-Canceling AO Blur (160x120)
+static const char *kMaliAoBlurFrag = MALI_FRAG_HDR R"(
+in highp vec2 vUV;
+uniform sampler2D uTex;
+uniform highp vec4 uMisc; // texelX, texelY, 0, 0
+out mediump vec4 oColor;
+void main()
+{
+    highp vec2 o = uMisc.xy * 0.5;
+    mediump float a = 0.25 * (
+        texture(uTex, vUV + vec2(-o.x, -o.y)).r +
+        texture(uTex, vUV + vec2( o.x, -o.y)).r +
+        texture(uTex, vUV + vec2(-o.x,  o.y)).r +
+        texture(uTex, vUV + vec2( o.x,  o.y)).r);
+    oColor = vec4(vec3(a), 1.0);
 }
 )";
 
@@ -718,7 +904,7 @@ void main()
         t = texture(uTexArray, vec3(vUV.xy, floor(vTexLayer + 0.5)));
     }
     mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
-    oColor = vec4(raw / (vec3(1.0) + raw * 0.35), 1.0);
+    oColor = vec4(clamp(raw, 0.0, 1.0), 1.0);
 }
 )";
 
@@ -754,7 +940,7 @@ void main()
     if (alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y))
         discard;
     mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
-    oColor = vec4(raw / (vec3(1.0) + raw * 0.35), alpha);
+    oColor = vec4(clamp(raw, 0.0, 1.0), alpha);
 }
 )";
 
@@ -787,7 +973,7 @@ void main()
     if (alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y))
         alpha = 0.0;
     mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
-    oColor = vec4(raw / (vec3(1.0) + raw * 0.35), alpha);
+    oColor = vec4(clamp(raw, 0.0, 1.0), alpha);
 }
 )";
 
@@ -812,7 +998,7 @@ void main()
     highp float lod = uFogC.w > 0.0 ? clamp(vLogW * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
     mediump vec4 t = textureLod(uTexArray, vec3(vUV.xy, floor(vTexLayer + 0.5)), lod);
     mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
-    mediump vec3 rgb = raw / (vec3(1.0) + raw * 0.35);
+    mediump vec3 rgb = clamp(raw, 0.0, 1.0);
     rgb = mix(uFogCol.rgb, rgb, clamp(vUV.w / max(depth, 1e-3), 0.0, 1.0));
     if (uFogA.w > 0.5)
     {
@@ -853,7 +1039,7 @@ void main()
     if (alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y))
         discard;
     mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
-    mediump vec3 rgb = raw / (vec3(1.0) + raw * 0.35);
+    mediump vec3 rgb = clamp(raw, 0.0, 1.0);
     rgb = mix(uFogCol.rgb, rgb, clamp(vUV.w / max(depth, 1e-3), 0.0, 1.0));
     if (uFogA.w > 0.5)
     {
@@ -892,7 +1078,7 @@ void main()
     if (alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y))
         alpha = 0.0;
     mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
-    mediump vec3 rgb = raw / (vec3(1.0) + raw * 0.35);
+    mediump vec3 rgb = clamp(raw, 0.0, 1.0);
     rgb = mix(uFogCol.rgb, rgb, clamp(vUV.w / max(depth, 1e-3), 0.0, 1.0));
     if (uFogA.w > 0.5)
     {
@@ -927,7 +1113,7 @@ void main()
     mediump vec3 deepCol = mix(vec3(0.14, 0.22, 0.26), uFogCol.rgb * 0.55, 0.45);
     mediump vec3 skyCol = mix(vec3(0.52, 0.64, 0.72), uFogCol.rgb * 1.15, 0.65);
     mediump vec3 raw = mix(deepCol, skyCol, clamp(fres * 0.85 + wave * 0.12, 0.0, 1.0));
-    mediump vec3 rgb = raw / (vec3(1.0) + raw * 0.35);
+    mediump vec3 rgb = clamp(raw, 0.0, 1.0);
     mediump float a = clamp((0.20 + fres * 0.55) * max(uAlpha.z, 0.35), 0.12, 0.78);
     oColor = vec4(rgb, a);
 }
@@ -966,7 +1152,8 @@ struct ShaderProg
     GLint uClip = -1, uInstanceClips = -1, uInstanceCount = -1;
     GLint uBones = -1, uDirections = -1, uColours = -1, uMisc = -1;
     GLint uFogA = -1, uFogB = -1, uFogC = -1, uFogCol = -1, uGuard = -1, uAlpha = -1;
-    GLint uTex = -1, uTexArray = -1, uBackground = -1;
+    GLint uPostA = -1, uPostB = -1, uPostC = -1, uPostD = -1;
+    GLint uTex = -1, uTexArray = -1, uBackground = -1, uDofTex = -1, uAoTex = -1, uPrevTex = -1, uDepth = -1;
     mutable UniformShadow shadow{};
 };
 
@@ -1019,14 +1206,26 @@ void bindProgUniforms(ShaderProg &out, GLuint p)
     out.uFogCol = glGetUniformLocation(p, "uFogCol");
     out.uGuard = glGetUniformLocation(p, "uGuard");
     out.uAlpha = glGetUniformLocation(p, "uAlpha");
+    out.uPostA = glGetUniformLocation(p, "uPostA");
+    out.uPostB = glGetUniformLocation(p, "uPostB");
+    out.uPostC = glGetUniformLocation(p, "uPostC");
+    out.uPostD = glGetUniformLocation(p, "uPostD");
     out.uTex = glGetUniformLocation(p, "uTex");
     out.uTexArray = glGetUniformLocation(p, "uTexArray");
     out.uBackground = glGetUniformLocation(p, "uBackground");
+    out.uDofTex = glGetUniformLocation(p, "uDofTex");
+    out.uAoTex = glGetUniformLocation(p, "uAoTex");
+    out.uPrevTex = glGetUniformLocation(p, "uPrevTex");
+    out.uDepth = glGetUniformLocation(p, "uDepth");
 
     glUseProgram(p);
     if (out.uTex >= 0) glUniform1i(out.uTex, 0);
     if (out.uTexArray >= 0) glUniform1i(out.uTexArray, 0);
     if (out.uBackground >= 0) glUniform1i(out.uBackground, 1);
+    if (out.uDofTex >= 0) glUniform1i(out.uDofTex, 2);
+    if (out.uAoTex >= 0) glUniform1i(out.uAoTex, 3);
+    if (out.uPrevTex >= 0) glUniform1i(out.uPrevTex, 4);
+    if (out.uDepth >= 0) glUniform1i(out.uDepth, 5);
     out.shadow.reset();
 }
 
@@ -1037,7 +1236,7 @@ bool linkProgCached(ShaderProg &out, const char *name, const char *vsSrc, const 
     std::string binPath;
     if (useCache && !cacheDir.empty())
     {
-        binPath = cacheDir + "/" + name + "_v12.bin";
+        binPath = cacheDir + "/" + name + "_v13.bin";
         if (FILE *fp = std::fopen(binPath.c_str(), "rb"))
         {
             GLenum fmt = 0;
@@ -1213,6 +1412,7 @@ struct MaliTarget
     uint32_t width = 0;
     uint32_t height = 0;
     bool hasDepth = true;
+    bool depthAsTex = false;
 };
 
 struct SkinPaletteEntry
@@ -1296,6 +1496,8 @@ struct FramePacket
     bool hold = false;
     Fog fog{};
     Bloom bloom{};
+    DepthOfField dof{};
+    std::vector<ScreenBlur> screenBlurs;
     std::vector<UploadCmd> uploads;
     std::vector<DynMeshRec> dynMeshes;
     std::vector<Vertex> dynVerts;
@@ -1316,6 +1518,8 @@ struct FramePacket
         skinPalettes.clear();
         skinPaletteData.clear();
         draws.clear();
+        screenBlurs.clear();
+        dof = DepthOfField{};
         hold = false;
     }
 };
@@ -1474,7 +1678,13 @@ public:
         m_atPass2Mode = std::clamp(envInt("SOTC_MALI_AT_PASS2", 1), 0, 2); // 0=off, 1=smart auto, 2=always
         m_zPrepassEnabled = envBool("SOTC_MALI_ZPREPASS", false);
         m_postEnabled = envBool("SOTC_MALI_POST", true);
-        m_postBloomEnabled = envBool("SOTC_MALI_POST_BLOOM", false);
+        m_postBloomEnabled = envBool("SOTC_MALI_BLOOM", envBool("SOTC_MALI_POST_BLOOM", true));
+        m_exposureEnabled = envBool("SOTC_MALI_EXPOSURE", true);
+        m_dofEnabled = envBool("SOTC_MALI_DOF", false);
+        m_motionBlurMode = std::clamp(envInt("SOTC_MALI_MOTION_BLUR", 0), 0, 2);
+        m_caEnabled = envBool("SOTC_MALI_CA", false);
+        m_lensFlareEnabled = envBool("SOTC_MALI_LENS_FLARE", false);
+        m_aoEnabled = envBool("SOTC_MALI_AO", false);
         m_postUpscaleEnabled = envBool("SOTC_MALI_POST_UPSCALE", false);
         m_dumpTexEnabled = envBool("SOTC_MALI_DUMP_TEX", false);
         m_paceEnabled = envBool("SOTC_MALI_PACE", false);
@@ -1660,9 +1870,9 @@ public:
 
     void setFog(const Fog &fog) override { m_rec.fog = fog; }
     void setBloom(const Bloom &bloom) override { m_rec.bloom = bloom; }
-    void addScreenBlur(const ScreenBlur &) override {}
+    void addScreenBlur(const ScreenBlur &b) override { m_rec.screenBlurs.push_back(b); }
     void setGlowComposite(const GlowComposite &) override {}
-    void setDepthOfField(const DepthOfField &) override {}
+    void setDepthOfField(const DepthOfField &d) override { m_rec.dof = d; }
     void holdFrame() override { m_rec.hold = true; }
 
     void endFrame(uint32_t width, uint32_t height) override
@@ -1997,7 +2207,12 @@ private:
             !linkProgCached(m_progArrOpaque, "arr_opaque", kMaliWorldArrVert, kMaliArrOpaqueFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
             !linkProgCached(m_progArrCut, "arr_cut", kMaliWorldArrVert, kMaliArrCutFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
             !linkProgCached(m_progArrSoft, "arr_soft", kMaliWorldArrVert, kMaliArrSoftFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
-            !linkProgCached(m_progWater, "water", kMaliWorldVert, kMaliWaterFrag, m_shaderCacheDir, m_shaderCacheEnabled))
+            !linkProgCached(m_progWater, "water", kMaliWorldVert, kMaliWaterFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
+            !linkProgCached(m_progBloomMask, "bloom_mask", kMaliPostVert, kMaliBloomMaskFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
+            !linkProgCached(m_progKawase, "kawase", kMaliPostVert, kMaliKawaseFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
+            !linkProgCached(m_progTemporal, "temporal", kMaliPostVert, kMaliTemporalFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
+            !linkProgCached(m_progAo, "ao", kMaliPostVert, kMaliAoFrag, m_shaderCacheDir, m_shaderCacheEnabled) ||
+            !linkProgCached(m_progAoBlur, "ao_blur", kMaliPostVert, kMaliAoBlurFrag, m_shaderCacheDir, m_shaderCacheEnabled))
         {
             return false;
         }
@@ -2024,7 +2239,7 @@ private:
         makeTarget(m_bgTarget, 256, 256, true);
         m_lastPresentTime = std::chrono::steady_clock::now();
         m_initialized = true;
-        std::fprintf(stderr, "[mali] Phase 8B GLES 3.2 backend up (async=%d mailbox=%d keepCur=%d direct=%d fastSh=%d texArr=%d(maxL=%u,bud=%lluM) merge=%d(chunk=%u) inst=%d atPass2=%d cull=%d skin=%d tex5551=%d water=%d upBud=%llu drs=%d@%dfps[%.2f..%.2f] drawOnly=%d budget=%lluM)\n",
+        std::fprintf(stderr, "[mali] Phase 9 GLES 3.2 backend up (async=%d mailbox=%d keepCur=%d direct=%d fastSh=%d texArr=%d(maxL=%u,bud=%lluM) merge=%d(chunk=%u) inst=%d atPass2=%d cull=%d skin=%d tex5551=%d water=%d bloom=%d exp=%d dof=%d mb=%d ca=%d flare=%d ao=%d upBud=%llu drs=%d@%dfps[%.2f..%.2f] drawOnly=%d budget=%lluM)\n",
                      m_asyncEnabled ? 1 : 0, m_mailboxEnabled ? 1 : 0, m_keepCurrentEnabled ? 1 : 0,
                      m_directScanoutEnabled ? 1 : 0, m_fastShadersEnabled ? 1 : 0,
                      m_texArrayEnabled ? 1 : 0, m_maxArrayLayers,
@@ -2032,6 +2247,9 @@ private:
                      m_mergeEnabled ? 1 : 0, m_mergeChunkMax, m_instancingEnabled ? 1 : 0,
                      m_atPass2Mode, m_cullEnabled ? 1 : 0, m_gpuSkinEnabled ? 1 : 0,
                      m_tex5551Enabled ? 1 : 0, m_waterEnabled ? 1 : 0,
+                     m_postBloomEnabled ? 1 : 0, m_exposureEnabled ? 1 : 0,
+                     m_dofEnabled ? 1 : 0, m_motionBlurMode, m_caEnabled ? 1 : 0,
+                     m_lensFlareEnabled ? 1 : 0, m_aoEnabled ? 1 : 0,
                      static_cast<unsigned long long>(m_uploadBudgetUs),
                      m_drsEnabled ? 1 : 0, m_drsTargetFps, m_drsMin, m_drsMax, m_drsDrawOnly ? 1 : 0,
                      static_cast<unsigned long long>(m_cacheBudgetBytes >> 20));
@@ -2075,6 +2293,13 @@ private:
         destroyTarget(m_mainTarget[1]);
         destroyTarget(m_postTarget);
         destroyTarget(m_bgTarget);
+        destroyTarget(m_bloomQuarter);
+        destroyTarget(m_bloomEighth);
+        destroyTarget(m_bloomHist[0]);
+        destroyTarget(m_bloomHist[1]);
+        destroyTarget(m_dofHalf);
+        destroyTarget(m_aoTarget);
+        destroyTarget(m_aoBlur);
         if (m_whiteTex) { glDeleteTextures(1, &m_whiteTex); m_whiteTex = 0; }
         auto delProg = [](ShaderProg &p) { if (p.id) { glDeleteProgram(p.id); p.id = 0; } };
         delProg(m_progOpaque);
@@ -2098,7 +2323,14 @@ private:
         delProg(m_progArrCut);
         delProg(m_progArrSoft);
         delProg(m_progWater);
+        delProg(m_progBloomMask);
+        delProg(m_progKawase);
+        delProg(m_progTemporal);
+        delProg(m_progAo);
+        delProg(m_progAoBlur);
         m_deferredUploads.clear();
+        m_bloomHistValid = false;
+        m_prevMainValid = false;
         m_initialized = false;
     }
 
@@ -3054,9 +3286,27 @@ private:
         const uint32_t rw = std::max(320u, static_cast<uint32_t>(std::lround(pkt.width * scale)) & ~3u);
         const uint32_t rh = std::max(240u, static_cast<uint32_t>(std::lround(pkt.height * scale)) & ~3u);
 
-        // Phase 5.1 fix preserved: skip m_postTarget FBO unless bloom or explicit post-upscale is active.
-        const bool wantBloom = m_postEnabled && m_postBloomEnabled && m_bloom.enabled;
-        const bool runPost = wantBloom || (m_postEnabled && m_postUpscaleEnabled && (rw != pkt.width || rh != pkt.height));
+        bool has3D = false;
+        for (const QueuedDraw &q : m_qAll)
+        {
+            if (q.bucket <= 2u)
+            {
+                has3D = true;
+                break;
+            }
+        }
+        const bool wantTeamIcoBloom = has3D && m_postEnabled && m_postBloomEnabled && m_bloom.enabled;
+        const bool wantExposure = wantTeamIcoBloom && m_exposureEnabled;
+        const bool wantDof = has3D && m_postEnabled && m_dofEnabled && pkt.dof.enabled && pkt.dof.slices > 0;
+        const bool wantScreenBlur = has3D && m_postEnabled && m_motionBlurMode >= 1 && !pkt.screenBlurs.empty();
+        const bool wantPrevBlur = has3D && m_postEnabled && m_motionBlurMode >= 2 && m_prevMainValid;
+        const bool wantCa = has3D && m_postEnabled && m_caEnabled;
+        const bool wantLensFlare = has3D && m_postEnabled && m_lensFlareEnabled;
+        const bool wantAo = has3D && m_postEnabled && m_aoEnabled;
+        const bool needBloomChain = wantTeamIcoBloom || wantLensFlare;
+        const bool needDepthTex = needBloomChain || wantDof || wantAo;
+        const bool wantAnyFx = wantTeamIcoBloom || wantDof || wantScreenBlur || wantPrevBlur || wantCa || wantLensFlare || wantAo;
+        const bool runPost = wantAnyFx || (m_postEnabled && m_postUpscaleEnabled && (rw != pkt.width || rh != pkt.height));
 
         uint32_t drawW = 0u, drawH = 0u;
 #if defined(PS2X_LINUX_SDL2_SHIM)
@@ -3071,14 +3321,38 @@ private:
 #else
             false;
 #endif
+        const bool directPostToFbo0 =
+#if defined(PS2X_LINUX_SDL2_SHIM)
+            runPost && m_directScanoutEnabled && !m_hasLetterboxCrop && !pkt.hold &&
+            fullViewportMatch && static_cast<bool>(presentHook()) && drawW > 0u && drawH > 0u;
+#else
+            false;
+#endif
 
         MaliTarget &mt = m_mainTarget[m_mainIdx];
         if (!directScanout)
         {
-            if (mt.width != rw || mt.height != rh)
-                makeTarget(mt, rw, rh, true);
-            if (runPost && (m_postTarget.width != pkt.width || m_postTarget.height != pkt.height))
+            if (mt.width != rw || mt.height != rh || mt.depthAsTex != needDepthTex)
+            {
+                makeTarget(mt, rw, rh, true, needDepthTex);
+                m_prevMainValid = false;
+            }
+            if (runPost && !directPostToFbo0 && (m_postTarget.width != pkt.width || m_postTarget.height != pkt.height))
                 makeTarget(m_postTarget, pkt.width, pkt.height, false);
+            if (needBloomChain)
+            {
+                if (!m_bloomQuarter.fbo) makeTarget(m_bloomQuarter, 128u, 96u, false);
+                if (!m_bloomEighth.fbo) makeTarget(m_bloomEighth, 64u, 48u, false);
+                if (!m_bloomHist[0].fbo) makeTarget(m_bloomHist[0], 64u, 48u, false);
+                if (!m_bloomHist[1].fbo) makeTarget(m_bloomHist[1], 64u, 48u, false);
+            }
+            if (wantDof && !m_dofHalf.fbo)
+                makeTarget(m_dofHalf, 160u, 120u, false);
+            if (wantAo)
+            {
+                if (!m_aoTarget.fbo) makeTarget(m_aoTarget, 160u, 120u, false);
+                if (!m_aoBlur.fbo) makeTarget(m_aoBlur, 160u, 120u, false);
+            }
         }
 
         resetPsoAndUniformCaches();
@@ -3141,9 +3415,16 @@ private:
             return minA;
         };
 
+        std::vector<size_t> deferredHud;
         for (size_t i = 0; i < m_qAll.size();)
         {
             const QueuedDraw &q = m_qAll[i];
+            if (runPost && q.bucket == 3u && q.state.order >= 20u && q.state.screen && !q.state.screenDepthTest)
+            {
+                deferredHud.push_back(i);
+                ++i;
+                continue;
+            }
 
             // Phase 6.1/7C/8: Camera-invariant static merge across GL_TEXTURE_2D_ARRAY layers + leftover singleton instancing.
             // Bucket 2 stays strictly in original seq order (painter's order); only consecutive compatible draws merge/instance.
@@ -3382,12 +3663,14 @@ private:
             ++i;
         }
 
-        invalidateDepth(directScanout);
+        if (!needDepthTex)
+            invalidateDepth(directScanout);
 
         GLuint outTex = 0u;
         uint32_t outW = 0u;
         uint32_t outH = 0u;
         m_lastPresentedPost = false;
+        double postMs = 0.0;
         if (directScanout)
         {
             outTex = 0u;
@@ -3396,38 +3679,186 @@ private:
             m_lastPresentedDirect = true;
             m_lastDirectW = drawW;
             m_lastDirectH = drawH;
+            m_prevMainValid = false;
         }
         else
         {
             outTex = mt.color;
             outW = mt.width;
             outH = mt.height;
-            if (runPost && m_postTarget.fbo)
+            if (runPost)
             {
-                glBindFramebuffer(GL_FRAMEBUFFER, m_postTarget.fbo);
-                glViewport(0, 0, static_cast<GLsizei>(m_postTarget.width), static_cast<GLsizei>(m_postTarget.height));
+                const uint64_t postStartUs = nowUs();
                 glDisable(GL_DEPTH_TEST);
+                glDepthMask(GL_FALSE);
                 glDisable(GL_BLEND);
+                glBindVertexArray(m_emptyVao);
+
+                if (needBloomChain)
+                {
+                    glBindFramebuffer(GL_FRAMEBUFFER, m_bloomQuarter.fbo);
+                    glViewport(0, 0, static_cast<GLsizei>(m_bloomQuarter.width), static_cast<GLsizei>(m_bloomQuarter.height));
+                    glUseProgram(m_progBloomMask.id);
+                    glActiveTexture(GL_TEXTURE0);
+                    glBindTexture(GL_TEXTURE_2D, mt.color);
+                    glActiveTexture(GL_TEXTURE5);
+                    glBindTexture(GL_TEXTURE_2D, mt.depth);
+                    if (m_progBloomMask.uMisc >= 0)
+                        glUniform4f(m_progBloomMask.uMisc, 1.0f / static_cast<float>(mt.width), 1.0f / static_cast<float>(mt.height), 0.0f, 0.0f);
+                    if (m_progBloomMask.uPostA >= 0)
+                        glUniform4f(m_progBloomMask.uPostA, m_bloom.threshold, m_bloom.zA, m_bloom.zB, wantTeamIcoBloom ? 1.0f : 0.0f);
+                    if (m_progBloomMask.uPostB >= 0)
+                        glUniform4f(m_progBloomMask.uPostB, m_bloom.maskColor[0], m_bloom.maskColor[1], m_bloom.maskColor[2], wantLensFlare ? 0.55f : 0.25f);
+                    glDrawArrays(GL_TRIANGLES, 0, 3);
+
+                    glBindFramebuffer(GL_FRAMEBUFFER, m_bloomEighth.fbo);
+                    glViewport(0, 0, static_cast<GLsizei>(m_bloomEighth.width), static_cast<GLsizei>(m_bloomEighth.height));
+                    glUseProgram(m_progKawase.id);
+                    glActiveTexture(GL_TEXTURE0);
+                    glBindTexture(GL_TEXTURE_2D, m_bloomQuarter.color);
+                    if (m_progKawase.uMisc >= 0)
+                        glUniform4f(m_progKawase.uMisc, 1.5f / static_cast<float>(m_bloomQuarter.width), 1.5f / static_cast<float>(m_bloomQuarter.height), 0.0f, 0.0f);
+                    glDrawArrays(GL_TRIANGLES, 0, 3);
+
+                    const int curHist = m_bloomHistIdx;
+                    const int prevHist = curHist ^ 1;
+                    glBindFramebuffer(GL_FRAMEBUFFER, m_bloomHist[curHist].fbo);
+                    glViewport(0, 0, static_cast<GLsizei>(m_bloomHist[curHist].width), static_cast<GLsizei>(m_bloomHist[curHist].height));
+                    glUseProgram(m_progTemporal.id);
+                    glActiveTexture(GL_TEXTURE0);
+                    glBindTexture(GL_TEXTURE_2D, m_bloomEighth.color);
+                    glActiveTexture(GL_TEXTURE1);
+                    glBindTexture(GL_TEXTURE_2D, m_bloomHist[prevHist].color);
+                    const float blendFactor = m_bloomHistValid ? std::clamp(1.0f - m_bloom.temporal, 0.08f, 0.92f) : 1.0f;
+                    if (m_progTemporal.uMisc >= 0)
+                        glUniform4f(m_progTemporal.uMisc, blendFactor, 0.0f, 0.0f, 0.0f);
+                    glDrawArrays(GL_TRIANGLES, 0, 3);
+                    m_bloomHistValid = true;
+                }
+
+                if (wantDof)
+                {
+                    glBindFramebuffer(GL_FRAMEBUFFER, m_dofHalf.fbo);
+                    glViewport(0, 0, static_cast<GLsizei>(m_dofHalf.width), static_cast<GLsizei>(m_dofHalf.height));
+                    glUseProgram(m_progKawase.id);
+                    glActiveTexture(GL_TEXTURE0);
+                    glBindTexture(GL_TEXTURE_2D, mt.color);
+                    if (m_progKawase.uMisc >= 0)
+                        glUniform4f(m_progKawase.uMisc, 2.0f / static_cast<float>(mt.width), 2.0f / static_cast<float>(mt.height), 0.0f, 0.0f);
+                    glDrawArrays(GL_TRIANGLES, 0, 3);
+                }
+
+                if (wantAo)
+                {
+                    glBindFramebuffer(GL_FRAMEBUFFER, m_aoTarget.fbo);
+                    glViewport(0, 0, static_cast<GLsizei>(m_aoTarget.width), static_cast<GLsizei>(m_aoTarget.height));
+                    glUseProgram(m_progAo.id);
+                    glActiveTexture(GL_TEXTURE5);
+                    glBindTexture(GL_TEXTURE_2D, mt.depth);
+                    if (m_progAo.uMisc >= 0)
+                        glUniform4f(m_progAo.uMisc, 1.0f / static_cast<float>(mt.width), 1.0f / static_cast<float>(mt.height), 4.0f, 0.42f);
+                    glDrawArrays(GL_TRIANGLES, 0, 3);
+
+                    glBindFramebuffer(GL_FRAMEBUFFER, m_aoBlur.fbo);
+                    glViewport(0, 0, static_cast<GLsizei>(m_aoBlur.width), static_cast<GLsizei>(m_aoBlur.height));
+                    glUseProgram(m_progAoBlur.id);
+                    glActiveTexture(GL_TEXTURE0);
+                    glBindTexture(GL_TEXTURE_2D, m_aoTarget.color);
+                    if (m_progAoBlur.uMisc >= 0)
+                        glUniform4f(m_progAoBlur.uMisc, 1.0f / static_cast<float>(m_aoTarget.width), 1.0f / static_cast<float>(m_aoTarget.height), 0.0f, 0.0f);
+                    glDrawArrays(GL_TRIANGLES, 0, 3);
+                }
+
+                const GLuint dstFbo = directPostToFbo0 ? 0u : m_postTarget.fbo;
+                const uint32_t dstW = directPostToFbo0 ? drawW : m_postTarget.width;
+                const uint32_t dstH = directPostToFbo0 ? drawH : m_postTarget.height;
+                glBindFramebuffer(GL_FRAMEBUFFER, dstFbo);
+                glViewport(0, 0, static_cast<GLsizei>(dstW), static_cast<GLsizei>(dstH));
                 glUseProgram(m_progPost.id);
                 glActiveTexture(GL_TEXTURE0);
                 glBindTexture(GL_TEXTURE_2D, mt.color);
-                const float bloomAmt = wantBloom ? 0.25f : 0.0f;
-                const float bloomThr = m_bloom.threshold > 0.05f ? std::min(m_bloom.threshold, 0.9f) : 0.65f;
+                glActiveTexture(GL_TEXTURE1);
+                glBindTexture(GL_TEXTURE_2D, needBloomChain ? m_bloomHist[m_bloomHistIdx].color : m_whiteTex);
+                glActiveTexture(GL_TEXTURE2);
+                glBindTexture(GL_TEXTURE_2D, wantDof ? m_dofHalf.color : m_whiteTex);
+                glActiveTexture(GL_TEXTURE3);
+                glBindTexture(GL_TEXTURE_2D, wantAo ? m_aoBlur.color : m_whiteTex);
+                glActiveTexture(GL_TEXTURE4);
+                glBindTexture(GL_TEXTURE_2D, wantPrevBlur ? m_mainTarget[m_mainIdx ^ 1].color : mt.color);
+                glActiveTexture(GL_TEXTURE5);
+                glBindTexture(GL_TEXTURE_2D, mt.depthAsTex ? mt.depth : m_whiteTex);
+                glActiveTexture(GL_TEXTURE0);
+
                 if (m_progPost.uMisc >= 0)
-                    glUniform4f(m_progPost.uMisc, 1.0f / static_cast<float>(mt.width),
-                                1.0f / static_cast<float>(mt.height), bloomAmt, bloomThr);
-                glBindVertexArray(m_emptyVao);
+                    glUniform4f(m_progPost.uMisc, 1.0f / static_cast<float>(mt.width), 1.0f / static_cast<float>(mt.height),
+                                wantCa ? 0.008f : 0.0f, wantLensFlare ? 0.22f : 0.0f);
+                if (m_progPost.uPostA >= 0)
+                    glUniform4f(m_progPost.uPostA, m_bloom.color[0], m_bloom.color[1], m_bloom.color[2], wantTeamIcoBloom ? m_bloom.color[3] : 0.0f);
+                if (m_progPost.uPostB >= 0)
+                    glUniform4f(m_progPost.uPostB, wantExposure ? 0.35f : 0.0f, wantAo ? 1.0f : 0.0f,
+                                wantPrevBlur ? 0.22f : 0.0f, wantDof ? 1.0f : 0.0f);
+                if (m_progPost.uPostC >= 0)
+                    glUniform4f(m_progPost.uPostC, static_cast<float>(pkt.dof.focusZ), pkt.dof.zA, pkt.dof.zB, static_cast<float>(pkt.dof.slices));
+                float sbScale = 0.0f, sbAngle = 0.0f, sbDx = 0.0f, sbDy = 0.0f;
+                if (wantScreenBlur)
+                {
+                    const ScreenBlur &sb = pkt.screenBlurs.back();
+                    sbScale = sb.scale - 1.0f;
+                    sbAngle = sb.angle;
+                    sbDx = sb.dx / static_cast<float>(std::max(1u, pkt.width));
+                    sbDy = sb.dy / static_cast<float>(std::max(1u, pkt.height));
+                }
+                if (m_progPost.uPostD >= 0)
+                    glUniform4f(m_progPost.uPostD, sbScale, sbAngle, sbDx, sbDy);
                 glDrawArrays(GL_TRIANGLES, 0, 3);
-                outTex = m_postTarget.color;
-                outW = m_postTarget.width;
-                outH = m_postTarget.height;
-                m_lastPresentedPost = true;
+
+                if (needDepthTex)
+                {
+                    glBindFramebuffer(GL_FRAMEBUFFER, mt.fbo);
+                    invalidateDepth(false);
+                    glBindFramebuffer(GL_FRAMEBUFFER, dstFbo);
+                }
+
+                if (!deferredHud.empty())
+                {
+                    resetPsoAndUniformCaches();
+                    for (size_t hi : deferredHud)
+                        emitBucketSingle(m_qAll[hi], pkt);
+                }
+
+                if (needBloomChain)
+                    m_bloomHistIdx ^= 1;
+
+                postMs = static_cast<double>(nowUs() - postStartUs) * 0.001;
+                if (directPostToFbo0)
+                {
+                    outTex = 0u;
+                    outW = drawW;
+                    outH = drawH;
+                    m_lastPresentedDirect = true;
+                    m_lastDirectW = drawW;
+                    m_lastDirectH = drawH;
+                }
+                else
+                {
+                    outTex = m_postTarget.color;
+                    outW = m_postTarget.width;
+                    outH = m_postTarget.height;
+                    m_lastPresentedDirect = false;
+                    m_lastPresentedPost = true;
+                }
             }
-            glBindFramebuffer(GL_FRAMEBUFFER, 0);
-            m_lastPresentedDirect = false;
+            else
+            {
+                m_lastPresentedDirect = false;
+            }
+            if (!directPostToFbo0)
+                glBindFramebuffer(GL_FRAMEBUFFER, 0);
             m_lastPresentedMain = m_mainIdx;
+            m_prevMainValid = true;
             m_mainIdx ^= 1;
         }
+        m_emaPostMs = m_emaPostMs > 0.0 ? (m_emaPostMs * 0.85 + postMs * 0.15) : postMs;
         m_arenaSlot = (m_arenaSlot + 1) % 3;
 
         const double drawMs = static_cast<double>(nowUs() - frameStartUs) * 0.001;
@@ -3580,12 +4011,12 @@ private:
                 }
                 prevStatic = &q;
             }
-            std::fprintf(stderr, "[mali:stats] frame=%llu draws=%u mergeSaved=%u instSaved=%u pass2Skip=%u culled=%u direct=%d drop=%llu drs=%.2f drawMs=%.2f swapMs=%.2f capMs=%.2f renderMs=%.2f mem=%.1f/%.1fM arr=%u arrMiss=%u/%llu b=%u/%u/%u/%u b2s=%u brk=%u/%u/%u/%u/%u/%u b2brk=%u/%u/%u/%u/%u/%u skin=%u/%u/%u upQ=%zu\n",
+            std::fprintf(stderr, "[mali:stats] frame=%llu draws=%u mergeSaved=%u instSaved=%u pass2Skip=%u culled=%u direct=%d drop=%llu drs=%.2f drawMs=%.2f postMs=%.2f swapMs=%.2f capMs=%.2f renderMs=%.2f mem=%.1f/%.1fM arr=%u arrMiss=%u/%llu b=%u/%u/%u/%u b2s=%u brk=%u/%u/%u/%u/%u/%u b2brk=%u/%u/%u/%u/%u/%u skin=%u/%u/%u upQ=%zu\n",
                          static_cast<unsigned long long>(m_frameNum), m_drawCallsThisFrame,
                          m_mergeSavedThisFrame, m_instSavedThisFrame, m_pass2SkipThisFrame, m_culledThisFrame,
                          m_lastPresentedDirect ? 1 : 0,
                          static_cast<unsigned long long>(m_droppedFrames.load(std::memory_order_relaxed)),
-                         m_drsScale, m_emaDrawMs, m_emaSwapMs, m_emaCapMs, m_emaFrameMs, gpuMb, budMb, liveArrays,
+                         m_drsScale, m_emaDrawMs, m_emaPostMs, m_emaSwapMs, m_emaCapMs, m_emaFrameMs, gpuMb, budMb, liveArrays,
                          m_arrMissDrawsThisFrame, static_cast<unsigned long long>(m_arrMissUploads),
                          bCnt[0], bCnt[1], bCnt[2], bCnt[3], m_b2SavedThisFrame,
                          brkClip, brkArr, brkState, brkDyn, brkSkin, brkNoSrc,
@@ -3706,12 +4137,13 @@ private:
         hasBox = std::isfinite(lo[0] + lo[1] + lo[2] + hi[0] + hi[1] + hi[2]);
     }
 
-    static void makeTarget(MaliTarget &t, uint32_t w, uint32_t h, bool withDepth)
+    static void makeTarget(MaliTarget &t, uint32_t w, uint32_t h, bool withDepth, bool depthAsTex = false)
     {
         destroyTarget(t);
         t.width = w;
         t.height = h;
         t.hasDepth = withDepth;
+        t.depthAsTex = withDepth && depthAsTex;
         glGenFramebuffers(1, &t.fbo);
         glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
 
@@ -3726,10 +4158,24 @@ private:
 
         if (withDepth)
         {
-            glGenRenderbuffers(1, &t.depth);
-            glBindRenderbuffer(GL_RENDERBUFFER, t.depth);
-            glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, static_cast<GLsizei>(w), static_cast<GLsizei>(h));
-            glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, t.depth);
+            if (depthAsTex)
+            {
+                glGenTextures(1, &t.depth);
+                glBindTexture(GL_TEXTURE_2D, t.depth);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, static_cast<GLsizei>(w), static_cast<GLsizei>(h), 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, nullptr);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, t.depth, 0);
+            }
+            else
+            {
+                glGenRenderbuffers(1, &t.depth);
+                glBindRenderbuffer(GL_RENDERBUFFER, t.depth);
+                glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, static_cast<GLsizei>(w), static_cast<GLsizei>(h));
+                glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, t.depth);
+            }
         }
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
@@ -3738,8 +4184,14 @@ private:
     {
         if (t.fbo) { glDeleteFramebuffers(1, &t.fbo); t.fbo = 0; }
         if (t.color) { glDeleteTextures(1, &t.color); t.color = 0; }
-        if (t.depth) { glDeleteRenderbuffers(1, &t.depth); t.depth = 0; }
+        if (t.depth)
+        {
+            if (t.depthAsTex) glDeleteTextures(1, &t.depth);
+            else glDeleteRenderbuffers(1, &t.depth);
+            t.depth = 0;
+        }
         t.width = t.height = 0;
+        t.depthAsTex = false;
     }
 
     static void invalidateDepth(bool defaultFbo = false)
@@ -4310,7 +4762,13 @@ private:
     int m_atPass2Mode = 1;
     bool m_zPrepassEnabled = false;
     bool m_postEnabled = true;
-    bool m_postBloomEnabled = false;
+    bool m_postBloomEnabled = true;
+    bool m_exposureEnabled = true;
+    bool m_dofEnabled = false;
+    int m_motionBlurMode = 0;
+    bool m_caEnabled = false;
+    bool m_lensFlareEnabled = false;
+    bool m_aoEnabled = false;
     bool m_postUpscaleEnabled = false;
     bool m_lastPresentedPost = false;
     bool m_lastPresentedDirect = false;
@@ -4333,6 +4791,7 @@ private:
     float m_drsMax = 1.0f;
     float m_drsScale = 1.0f;
     double m_emaDrawMs = 0.0;
+    double m_emaPostMs = 0.0;
     double m_emaSwapMs = 0.0;
     double m_emaCapMs = 0.0;
     double m_emaFrameMs = 0.0;
@@ -4403,11 +4862,16 @@ private:
     ShaderProg m_progArrOpaqueFast{}, m_progArrCutFast{}, m_progArrSoftFast{};
     ShaderProg m_progArrOpaque{}, m_progArrCut{}, m_progArrSoft{};
     ShaderProg m_progWater{};
+    ShaderProg m_progBloomMask{}, m_progKawase{}, m_progTemporal{}, m_progAo{}, m_progAoBlur{};
     GLuint m_emptyVao = 0;
     GLuint m_whiteTex = 0;
     MaliTarget m_mainTarget[2]{}, m_postTarget{}, m_bgTarget{};
+    MaliTarget m_bloomQuarter{}, m_bloomEighth{}, m_bloomHist[2]{}, m_dofHalf{}, m_aoTarget{}, m_aoBlur{};
     int m_mainIdx = 0;
     int m_lastPresentedMain = 0;
+    int m_bloomHistIdx = 0;
+    bool m_bloomHistValid = false;
+    bool m_prevMainValid = false;
 
     GLuint m_arenaVao[3] = {};
     GLuint m_arenaVbo[3] = {};

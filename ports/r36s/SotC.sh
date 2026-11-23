@@ -76,13 +76,13 @@ export SOTC_SCREEN_MODE=1
 export SOTC_CROP_LETTERBOX=0
 export SOTC_AUDIO_MONO=1
 
-# 2. Desligamento TOTAL dos Efeitos Pesados Multipass do PS2
-export SOTC_BLOOM_SCALE=0
+# 2. Efeitos Multipass do PS2 (Bloom, ScreenBlur e DoF alimentam o pos-processamento leve da Fase 9)
+export SOTC_BLOOM_SCALE=1
 export PS2X_AUDIO_FRAMES=4096
 export SOTC_NATIVE_NOGLOW=1
 export SOTC_NATIVE_NOFEEDBACK=1
-export SOTC_NATIVE_NOSBLUR=1
-export SOTC_NATIVE_NODOF=1
+export SOTC_NATIVE_NOSBLUR=0
+export SOTC_NATIVE_NODOF=0
 export SOTC_NATIVE_NOHAZE=1
 export SOTC_NATIVE_NOSHADOWS=1
 export SOTC_BODY_SHADOWS=0
@@ -193,6 +193,14 @@ export SOTC_COLLISION_STATS=0
 export SOTC_COLL115_LOG=0
 export SOTC_SEG123=0
 export SOTC_RENDERER="${SOTC_RENDERER:-mali}"
+# Mali-G31 Team ICO Pseudo-HDR & Post-FX (Fase 9 — alternar 0/1 para testar custo/visual)
+export SOTC_MALI_BLOOM=1
+export SOTC_MALI_EXPOSURE=1
+export SOTC_MALI_DOF=1
+export SOTC_MALI_MOTION_BLUR=1
+export SOTC_MALI_CA=1
+export SOTC_MALI_LENS_FLARE=1
+export SOTC_MALI_AO=1
 # export SOTC_MALI_STATS=1
 export SOTC_GL_SHOTS=0
 export SOTC_GL_SHOT_DIR=/tmp/shots
