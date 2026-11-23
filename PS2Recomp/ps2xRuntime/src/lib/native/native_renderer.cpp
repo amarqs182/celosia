@@ -221,6 +221,10 @@ namespace native_renderer
                 d.maliAo = std::atoi(std::getenv("SOTC_MALI_AO")) != 0;
             if (on("SOTC_MALI_WATER"))
                 d.maliWater = std::atoi(std::getenv("SOTC_MALI_WATER")) != 0;
+            if (on("SOTC_P4MOVE"))
+                d.p4Move = std::atoi(std::getenv("SOTC_P4MOVE")) != 0;
+            if (on("SOTC_P2PTCL"))
+                d.p2Ptcl = std::atoi(std::getenv("SOTC_P2PTCL")) != 0;
             if (on("SOTC_CAP30"))
                 d.frameCap30 = std::atoi(std::getenv("SOTC_CAP30")) != 0;
             if (on("SOTC_CAP20")) // round 107: Frame rate, Steady 20 (1) or Auto (0)
@@ -516,6 +520,14 @@ namespace native_renderer
              "Lightweight Fresnel-modulated water tint without an extra reflection render pass.",
              "Superfície de água leve com Fresnel e cor do céu sem passe extra de reflexão.",
              &Tuning::maliWater, nullptr, 0, 1, 1, "SOTC_MALI_WATER"},
+            {"p4_move", "P4 Selective Move Join", "P4 Join Seletivo (Memória)",
+             "Heap garbage moves wait only for queued hook jobs whose guest reads touch the moved range.",
+             "Movimentos de memória do heap esperam apenas os jobs da fila cujas leituras tocam a faixa movida.",
+             &Tuning::p4Move, nullptr, 0, 1, 1, "SOTC_P4MOVE"},
+            {"p2_ptcl", "P2 Single-Pass Particles", "P2 Partículas (Passe Único)",
+             "Replaces the particle manager's five layer walks with a single host pass.",
+             "Substitui as cinco passadas de camadas de partículas por um único passe no host.",
+             &Tuning::p2Ptcl, nullptr, 0, 1, 1, "SOTC_P2PTCL"},
             // (Round 62: a menu item on the Vita again, as the user asked; round
             // 64: off by default (the user's choice), a saved value honoured,
             // SOTC_CAP30 over both. On, it caps only the heavy frames: above 150
@@ -865,6 +877,8 @@ namespace native_renderer
             {"sac_camcoll", 8, nullptr, nullptr},
             {"sac_farchara", 8, nullptr, nullptr},
             {"sac_max", 8, nullptr, nullptr},
+            {"p4_move", 8, "Cost: reduces CPU waits during area streaming and GC moves.", "Custo: reduz esperas de CPU em streaming de área e GC."},
+            {"p2_ptcl", 8, "Cost: reduces CPU overhead in particle layer passes.", "Custo: reduz custo de CPU nas camadas de partículas."},
         };
         static std::deque<std::string> helps; // (stable addresses)
         for (TuningItem &item : v)
