@@ -498,6 +498,8 @@ namespace
     // in GLES2/3): one program, position + uv -> texture * color, with the
     // screen transform (glOrtho(0, w, h, 0)) in the vertex shader.
     std::atomic<int> g_envCapFps{-1};
+    std::atomic<double> g_lastSwapMs{0.0};
+    std::atomic<double> g_lastCapSleepMs{0.0};
 
     int readEnvCapFps()
     {
@@ -881,8 +883,25 @@ void ps2xLinuxRefreshFpsCap()
     g_envCapFps.store(readEnvCapFps(), std::memory_order_relaxed);
 }
 
+void ps2xLinuxGetDrawableSize(uint32_t &w, uint32_t &h)
+{
+    w = g_width > 0 ? static_cast<uint32_t>(g_width) : 0u;
+    h = g_height > 0 ? static_cast<uint32_t>(g_height) : 0u;
+}
+
+double ps2xLinuxLastSwapMs()
+{
+    return g_lastSwapMs.load(std::memory_order_relaxed);
+}
+
+double ps2xLinuxLastCapSleepMs()
+{
+    return g_lastCapSleepMs.load(std::memory_order_relaxed);
+}
+
 void EndDrawing(void)
 {
+    double swapMs = 0.0;
     if (g_glReady && g_window)
     {
         int wantSwap = 0;
@@ -897,8 +916,14 @@ void EndDrawing(void)
         }
         static constexpr GLenum kDefaultDiscard[2] = {GL_DEPTH, GL_STENCIL};
         glInvalidateFramebuffer(GL_FRAMEBUFFER, 2, kDefaultDiscard);
+        struct timespec sw0{}, sw1{};
+        clock_gettime(CLOCK_MONOTONIC, &sw0);
         SDL_GL_SwapWindow(g_window);
+        clock_gettime(CLOCK_MONOTONIC, &sw1);
+        swapMs = static_cast<double>(sw1.tv_sec - sw0.tv_sec) * 1000.0 +
+                 static_cast<double>(sw1.tv_nsec - sw0.tv_nsec) * 1e-6;
     }
+    g_lastSwapMs.store(swapMs, std::memory_order_relaxed);
     static bool firstShown = false;
     if (!firstShown)
     {
@@ -916,6 +941,7 @@ void EndDrawing(void)
     const int runtimeFps = g_targetFps.load(std::memory_order_relaxed);
     if (targetFps > 0 && runtimeFps > 0 && runtimeFps < targetFps)
         targetFps = runtimeFps;
+    double capSleepMs = 0.0;
     if (targetFps > 0)
     {
         const int64_t periodNs = (1000000000LL + targetFps / 2) / targetFps;
@@ -945,6 +971,7 @@ void EndDrawing(void)
         }
         else
         {
+            const struct timespec capStart = now;
             const int64_t remNs = diffNs(s_nextDeadline, now);
             if (remNs > 500000LL)
             {
@@ -962,6 +989,9 @@ void EndDrawing(void)
             }
             while (diffNs(s_nextDeadline, now) > 0)
                 clock_gettime(CLOCK_MONOTONIC, &now);
+            capSleepMs = static_cast<double>(diffNs(now, capStart)) * 1e-6;
+            if (capSleepMs < 0.0)
+                capSleepMs = 0.0;
             addNs(s_nextDeadline, periodNs);
             if (diffNs(s_nextDeadline, now) < 0)
             {
@@ -970,6 +1000,7 @@ void EndDrawing(void)
             }
         }
     }
+    g_lastCapSleepMs.store(capSleepMs, std::memory_order_relaxed);
     ++g_framesThisSecond;
     const double now = GetTime();
     if (now - g_fpsWindowStart >= 1.0)
