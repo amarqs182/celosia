@@ -222,6 +222,8 @@ void runR36sBootMenu()
 
         int prevAxisDirX[4] = {0, 0, 0, 0};
         int prevAxisDirY[4] = {0, 0, 0, 0};
+        bool gpStartDown = false;
+        bool gpComboTriggered = false;
 
 #ifdef __linux__
         std::vector<int> evdevFds;
@@ -267,25 +269,24 @@ void runR36sBootMenu()
                     continue;
             raylibGamepadConnected = true;
 
-                // Standard Raylib GAMEPAD_BUTTON_* + raw evdev indices for GO-Super Gamepad (R36S DRM)
-                if (IsGamepadButtonPressed(gp, GAMEPAD_BUTTON_LEFT_FACE_UP) || IsGamepadButtonPressed(gp, 8))
+                if (IsGamepadButtonPressed(gp, GAMEPAD_BUTTON_LEFT_FACE_UP))
                     upPressed = true;
-                if (IsGamepadButtonPressed(gp, GAMEPAD_BUTTON_LEFT_FACE_DOWN) || IsGamepadButtonPressed(gp, 9))
+                if (IsGamepadButtonPressed(gp, GAMEPAD_BUTTON_LEFT_FACE_DOWN))
                     downPressed = true;
-                if (IsGamepadButtonPressed(gp, GAMEPAD_BUTTON_LEFT_FACE_LEFT) || IsGamepadButtonPressed(gp, 10))
+                if (IsGamepadButtonPressed(gp, GAMEPAD_BUTTON_LEFT_FACE_LEFT))
                     leftPressed = true;
-                if (IsGamepadButtonPressed(gp, GAMEPAD_BUTTON_LEFT_FACE_RIGHT) || IsGamepadButtonPressed(gp, 11))
+                if (IsGamepadButtonPressed(gp, GAMEPAD_BUTTON_LEFT_FACE_RIGHT))
                     rightPressed = true;
-                if (IsGamepadButtonPressed(gp, GAMEPAD_BUTTON_RIGHT_FACE_DOWN) || IsGamepadButtonPressed(gp, 0))
+                if (IsGamepadButtonPressed(gp, GAMEPAD_BUTTON_RIGHT_FACE_DOWN))
                     startOnlyPressed = true;
-                if (IsGamepadButtonPressed(gp, GAMEPAD_BUTTON_MIDDLE_RIGHT) || IsGamepadButtonPressed(gp, 13))
-                    saveAndStartPressed = true;
-                if (IsGamepadButtonPressed(gp, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT) || IsGamepadButtonPressed(gp, 1))
+                if (IsGamepadButtonPressed(gp, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT))
                     fallbackGlPressed = true;
 
-                if ((IsGamepadButtonDown(gp, 12) && IsGamepadButtonDown(gp, 13)) ||
-                    (IsGamepadButtonDown(gp, GAMEPAD_BUTTON_MIDDLE_LEFT) && IsGamepadButtonDown(gp, GAMEPAD_BUTTON_MIDDLE_RIGHT)))
+                const bool selectNow = IsGamepadButtonDown(gp, GAMEPAD_BUTTON_MIDDLE_LEFT);
+                const bool startNow = IsGamepadButtonDown(gp, GAMEPAD_BUTTON_MIDDLE_RIGHT);
+                if (selectNow && startNow)
                 {
+                    gpComboTriggered = true;
 #ifdef __linux__
                     for (int fd : evdevFds)
                         ::close(fd);
@@ -293,6 +294,11 @@ void runR36sBootMenu()
                     CloseWindow();
                     std::exit(0);
                 }
+                if (gpStartDown && !startNow && !selectNow && !gpComboTriggered)
+                    saveAndStartPressed = true;
+                gpStartDown = startNow;
+                if (!selectNow && !startNow)
+                    gpComboTriggered = false;
 
                 const float axX = GetGamepadAxisMovement(gp, GAMEPAD_AXIS_LEFT_X);
                 const float axY = GetGamepadAxisMovement(gp, GAMEPAD_AXIS_LEFT_Y);

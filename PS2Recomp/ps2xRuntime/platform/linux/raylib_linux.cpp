@@ -245,6 +245,7 @@ namespace
     constexpr size_t kKeyCount = sizeof(kKeyMap) / sizeof(kKeyMap[0]);
     std::array<bool, kKeyCount> g_keyDown{};
     std::array<bool, kKeyCount> g_keyPressed{};
+    unsigned int g_padPressed = 0;
 
     int keyIndex(int key)
     {
@@ -356,6 +357,7 @@ namespace
             merged.rx = pick(merged.rx, rxRaw);
             merged.ry = pick(merged.ry, SDL_GameControllerGetAxis(ctrl, SDL_CONTROLLER_AXIS_RIGHTY));
         }
+        g_padPressed = merged.buttons & ~g_pad.buttons;
         g_pad = merged;
     }
 
@@ -1283,34 +1285,51 @@ bool IsKeyPressed(int key)
     return i >= 0 && g_keyPressed[static_cast<size_t>(i)];
 }
 
-bool IsGamepadAvailable(int gamepad) { return gamepad == 0; }
+namespace
+{
+    unsigned int gamepadButtonBit(int button)
+    {
+        switch (button)
+        {
+        case GAMEPAD_BUTTON_LEFT_FACE_UP: return CTRL_UP;
+        case GAMEPAD_BUTTON_LEFT_FACE_RIGHT: return CTRL_RIGHT;
+        case GAMEPAD_BUTTON_LEFT_FACE_DOWN: return CTRL_DOWN;
+        case GAMEPAD_BUTTON_LEFT_FACE_LEFT: return CTRL_LEFT;
+        case GAMEPAD_BUTTON_RIGHT_FACE_UP: return CTRL_TRIANGLE;
+        case GAMEPAD_BUTTON_RIGHT_FACE_RIGHT: return CTRL_CIRCLE;
+        case GAMEPAD_BUTTON_RIGHT_FACE_DOWN: return CTRL_CROSS;
+        case GAMEPAD_BUTTON_RIGHT_FACE_LEFT: return CTRL_SQUARE;
+        case GAMEPAD_BUTTON_LEFT_TRIGGER_1: return CTRL_L1;
+        case GAMEPAD_BUTTON_RIGHT_TRIGGER_1: return CTRL_R1;
+        case GAMEPAD_BUTTON_LEFT_TRIGGER_2: return CTRL_L2;
+        case GAMEPAD_BUTTON_RIGHT_TRIGGER_2: return CTRL_R2;
+        case GAMEPAD_BUTTON_MIDDLE_LEFT: return CTRL_SELECT;
+        case GAMEPAD_BUTTON_MIDDLE: return CTRL_GUIDE;
+        case GAMEPAD_BUTTON_MIDDLE_RIGHT: return CTRL_START;
+        case GAMEPAD_BUTTON_LEFT_THUMB: return CTRL_L3;
+        case GAMEPAD_BUTTON_RIGHT_THUMB: return CTRL_R3;
+        default: return 0u;
+        }
+    }
+} // namespace
+
+bool IsGamepadAvailable(int gamepad)
+{
+    return gamepad == 0 && (g_controllers[0] != nullptr || g_controllers[1] != nullptr);
+}
 
 bool IsGamepadButtonDown(int gamepad, int button)
 {
     if (gamepad != 0)
         return false;
-    const unsigned int b = g_pad.buttons;
-    switch (button)
-    {
-    case GAMEPAD_BUTTON_LEFT_FACE_UP: return b & CTRL_UP;
-    case GAMEPAD_BUTTON_LEFT_FACE_RIGHT: return b & CTRL_RIGHT;
-    case GAMEPAD_BUTTON_LEFT_FACE_DOWN: return b & CTRL_DOWN;
-    case GAMEPAD_BUTTON_LEFT_FACE_LEFT: return b & CTRL_LEFT;
-    case GAMEPAD_BUTTON_RIGHT_FACE_UP: return b & CTRL_TRIANGLE;
-    case GAMEPAD_BUTTON_RIGHT_FACE_RIGHT: return b & CTRL_CIRCLE;
-    case GAMEPAD_BUTTON_RIGHT_FACE_DOWN: return b & CTRL_CROSS;
-    case GAMEPAD_BUTTON_RIGHT_FACE_LEFT: return b & CTRL_SQUARE;
-    case GAMEPAD_BUTTON_LEFT_TRIGGER_1: return b & CTRL_L1;
-    case GAMEPAD_BUTTON_RIGHT_TRIGGER_1: return b & CTRL_R1;
-    case GAMEPAD_BUTTON_LEFT_TRIGGER_2: return b & CTRL_L2;
-    case GAMEPAD_BUTTON_RIGHT_TRIGGER_2: return b & CTRL_R2;
-    case GAMEPAD_BUTTON_MIDDLE_LEFT: return b & CTRL_SELECT;
-    case GAMEPAD_BUTTON_MIDDLE: return b & CTRL_GUIDE;
-    case GAMEPAD_BUTTON_MIDDLE_RIGHT: return b & CTRL_START;
-    case GAMEPAD_BUTTON_LEFT_THUMB: return b & CTRL_L3;
-    case GAMEPAD_BUTTON_RIGHT_THUMB: return b & CTRL_R3;
-    default: return false;
-    }
+    return (g_pad.buttons & gamepadButtonBit(button)) != 0u;
+}
+
+bool IsGamepadButtonPressed(int gamepad, int button)
+{
+    if (gamepad != 0)
+        return false;
+    return (g_padPressed & gamepadButtonBit(button)) != 0u;
 }
 
 float GetGamepadAxisMovement(int gamepad, int axis)
@@ -1547,7 +1566,6 @@ float GetMouseWheelMove(void) { return 0.0f; }
 void SetMousePosition(int x, int y) { (void)x; (void)y; }
 bool IsMouseButtonDown(int button) { (void)button; return false; }
 bool IsMouseButtonPressed(int button) { (void)button; return false; }
-bool IsGamepadButtonPressed(int gamepad, int button) { (void)gamepad; (void)button; return false; }
 
 // Misc
 void TraceLog(int msgType, const char *text, ...) { (void)msgType; (void)text; }
