@@ -1436,9 +1436,9 @@ public:
             m_hasLetterboxCrop = (cropRatio > 0.001f);
         }
         m_mergeBudgetUs = static_cast<uint64_t>(std::max(0, envInt("SOTC_MALI_MERGE_BUDGET_US", 2500)));
-        m_mergeChunkMax = static_cast<uint32_t>(std::clamp(envInt("SOTC_MALI_MERGE_CHUNK", 48), 4, 128));
+        m_mergeChunkMax = static_cast<uint32_t>(std::clamp(envInt("SOTC_MALI_MERGE_CHUNK", 64), 4, 128));
         m_cacheBudgetBytes = static_cast<uint64_t>(std::max(16, envInt("SOTC_MALI_CACHE_BUDGET_MB", 128))) * 1024ull * 1024ull;
-        m_texArrayBudgetBytes = std::min(48ull * 1024ull * 1024ull, m_cacheBudgetBytes / 2ull);
+        m_texArrayBudgetBytes = std::min(80ull * 1024ull * 1024ull, (m_cacheBudgetBytes * 5ull) / 8ull);
         m_atPass2Mode = std::clamp(envInt("SOTC_MALI_AT_PASS2", 1), 0, 2); // 0=off, 1=smart auto, 2=always
         m_zPrepassEnabled = envBool("SOTC_MALI_ZPREPASS", false);
         m_postEnabled = envBool("SOTC_MALI_POST", true);
@@ -1991,10 +1991,11 @@ private:
         makeTarget(m_bgTarget, 256, 256, true);
         m_lastPresentTime = std::chrono::steady_clock::now();
         m_initialized = true;
-        std::fprintf(stderr, "[mali] Phase 7C GLES 3.2 backend up (async=%d mailbox=%d keepCur=%d direct=%d fastSh=%d texArr=%d(maxL=%u) merge=%d(chunk=%u) inst=%d atPass2=%d cull=%d skin=%d drs=%d@%dfps[%.2f..%.2f] drawOnly=%d budget=%lluM)\n",
+        std::fprintf(stderr, "[mali] Phase 7D GLES 3.2 backend up (async=%d mailbox=%d keepCur=%d direct=%d fastSh=%d texArr=%d(maxL=%u,bud=%lluM) merge=%d(chunk=%u) inst=%d atPass2=%d cull=%d skin=%d drs=%d@%dfps[%.2f..%.2f] drawOnly=%d budget=%lluM)\n",
                      m_asyncEnabled ? 1 : 0, m_mailboxEnabled ? 1 : 0, m_keepCurrentEnabled ? 1 : 0,
                      m_directScanoutEnabled ? 1 : 0, m_fastShadersEnabled ? 1 : 0,
                      m_texArrayEnabled ? 1 : 0, m_maxArrayLayers,
+                     static_cast<unsigned long long>(m_texArrayBudgetBytes >> 20),
                      m_mergeEnabled ? 1 : 0, m_mergeChunkMax, m_instancingEnabled ? 1 : 0,
                      m_atPass2Mode, m_cullEnabled ? 1 : 0, m_gpuSkinEnabled ? 1 : 0,
                      m_drsEnabled ? 1 : 0, m_drsTargetFps, m_drsMin, m_drsMax, m_drsDrawOnly ? 1 : 0,
@@ -2146,8 +2147,7 @@ private:
         {
             if (auto it = m_textures.find(id); it != m_textures.end())
             {
-                if (it->second.arrayId >= 0 && static_cast<size_t>(it->second.arrayId) < m_texArrays.size())
-                    m_texArrays[it->second.arrayId].freeLayers.push_back(it->second.arrayLayer);
+                releaseTexArrayLayer(it->second.arrayId, it->second.arrayLayer);
                 if (m_lastTex == it->second.tex && it->second.tex != 0u)
                     m_lastTex = ~0u;
                 if (it->second.tex) glDeleteTextures(1, &it->second.tex);
@@ -2159,6 +2159,8 @@ private:
                 m_evictions.fetch_add(1u, std::memory_order_relaxed);
             }
         }
+        if (!pkt.confirmEvictTex.empty())
+            reclaimEmptyTexArrays();
 
         for (const UploadCmd &cmd : pkt.uploads)
         {
@@ -2288,6 +2290,55 @@ private:
         }
     }
 
+    void releaseTexArrayLayer(int16_t arrayId, uint8_t layer)
+    {
+        if (arrayId >= 0 && static_cast<size_t>(arrayId) < m_texArrays.size() && m_texArrays[arrayId].tex != 0u)
+            m_texArrays[arrayId].freeLayers.push_back(layer);
+    }
+
+    bool reclaimEmptyTexArrays()
+    {
+        bool reclaimed = false;
+        for (size_t i = 0; i < m_texArrays.size(); ++i)
+        {
+            MaliTexArray &arr = m_texArrays[i];
+            if (arr.tex == 0u || arr.freeLayers.size() < arr.used)
+                continue;
+            if (m_lastTexArr == arr.tex)
+                m_lastTexArr = ~0u;
+            glDeleteTextures(1, &arr.tex);
+            if (m_gpuTexArrayBytes >= arr.gpuBytes)
+                m_gpuTexArrayBytes -= arr.gpuBytes;
+            else
+                m_gpuTexArrayBytes = 0;
+            arr = MaliTexArray{};
+            const int16_t deadId = static_cast<int16_t>(i);
+            for (auto it = m_mergeRuns.begin(); it != m_mergeRuns.end();)
+            {
+                if (it->second.texArrayId == deadId)
+                {
+                    MergeRun &er = it->second;
+                    if (m_lastVao == er.vao)
+                        m_lastVao = ~0u;
+                    if (er.vao) glDeleteVertexArrays(1, &er.vao);
+                    if (er.vbo) glDeleteBuffers(1, &er.vbo);
+                    if (er.ibo) glDeleteBuffers(1, &er.ibo);
+                    if (m_mergeRunBytes >= er.bytes)
+                        m_mergeRunBytes -= er.bytes;
+                    else
+                        m_mergeRunBytes = 0;
+                    it = m_mergeRuns.erase(it);
+                }
+                else
+                {
+                    ++it;
+                }
+            }
+            reclaimed = true;
+        }
+        return reclaimed;
+    }
+
     bool allocTexArraySlot(uint32_t w, uint32_t h, uint32_t levels, uint8_t fmtCode, int16_t &outArrId, uint8_t &outLayer)
     {
         outArrId = -1;
@@ -2298,7 +2349,7 @@ private:
         for (size_t i = 0; i < m_texArrays.size(); ++i)
         {
             MaliTexArray &arr = m_texArrays[i];
-            if (arr.width != w || arr.height != h || arr.levels != levels || arr.fmtCode != fmtCode)
+            if (!arr.tex || arr.width != w || arr.height != h || arr.levels != levels || arr.fmtCode != fmtCode)
                 continue;
             if (!arr.freeLayers.empty())
             {
@@ -2315,9 +2366,27 @@ private:
             }
         }
 
-        if (m_texArrays.size() >= 128u)
-            return false;
-        const uint32_t cap = std::min(m_maxArrayLayers, (std::max(w, h) >= 256u) ? 32u : 64u);
+        auto findDeadSlot = [this]() -> size_t {
+            for (size_t i = 0; i < m_texArrays.size(); ++i)
+            {
+                if (m_texArrays[i].tex == 0u)
+                    return i;
+            }
+            return SIZE_MAX;
+        };
+
+        size_t reuseIdx = findDeadSlot();
+        if (reuseIdx == SIZE_MAX && m_texArrays.size() >= 256u)
+        {
+            if (reclaimEmptyTexArrays())
+                reuseIdx = findDeadSlot();
+            if (reuseIdx == SIZE_MAX)
+                return false;
+        }
+
+        const uint32_t maxDim = std::max(w, h);
+        const uint32_t tierCap = (maxDim >= 256u) ? 4u : ((maxDim >= 128u) ? 16u : 32u);
+        const uint32_t cap = std::min(m_maxArrayLayers, tierCap);
         uint64_t mipBytes = 0;
         {
             uint32_t bw = w, bh = h;
@@ -2331,7 +2400,12 @@ private:
         }
         const uint64_t arrBytes = mipBytes * cap;
         if (m_gpuTexArrayBytes + arrBytes > m_texArrayBudgetBytes)
-            return false;
+        {
+            if (reclaimEmptyTexArrays() && reuseIdx == SIZE_MAX)
+                reuseIdx = findDeadSlot();
+            if (m_gpuTexArrayBytes + arrBytes > m_texArrayBudgetBytes)
+                return false;
+        }
 
         MaliTexArray arr{};
         arr.width = w;
@@ -2371,9 +2445,17 @@ private:
         }
 #endif
         m_gpuTexArrayBytes += arrBytes;
-        outArrId = static_cast<int16_t>(m_texArrays.size());
         outLayer = 0u;
-        m_texArrays.push_back(std::move(arr));
+        if (reuseIdx != SIZE_MAX)
+        {
+            outArrId = static_cast<int16_t>(reuseIdx);
+            m_texArrays[reuseIdx] = std::move(arr);
+        }
+        else
+        {
+            outArrId = static_cast<int16_t>(m_texArrays.size());
+            m_texArrays.push_back(std::move(arr));
+        }
         return true;
     }
 
@@ -2435,14 +2517,14 @@ private:
         const bool use5551 = m_tex16Enabled && !use565 && allBinaryAlpha;
         tx.tex16 = use565 || use5551;
         tx.pendingEvict = false;
-        if (tx.arrayId >= 0 && static_cast<size_t>(tx.arrayId) < m_texArrays.size())
-        {
-            m_texArrays[tx.arrayId].freeLayers.push_back(tx.arrayLayer);
-            tx.arrayId = -1;
-            tx.arrayLayer = 0;
-        }
+        releaseTexArrayLayer(tx.arrayId, tx.arrayLayer);
+        tx.arrayId = -1;
+        tx.arrayLayer = 0;
         const uint8_t fmtCode = use565 ? 0u : (use5551 ? 1u : 2u);
-        allocTexArraySlot(cmd.width, cmd.height, tx.levels, fmtCode, tx.arrayId, tx.arrayLayer);
+        const bool arrEligible = m_texArrayEnabled && cmd.width >= 8u && cmd.width <= 256u &&
+                                 cmd.height >= 8u && cmd.height <= 256u && tx.levels > 0u;
+        if (arrEligible && !allocTexArraySlot(cmd.width, cmd.height, tx.levels, fmtCode, tx.arrayId, tx.arrayLayer))
+            ++m_arrMissUploads;
         glBindTexture(GL_TEXTURE_2D, tx.tex);
         uint64_t newTexBytes = 0;
         {
@@ -2680,6 +2762,7 @@ private:
         m_instSavedThisFrame = 0;
         m_pass2SkipThisFrame = 0;
         m_texWrapThisFrame = 0;
+        m_arrMissDrawsThisFrame = 0;
         m_skinGpuDrawsThisFrame = 0;
         m_skinCpuDrawsThisFrame = 0;
         m_skinMaxQwordsThisFrame = 0;
@@ -2788,6 +2871,11 @@ private:
             {
                 q.texArrayId = (m_texArrayEnabled && texPtr && texPtr->arrayId >= 0) ? texPtr->arrayId : -1;
                 q.texArrayLayer = (q.texArrayId >= 0) ? texPtr->arrayLayer : 0u;
+                if (m_texArrayEnabled && !mesh.dynamic && !q.skinned && texPtr && q.texArrayId < 0 &&
+                    texPtr->width >= 8u && texPtr->width <= 256u && texPtr->height >= 8u && texPtr->height <= 256u && texPtr->levels > 0u)
+                {
+                    ++m_arrMissDrawsThisFrame;
+                }
                 const uint64_t mergeTexKey = (q.texArrayId >= 0)
                     ? (0x8000000000000000ull | static_cast<uint64_t>(static_cast<uint16_t>(q.texArrayId)))
                     : q.state.texture;
@@ -3274,12 +3362,19 @@ private:
         {
             const double gpuMb = static_cast<double>(m_gpuMeshBytes + m_gpuTexBytes + m_gpuTexArrayBytes) / (1024.0 * 1024.0);
             const double budMb = static_cast<double>(m_cacheBudgetBytes) / (1024.0 * 1024.0);
-            std::fprintf(stderr, "[mali:stats] frame=%llu draws=%u mergeSaved=%u instSaved=%u pass2Skip=%u culled=%u direct=%d drop=%llu drs=%.2f drawMs=%.2f swapMs=%.2f capMs=%.2f renderMs=%.2f mem=%.1f/%.1fM arr=%zu skin=%u/%u/%u\n",
+            uint32_t liveArrays = 0;
+            for (const MaliTexArray &arr : m_texArrays)
+            {
+                if (arr.tex != 0u)
+                    ++liveArrays;
+            }
+            std::fprintf(stderr, "[mali:stats] frame=%llu draws=%u mergeSaved=%u instSaved=%u pass2Skip=%u culled=%u direct=%d drop=%llu drs=%.2f drawMs=%.2f swapMs=%.2f capMs=%.2f renderMs=%.2f mem=%.1f/%.1fM arr=%u arrMiss=%u/%llu skin=%u/%u/%u\n",
                          static_cast<unsigned long long>(m_frameNum), m_drawCallsThisFrame,
                          m_mergeSavedThisFrame, m_instSavedThisFrame, m_pass2SkipThisFrame, m_culledThisFrame,
                          m_lastPresentedDirect ? 1 : 0,
                          static_cast<unsigned long long>(m_droppedFrames.load(std::memory_order_relaxed)),
-                         m_drsScale, m_emaDrawMs, m_emaSwapMs, m_emaCapMs, m_emaFrameMs, gpuMb, budMb, m_texArrays.size(),
+                         m_drsScale, m_emaDrawMs, m_emaSwapMs, m_emaCapMs, m_emaFrameMs, gpuMb, budMb, liveArrays,
+                         m_arrMissDrawsThisFrame, static_cast<unsigned long long>(m_arrMissUploads),
                          m_skinGpuDrawsThisFrame, m_skinCpuDrawsThisFrame, m_skinMaxQwordsThisFrame);
         }
 
@@ -3852,7 +3947,7 @@ private:
         // Phase 1 of 2-phase tombstone eviction: select stale or over-budget meshes & textures.
         std::vector<uint64_t> candMeshes;
         std::vector<uint64_t> candTex;
-        uint64_t projectedBytes = m_gpuMeshBytes + m_gpuTexBytes;
+        uint64_t projectedBytes = m_gpuMeshBytes + m_gpuTexBytes + m_gpuTexArrayBytes;
 
         for (auto &[id, m] : m_meshes)
         {
@@ -3946,8 +4041,7 @@ private:
                     m_knownTextures.erase(id);
                     if (auto it = m_textures.find(id); it != m_textures.end())
                     {
-                        if (it->second.arrayId >= 0 && static_cast<size_t>(it->second.arrayId) < m_texArrays.size())
-                            m_texArrays[it->second.arrayId].freeLayers.push_back(it->second.arrayLayer);
+                        releaseTexArrayLayer(it->second.arrayId, it->second.arrayLayer);
                         if (m_lastTex == it->second.tex && it->second.tex != 0u)
                             m_lastTex = ~0u;
                         if (it->second.tex) glDeleteTextures(1, &it->second.tex);
@@ -3961,6 +4055,7 @@ private:
                 }
             }
         }
+        reclaimEmptyTexArrays();
     }
 
     std::function<void()> m_makeCurrent;
@@ -3997,10 +4092,10 @@ private:
     uint64_t m_uploadBudgetUs = 1500;
     uint64_t m_uploadUsThisFrame = 0;
     uint64_t m_mergeBudgetUs = 2500;
-    uint32_t m_mergeChunkMax = 48u;
+    uint32_t m_mergeChunkMax = 64u;
     uint32_t m_maxArrayLayers = 64u;
     uint64_t m_cacheBudgetBytes = 128ull * 1024ull * 1024ull;
-    uint64_t m_texArrayBudgetBytes = 48ull * 1024ull * 1024ull;
+    uint64_t m_texArrayBudgetBytes = 80ull * 1024ull * 1024ull;
     uint32_t m_bgRate = 2;
     int m_targetFps = 30;
     int m_drsTargetFps = 30;
@@ -4052,6 +4147,8 @@ private:
     uint32_t m_instSavedThisFrame = 0;
     uint32_t m_pass2SkipThisFrame = 0;
     uint32_t m_texWrapThisFrame = 0;
+    uint32_t m_arrMissDrawsThisFrame = 0;
+    uint64_t m_arrMissUploads = 0;
     uint32_t m_astcHits = 0;
     uint32_t m_skinGpuDrawsThisFrame = 0;
     uint32_t m_skinCpuDrawsThisFrame = 0;
