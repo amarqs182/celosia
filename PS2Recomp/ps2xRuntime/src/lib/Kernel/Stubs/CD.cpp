@@ -1232,8 +1232,10 @@ namespace ps2_stubs
                 preview << std::hex;
                 for (uint32_t i = 0; i < 16; ++i)
                 {
-                    const uint8_t byte = *getConstMemPtr(rdram, pathAddr + i);
-                    preview << (i == 0 ? "" : " ") << static_cast<uint32_t>(byte);
+                    const uint8_t *bp = getConstMemPtr(rdram, pathAddr + i);
+                    if (!bp)
+                        break;
+                    preview << (i == 0 ? "" : " ") << static_cast<uint32_t>(*bp);
                 }
                 std::cerr << "[sceCdSearchFile] empty path at 0x" << std::hex << pathAddr
                           << " preview=" << preview.str()

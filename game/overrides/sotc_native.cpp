@@ -7934,7 +7934,7 @@ namespace sotc_native
             if (n == 1u || n % 600u == 0u)
                 std::fprintf(stderr, "[layer %d] pushed from %08x (%llu)\n", logLayer, GPR_U32(ctx, 31), static_cast<unsigned long long>(n));
             if (GPR_U32(ctx, 31) == 0x010860F8u && (n < 40u || n % 60u == 0u))
-                std::fprintf(stderr, "[bossfx] frame %u flags %x radius %g rounds %d tint %08x %08x %08x sharp %08x blur %08x clear %08x %08x %08x %08x fade %08x %08x %08x %08x\n", g_frame,
+                std::fprintf(stderr, "[bossfx] frame %llu flags %x radius %g rounds %d tint %08x %08x %08x sharp %08x blur %08x clear %08x %08x %08x %08x fade %08x %08x %08x %08x\n", static_cast<unsigned long long>(g_frame),
                              word(0x01186290u), real(0x01186298u), static_cast<int>(word(0x011862A0u)), word(0x011862B0u), word(0x011862B4u), word(0x011862B8u), word(0x011862C4u), word(0x011862C0u),
                              word(0x01186280u), word(0x01186284u), word(0x01186288u), word(0x0118628Cu), word(0x01186260u), word(0x01186264u), word(0x01186268u), word(0x0118626Cu));
         }
@@ -13095,8 +13095,8 @@ namespace sotc_native
                         std::snprintf(item, sizeof(item), " %02x:%08x%08x", word(q + 8u) & 0xFFu, word(q + 4u), word(q));
                         regs += item;
                     }
-                    std::fprintf(stderr, "[layer %u model] header %08x surface %u flags %08x texmode %u frame %u regs%s\n", layer, header, surface,
-                                 word(s + 0x18u), word(s + 0x1Cu), g_frame, regs.c_str());
+                    std::fprintf(stderr, "[layer %u model] header %08x surface %u flags %08x texmode %u frame %llu regs%s\n", layer, header, surface,
+                                 word(s + 0x18u), word(s + 0x1Cu), static_cast<unsigned long long>(g_frame), regs.c_str());
                 }
             }
             const bool noReflect = !native_renderer::tuning().reflections;

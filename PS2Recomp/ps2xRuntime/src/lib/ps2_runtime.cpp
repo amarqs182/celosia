@@ -3153,13 +3153,13 @@ namespace
             {
                 if (std::strncmp(line, "cpu", 3) == 0)
                 {
-                    uint64_t u=0, n=0, s=0, id=0, io=0, irq=0, sirq=0, st=0;
+                    unsigned long long u=0, n=0, s=0, id=0, io=0, irq=0, sirq=0, st=0;
                     if (line[3] == ' ')
                     {
                         std::sscanf(line + 4, "%llu %llu %llu %llu %llu %llu %llu %llu",
                                     &u, &n, &s, &id, &io, &irq, &sirq, &st);
-                        uint64_t idle = id + io;
-                        uint64_t total = u + n + s + id + io + irq + sirq + st;
+                        uint64_t idle = static_cast<uint64_t>(id + io);
+                        uint64_t total = static_cast<uint64_t>(u + n + s + id + io + irq + sirq + st);
                         uint64_t dIdle = idle - s_lastCpuTotal.idle;
                         uint64_t dTot = total - s_lastCpuTotal.total;
                         s_lastCpuTotal = {idle, total};
@@ -3170,8 +3170,8 @@ namespace
                         int c = line[3] - '0';
                         std::sscanf(line + 5, "%llu %llu %llu %llu %llu %llu %llu %llu",
                                     &u, &n, &s, &id, &io, &irq, &sirq, &st);
-                        uint64_t idle = id + io;
-                        uint64_t total = u + n + s + id + io + irq + sirq + st;
+                        uint64_t idle = static_cast<uint64_t>(id + io);
+                        uint64_t total = static_cast<uint64_t>(u + n + s + id + io + irq + sirq + st);
                         uint64_t dIdle = idle - s_lastCpuCore[c].idle;
                         uint64_t dTot = total - s_lastCpuCore[c].total;
                         s_lastCpuCore[c] = {idle, total};
@@ -3220,16 +3220,16 @@ namespace
         // 4. ZRAM from /sys/block/zram0
         if (FILE *f = std::fopen("/sys/block/zram0/mm_stat", "r"))
         {
-            uint64_t orig = 0, comp = 0, memTotal = 0;
+            unsigned long long orig = 0, comp = 0, memTotal = 0;
             if (std::fscanf(f, "%llu %llu %llu", &orig, &comp, &memTotal) >= 3)
-                s_telemetryCache.zramUsedKb = memTotal / 1024;
+                s_telemetryCache.zramUsedKb = static_cast<uint64_t>(memTotal / 1024ull);
             std::fclose(f);
         }
         if (FILE *f = std::fopen("/sys/block/zram0/disksize", "r"))
         {
-            uint64_t diskSize = 0;
+            unsigned long long diskSize = 0;
             if (std::fscanf(f, "%llu", &diskSize) == 1)
-                s_telemetryCache.zramTotalMb = diskSize / (1024 * 1024);
+                s_telemetryCache.zramTotalMb = static_cast<uint64_t>(diskSize / (1024ull * 1024ull));
             std::fclose(f);
         }
 

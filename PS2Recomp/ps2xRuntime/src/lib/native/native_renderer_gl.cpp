@@ -7937,6 +7937,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 if (indexedRunBytes + bytes <= kMaxIndexedRunBytes)
                     break;
                 RunCopy *r = runs.find(key);
+                if (!r)
+                    continue;
                 if (r->vbo)
                     glDeleteBuffers(1, &r->vbo);
                 if (r->ibo)
@@ -8187,6 +8189,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 if (indexedRunBytes + bytes <= kMaxIndexedRunBytes)
                     break;
                 RunCopy *r = runs.find(key);
+                if (!r)
+                    continue;
                 if (r->vbo)
                     glDeleteBuffers(1, &r->vbo);
                 if (r->ibo)
@@ -12969,10 +12973,14 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 const bool aged = c.used < agedBefore, pressed = c.used < pressureBefore, budget = c.used < budgetBefore && cached > target;
                 if (!aged && !pressed && !budget)
                     continue;
-                if (heapOnly && !aged && !budget && !(c.texture && r->textures.find(c.id)->inHeap))
+                if (heapOnly && !aged && !budget)
                 {
-                    ++m_pressureSpared;
-                    continue;
+                    Texture *ht = c.texture ? r->textures.find(c.id) : nullptr;
+                    if (!ht || !ht->inHeap)
+                    {
+                        ++m_pressureSpared;
+                        continue;
+                    }
                 }
                 if (s9)
                     ++native_renderer::g_s9Stats[4];
@@ -12992,6 +13000,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 if (c.texture)
                 {
                     Texture *t = r->textures.find(c.id);
+                    if (!t)
+                        continue;
                     if (t->name)
                         r->deadTextures.push_back(t->name);
                     if (t->swz)
@@ -13003,6 +13013,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 else
                 {
                     Mesh *m = r->meshes.find(c.id);
+                    if (!m)
+                        continue;
                     if (m->buffer)
                         r->deadBuffers.push_back(m->buffer);
                     if (m->indexBuffer)
