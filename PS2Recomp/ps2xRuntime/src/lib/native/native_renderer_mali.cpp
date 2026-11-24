@@ -129,7 +129,14 @@ inline float envFloat(const char *name, float fallback)
 inline uint64_t fnv1aHash(const void *data, size_t len, uint64_t h = 14695981039346656037ull)
 {
     const auto *p = static_cast<const uint8_t *>(data);
-    for (size_t i = 0; i < len; ++i)
+    size_t i = 0;
+    for (; i + 8u <= len; i += 8u)
+    {
+        uint64_t w;
+        std::memcpy(&w, p + i, 8u);
+        h = (h ^ w) * 1099511628211ull;
+    }
+    for (; i < len; ++i)
     {
         h ^= p[i];
         h *= 1099511628211ull;
@@ -1651,6 +1658,13 @@ struct MergeRun
     uint32_t frames = 0;
 };
 
+struct StreamChunk
+{
+    uint32_t firstIndex = 0;
+    uint32_t indexCount = 0;
+    int16_t texArrayId = -1;
+};
+
 struct UploadCmd
 {
     enum Kind : uint8_t { StaticMesh, IndexedMesh, SkinnedMesh, Texture };
@@ -1703,7 +1717,7 @@ struct QueuedDraw
     uint8_t bucket = 0;
     bool skinned = false;
     bool deferredCull = false;
-    bool b2Opaque = false;
+    uint8_t b2SortTier = 2u;
 };
 
 struct FramePacket
@@ -1843,6 +1857,36 @@ inline bool canInstanceStatic(const QueuedDraw &a, const QueuedDraw &b)
            a.texArrayId == b.texArrayId &&
            a.texArrayLayer == b.texArrayLayer &&
            a.state.texture == b.state.texture &&
+           a.state.clamp == b.state.clamp &&
+           a.state.alphaTest == b.state.alphaTest &&
+           a.state.lit == b.state.lit &&
+           a.state.fresnel == b.state.fresnel &&
+           a.state.fogged == b.state.fogged &&
+           a.state.background == b.state.background &&
+           a.state.backgroundFge == b.state.backgroundFge &&
+           a.state.opacity == b.state.opacity &&
+           a.state.uvOffset[0] == b.state.uvOffset[0] &&
+           a.state.uvOffset[1] == b.state.uvOffset[1] &&
+           a.state.lodK == b.state.lodK &&
+           a.state.lodScale == b.state.lodScale &&
+           a.state.maxLod == b.state.maxLod &&
+           ((!a.state.lit && !a.state.fresnel) || std::memcmp(a.state.light, b.state.light, sizeof(a.state.light)) == 0);
+}
+
+inline bool sameMaterialSuperGroup(const QueuedDraw &a, const QueuedDraw &b)
+{
+    return a.bucket == b.bucket &&
+           (a.bucket <= 1u || (a.bucket == 2u && a.b2SortTier <= 1u && b.b2SortTier <= 1u && a.b2SortTier == b.b2SortTier)) &&
+           a.mesh && b.mesh &&
+           !a.mesh->dynamic && !b.mesh->dynamic &&
+           !a.skinned && !b.skinned &&
+           !a.state.reflectionSample && !b.state.reflectionSample &&
+           !a.state.refractionSample && !b.state.refractionSample &&
+           !a.state.shadowVolume && !b.state.shadowVolume &&
+           a.state.order == b.state.order &&
+           a.psoKey == b.psoKey &&
+           ((a.texArrayId >= 0 && a.texArrayId == b.texArrayId) ||
+            (a.texArrayId < 0 && b.texArrayId < 0 && a.state.texture == b.state.texture)) &&
            a.state.clamp == b.state.clamp &&
            a.state.alphaTest == b.state.alphaTest &&
            a.state.lit == b.state.lit &&
@@ -2515,6 +2559,16 @@ private:
             glBindBuffer(GL_ARRAY_BUFFER, m_arenaVbo[i]);
             setupDynamicVertexAttribs();
         }
+        glGenVertexArrays(3, m_streamMergeVao);
+        glGenBuffers(3, m_streamMergeVbo);
+        glGenBuffers(3, m_streamMergeIbo);
+        for (int i = 0; i < 3; ++i)
+        {
+            glBindVertexArray(m_streamMergeVao[i]);
+            glBindBuffer(GL_ARRAY_BUFFER, m_streamMergeVbo[i]);
+            setupCompactVertexAttribs();
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_streamMergeIbo[i]);
+        }
         glBindVertexArray(0);
 
         makeTarget(m_bgTarget, 256, 256, true);
@@ -2547,6 +2601,9 @@ private:
         GlContextGuard guard;
         glDeleteVertexArrays(3, m_arenaVao);
         glDeleteBuffers(3, m_arenaVbo);
+        glDeleteVertexArrays(3, m_streamMergeVao);
+        glDeleteBuffers(3, m_streamMergeVbo);
+        glDeleteBuffers(3, m_streamMergeIbo);
         if (m_samplers[0]) { glBindSampler(0, 0); glDeleteSamplers(8, m_samplers); std::memset(m_samplers, 0, sizeof(m_samplers)); }
         if (m_emptyVao) { glDeleteVertexArrays(1, &m_emptyVao); m_emptyVao = 0; }
         for (auto &[k, r] : m_mergeRuns)
@@ -3673,6 +3730,7 @@ private:
         m_culledThisFrame = 0;
         m_drawCallsThisFrame = 0;
         m_mergeSavedThisFrame = 0;
+        m_streamSavedThisFrame = 0;
         m_b2SavedThisFrame = 0;
         m_instSavedThisFrame = 0;
         m_pass2SkipThisFrame = 0;
@@ -3684,6 +3742,7 @@ private:
         m_skinInvalidThisFrame = 0;
         uint64_t mergeUsThisFrame = 0;
 
+        const uint64_t upStartUs = m_statsEnabled ? frameStartUs : 0u;
         processUploads(pkt);
 
         if (!pkt.dynVerts.empty())
@@ -3692,6 +3751,7 @@ private:
             glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(pkt.dynVerts.size() * sizeof(Vertex)),
                          pkt.dynVerts.data(), GL_STREAM_DRAW);
         }
+        const uint64_t qStartUs = m_statsEnabled ? nowUs() : 0u;
 
         // Build draw queues, pre-resolving MaliMesh* and MaliTex* once per draw.
         // Merge-eligible static draws defer culling so MergeRun keys stay camera-invariant across pans.
@@ -3824,7 +3884,7 @@ private:
                 const bool canAlphaTestBucket = ate && (atst == 5u || atst == 6u) &&
                                                 !rd.state.background && !rd.state.overlay && !rd.state.noDepthWrite &&
                                                 rd.state.blend != Blend::Additive && rd.state.blend != Blend::Subtract;
-                const bool texOpaque = (texPtr != nullptr && texPtr->minAlpha >= 124u);
+                const bool texOpaque = (texPtr == nullptr || texPtr->minAlpha >= 124u);
                 const bool fullAlpha = !rd.state.fresnel && rd.state.opacity >= 0.99f && mesh.minAlpha >= 124u && texOpaque;
                 const bool alphaTestAlwaysPasses = !ate || (atst == 1u) ||
                                                    (fullAlpha && ((atst == 5u && aref8 <= 120u) ||
@@ -3859,7 +3919,7 @@ private:
                                          (rd.state.blend == Blend::Normal || rd.state.blend == Blend::Additive || rd.state.blend == Blend::Subtract);
                     const uint32_t b2Prog = canSoft ? (q.skinned ? (fastFog ? 11u : 4u) : (fastFog ? 8u : 12u)) : cutProg;
                     q.psoKey = makePsoKey(b2Prog, rd.state.blend, true, dw, df);
-                    q.b2Opaque = !rd.state.overlay && dw && rd.state.blend == Blend::Opaque;
+                    q.b2SortTier = (!rd.state.overlay && dw && rd.state.blend == Blend::Opaque) ? 0u : (rd.state.overlay ? 1u : 2u);
                 }
             }
 
@@ -3950,9 +4010,9 @@ private:
             }
             if (a.bucket == 2u)
             {
-                if (a.b2Opaque != b.b2Opaque)
-                    return a.b2Opaque > b.b2Opaque;
-                if (a.b2Opaque)
+                if (a.b2SortTier != b.b2SortTier)
+                    return a.b2SortTier < b.b2SortTier;
+                if (a.b2SortTier <= 1u)
                 {
                     if (a.psoKey != b.psoKey) return a.psoKey < b.psoKey;
                     if (a.stateHash != b.stateHash) return a.stateHash < b.stateHash;
@@ -3966,6 +4026,110 @@ private:
             }
             return a.seq < b.seq;
         });
+
+        m_streamVertsScratch.clear();
+        m_streamIndicesScratch.clear();
+        m_streamChunks.clear();
+        m_streamChunkForDraw.assign(m_qAll.size(), -1);
+        m_cachedRunForDraw.assign(m_qAll.size(), nullptr);
+        if (m_mergeEnabled)
+        {
+            for (size_t i = 0; i < m_qAll.size();)
+            {
+                const QueuedDraw &q = m_qAll[i];
+                if (q.bucket <= 2u && q.mesh && !q.mesh->dynamic && !q.skinned && !q.mesh->srcVerts.empty() &&
+                    i + 1u < m_qAll.size() && canMergeStatic(q, m_qAll[i + 1u]))
+                {
+                    size_t groupEnd = i + 2u;
+                    while (groupEnd < m_qAll.size() && canMergeStatic(q, m_qAll[groupEnd]))
+                        ++groupEnd;
+                    for (size_t s = i; s < groupEnd;)
+                    {
+                        const size_t e = std::min(s + static_cast<size_t>(m_mergeChunkMax), groupEnd);
+                        if (e - s >= 2u)
+                        {
+                            const QueuedDraw &sq = m_qAll[s];
+                            float runLo[3] = {1e30f, 1e30f, 1e30f};
+                            float runHi[3] = {-1e30f, -1e30f, -1e30f};
+                            bool allBox = true;
+                            for (size_t j = s; j < e; ++j)
+                            {
+                                const MaliMesh *jm = m_qAll[j].mesh;
+                                if (!jm || !jm->hasBox)
+                                {
+                                    allBox = false;
+                                    break;
+                                }
+                                for (int a = 0; a < 3; ++a)
+                                {
+                                    if (jm->lo[a] < runLo[a]) runLo[a] = jm->lo[a];
+                                    if (jm->hi[a] > runHi[a]) runHi[a] = jm->hi[a];
+                                }
+                            }
+                            float dummyW = 0.0f;
+                            if (m_cullEnabled && allBox && !sq.state.background && !sq.state.overlay && cullAabb(sq.clip, runLo, runHi, dummyW))
+                            {
+                                m_streamChunkForDraw[s] = -2;
+                            }
+                            else if (MergeRun *run = getOrBuildMergeRun(s, e, mergeUsThisFrame, sq.texArrayId))
+                            {
+                                m_cachedRunForDraw[s] = run;
+                            }
+                            else
+                            {
+                                uint32_t chunkVerts = 0u, chunkIndices = 0u;
+                                for (size_t j = s; j < e; ++j)
+                                {
+                                    const MaliMesh *jm = m_qAll[j].mesh;
+                                    chunkVerts += static_cast<uint32_t>(jm->srcVerts.size());
+                                    chunkIndices += static_cast<uint32_t>(jm->srcIndices.size());
+                                }
+                                if (chunkVerts > 0u && chunkIndices > 0u &&
+                                    m_streamVertsScratch.size() + chunkVerts <= 96000u &&
+                                    m_streamIndicesScratch.size() + chunkIndices <= 192000u)
+                                {
+                                    const uint32_t firstIndex = static_cast<uint32_t>(m_streamIndicesScratch.size());
+                                    for (size_t j = s; j < e; ++j)
+                                    {
+                                        const MaliMesh *jm = m_qAll[j].mesh;
+                                        const uint32_t baseV = static_cast<uint32_t>(m_streamVertsScratch.size());
+                                        m_streamVertsScratch.insert(m_streamVertsScratch.end(), jm->srcVerts.begin(), jm->srcVerts.end());
+                                        if (sq.texArrayId >= 0)
+                                        {
+                                            const uint8_t lay = m_qAll[j].texArrayLayer;
+                                            for (size_t v = baseV; v < m_streamVertsScratch.size(); ++v)
+                                                m_streamVertsScratch[v].texLayer = lay;
+                                        }
+                                        for (uint32_t idx : jm->srcIndices)
+                                            m_streamIndicesScratch.push_back(baseV + idx);
+                                    }
+                                    m_streamChunks.push_back({firstIndex, chunkIndices, sq.texArrayId});
+                                    m_streamChunkForDraw[s] = static_cast<int32_t>(m_streamChunks.size() - 1u);
+                                }
+                            }
+                        }
+                        s = e;
+                    }
+                    i = groupEnd;
+                }
+                else
+                {
+                    ++i;
+                }
+            }
+            if (!m_streamIndicesScratch.empty())
+            {
+                glBindVertexArray(m_streamMergeVao[m_arenaSlot]);
+                m_lastVao = m_streamMergeVao[m_arenaSlot];
+                glBindBuffer(GL_ARRAY_BUFFER, m_streamMergeVbo[m_arenaSlot]);
+                glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(m_streamVertsScratch.size() * sizeof(CompactVertex)),
+                             m_streamVertsScratch.data(), GL_STREAM_DRAW);
+                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_streamMergeIbo[m_arenaSlot]);
+                glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(m_streamIndicesScratch.size() * sizeof(uint32_t)),
+                             m_streamIndicesScratch.data(), GL_STREAM_DRAW);
+            }
+        }
+        const uint64_t dlStartUs = m_statsEnabled ? nowUs() : 0u;
 
         const float scale = m_drsEnabled ? m_drsScale : m_drsMax;
         const uint32_t rw = std::max(320u, static_cast<uint32_t>(std::lround(pkt.width * scale)) & ~3u);
@@ -4182,12 +4346,34 @@ private:
                 glStencilFuncSeparate(GL_FRONT_AND_BACK, GL_ALWAYS, 0, 0xFF);
                 glStencilOpSeparate(GL_FRONT, GL_KEEP, GL_KEEP, GL_INCR_WRAP);
                 glStencilOpSeparate(GL_BACK, GL_KEEP, GL_KEEP, GL_DECR_WRAP);
+                glUseProgram(m_progDepth.id);
+                const float *lastShadowClip = nullptr;
+                GLuint lastShadowVao = ~0u;
                 for (size_t k = i; k < runEnd; ++k)
                 {
-                    if (m_qAll[k].state.shadow > 0.0f)
-                        shadowAmt = m_qAll[k].state.shadow;
-                    emitDrawSingle(m_qAll[k], pkt, false, 0.0f, 0.0f);
+                    const QueuedDraw &sk = m_qAll[k];
+                    if (sk.state.shadow > 0.0f)
+                        shadowAmt = sk.state.shadow;
+                    if (!sk.mesh)
+                        continue;
+                    if (m_progDepth.uClip >= 0 && (!lastShadowClip || std::memcmp(lastShadowClip, sk.clip, 64) != 0))
+                    {
+                        glUniform4fv(m_progDepth.uClip, 4, sk.clip);
+                        lastShadowClip = sk.clip;
+                    }
+                    const GLuint targetVao = sk.mesh->dynamic ? m_arenaVao[m_arenaSlot] : sk.mesh->vao;
+                    if (targetVao != lastShadowVao)
+                    {
+                        glBindVertexArray(targetVao);
+                        lastShadowVao = targetVao;
+                    }
+                    if (sk.mesh->indexed)
+                        glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(sk.mesh->indexCount), GL_UNSIGNED_INT, nullptr);
+                    else
+                        glDrawArrays(GL_TRIANGLES, static_cast<GLint>(sk.mesh->dynamic ? sk.mesh->firstVertex : 0u), static_cast<GLsizei>(sk.mesh->vertexCount));
+                    ++m_drawCallsThisFrame;
                 }
+                m_lastVao = lastShadowVao;
                 glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
                 if (shadowAmt > 0.0f)
                 {
@@ -4341,109 +4527,137 @@ private:
                 continue;
             }
 
-            // Phase 6.1/7C/8: Camera-invariant static merge across GL_TEXTURE_2D_ARRAY layers + leftover singleton instancing.
-            // Bucket 2 stays strictly in original seq order (painter's order); only consecutive compatible draws merge/instance.
-            if (m_mergeEnabled && q.bucket <= 2u && q.mesh && !q.mesh->dynamic && !q.skinned && !q.mesh->srcVerts.empty() &&
-                i + 1u < m_qAll.size() && canMergeStatic(q, m_qAll[i + 1u]))
+            auto emitChunkOrStream = [&](size_t s, size_t e, const QueuedDraw &sq) -> bool
             {
-                size_t groupEnd = i + 2u;
-                while (groupEnd < m_qAll.size() && canMergeStatic(q, m_qAll[groupEnd]))
-                    ++groupEnd;
-
-                m_instScratch.clear();
-                for (size_t s = i; s < groupEnd;)
+                if (m_streamChunkForDraw[s] == -2)
                 {
-                    const size_t e = std::min(s + static_cast<size_t>(m_mergeChunkMax), groupEnd);
-                    const QueuedDraw &sq = m_qAll[s];
-                    if (e - s >= 2u)
-                    {
-                        float runLo[3] = {1e30f, 1e30f, 1e30f};
-                        float runHi[3] = {-1e30f, -1e30f, -1e30f};
-                        bool allBox = true;
-                        for (size_t j = s; j < e; ++j)
-                        {
-                            const MaliMesh *jm = m_qAll[j].mesh;
-                            if (!jm || !jm->hasBox)
-                            {
-                                allBox = false;
-                                break;
-                            }
-                            for (int a = 0; a < 3; ++a)
-                            {
-                                if (jm->lo[a] < runLo[a]) runLo[a] = jm->lo[a];
-                                if (jm->hi[a] > runHi[a]) runHi[a] = jm->hi[a];
-                            }
-                        }
-                        float dummyW = 0.0f;
-                        if (m_cullEnabled && allBox && !sq.state.background && !sq.state.overlay && cullAabb(sq.clip, runLo, runHi, dummyW))
-                        {
-                            m_culledThisFrame += static_cast<uint32_t>(e - s);
-                            s = e;
-                            continue;
-                        }
-                        if (MergeRun *run = getOrBuildMergeRun(s, e, mergeUsThisFrame, sq.texArrayId))
-                        {
-                            if (sq.bucket == 0u)
-                            {
-                                emitMergedRun(sq, *run, pkt, true, 0.0f, 0.0f);
-                            }
-                            else if (sq.bucket == 2u)
-                            {
-                                emitMergedRun(sq, *run, pkt, true, b2MinAlpha(sq), 0.0f);
-                            }
-                            else
-                            {
-                                const float aref = static_cast<float>((sq.state.alphaTest >> 4) & 0xFFu) / 128.0f;
-                                emitMergedRun(sq, *run, pkt, true, std::max(0.02f, aref), 0.0f);
-                                bool anyNeedPass2 = false;
-                                for (size_t j = s; j < e; ++j)
-                                    if (needsAlphaTestPass2(m_qAll[j], aref)) { anyNeedPass2 = true; break; }
-                                if (anyNeedPass2)
-                                {
-                                    QueuedDraw p2 = sq;
-                                    const bool fastFog = ((sq.psoKey & 31u) == 7u || (sq.psoKey & 31u) == 10u);
-                                    const uint32_t p2ProgBase = m_fastShadersEnabled ? (fastFog ? 8u : 12u) : 1u; const uint32_t p2Prog = (sq.texArrayId >= 0) ? toArrayProg(p2ProgBase) : p2ProgBase;
-                                    p2.psoKey = makePsoKey(p2Prog, sq.state.blend, true, false, 1u);
-                                    emitMergedRun(p2, *run, pkt, true, 0.02f, aref);
-                                }
-                                else if (((sq.state.alphaTest >> 12) & 3u) == 1u || ((sq.state.alphaTest >> 12) & 3u) == 3u)
-                                {
-                                    m_pass2SkipThisFrame += static_cast<uint32_t>(e - s);
-                                }
-                            }
-                            const uint32_t saved = static_cast<uint32_t>(e - s - 1u);
-                            m_mergeSavedThisFrame += saved;
-                            if (sq.bucket == 2u)
-                                m_b2SavedThisFrame += saved;
-                            s = e;
-                            continue;
-                        }
-                    }
-
-                    for (size_t j = s; j < e; ++j)
-                    {
-                        const QueuedDraw &jq = m_qAll[j];
-                        float dummyW = 0.0f;
-                        if (m_cullEnabled && jq.deferredCull && jq.mesh && cullAabb(jq.clip, jq.mesh->lo, jq.mesh->hi, dummyW))
-                        {
-                            ++m_culledThisFrame;
-                            continue;
-                        }
-                        m_instScratch.push_back(&jq);
-                    }
-                    s = e;
+                    m_culledThisFrame += static_cast<uint32_t>(e - s);
+                    return true;
                 }
+                if (MergeRun *run = m_cachedRunForDraw[s])
+                {
+                    if (sq.bucket == 0u)
+                        emitMergedRun(sq, *run, pkt, true, 0.0f, 0.0f);
+                    else if (sq.bucket == 2u)
+                        emitMergedRun(sq, *run, pkt, true, b2MinAlpha(sq), 0.0f);
+                    else
+                    {
+                        const float aref = static_cast<float>((sq.state.alphaTest >> 4) & 0xFFu) / 128.0f;
+                        emitMergedRun(sq, *run, pkt, true, std::max(0.02f, aref), 0.0f);
+                        bool anyNeedPass2 = false;
+                        for (size_t j = s; j < e; ++j)
+                            if (needsAlphaTestPass2(m_qAll[j], aref)) { anyNeedPass2 = true; break; }
+                        if (anyNeedPass2)
+                        {
+                            QueuedDraw p2 = sq;
+                            const bool fastFog = ((sq.psoKey & 31u) == 7u || (sq.psoKey & 31u) == 10u);
+                            const uint32_t p2ProgBase = m_fastShadersEnabled ? (fastFog ? 8u : 12u) : 1u;
+                            const uint32_t p2Prog = (sq.texArrayId >= 0) ? toArrayProg(p2ProgBase) : p2ProgBase;
+                            p2.psoKey = makePsoKey(p2Prog, sq.state.blend, true, false, 1u);
+                            emitMergedRun(p2, *run, pkt, true, 0.02f, aref);
+                        }
+                        else if (((sq.state.alphaTest >> 12) & 3u) == 1u || ((sq.state.alphaTest >> 12) & 3u) == 3u)
+                            m_pass2SkipThisFrame += static_cast<uint32_t>(e - s);
+                    }
+                    const uint32_t saved = static_cast<uint32_t>(e - s - 1u);
+                    m_mergeSavedThisFrame += saved;
+                    if (sq.bucket == 2u)
+                        m_b2SavedThisFrame += saved;
+                    return true;
+                }
+                if (m_streamChunkForDraw[s] >= 0)
+                {
+                    const StreamChunk &chunk = m_streamChunks[m_streamChunkForDraw[s]];
+                    if (sq.bucket == 0u)
+                        emitStreamMergedChunk(sq, chunk, pkt, true, 0.0f, 0.0f);
+                    else if (sq.bucket == 2u)
+                        emitStreamMergedChunk(sq, chunk, pkt, true, b2MinAlpha(sq), 0.0f);
+                    else
+                    {
+                        const float aref = static_cast<float>((sq.state.alphaTest >> 4) & 0xFFu) / 128.0f;
+                        emitStreamMergedChunk(sq, chunk, pkt, true, std::max(0.02f, aref), 0.0f);
+                        bool anyNeedPass2 = false;
+                        for (size_t j = s; j < e; ++j)
+                            if (needsAlphaTestPass2(m_qAll[j], aref)) { anyNeedPass2 = true; break; }
+                        if (anyNeedPass2)
+                        {
+                            QueuedDraw p2 = sq;
+                            const bool fastFog = ((sq.psoKey & 31u) == 7u || (sq.psoKey & 31u) == 10u);
+                            const uint32_t p2ProgBase = m_fastShadersEnabled ? (fastFog ? 8u : 12u) : 1u;
+                            const uint32_t p2Prog = (sq.texArrayId >= 0) ? toArrayProg(p2ProgBase) : p2ProgBase;
+                            p2.psoKey = makePsoKey(p2Prog, sq.state.blend, true, false, 1u);
+                            emitStreamMergedChunk(p2, chunk, pkt, true, 0.02f, aref);
+                        }
+                        else if (((sq.state.alphaTest >> 12) & 3u) == 1u || ((sq.state.alphaTest >> 12) & 3u) == 3u)
+                            m_pass2SkipThisFrame += static_cast<uint32_t>(e - s);
+                    }
+                    const uint32_t saved = static_cast<uint32_t>(e - s - 1u);
+                    m_mergeSavedThisFrame += saved;
+                    m_streamSavedThisFrame += saved;
+                    if (sq.bucket == 2u)
+                        m_b2SavedThisFrame += saved;
+                    return true;
+                }
+                return false;
+            };
 
+            // Phase 6.1/7C/8 + Streaming Merge + Cross-Clip Instancing across Material Super-Groups.
+            if ((q.bucket <= 1u || (q.bucket == 2u && q.b2SortTier <= 1u)) &&
+                q.mesh && !q.mesh->dynamic && !q.skinned && !q.state.reflectionSample && !q.state.refractionSample)
+            {
+                size_t superEnd = i + 1u;
+                while (superEnd < m_qAll.size() && sameMaterialSuperGroup(q, m_qAll[superEnd]))
+                    ++superEnd;
+                m_instScratch.clear();
+                for (size_t sub = i; sub < superEnd;)
+                {
+                    const QueuedDraw &subQ = m_qAll[sub];
+                    if (m_mergeEnabled && !subQ.mesh->srcVerts.empty() && sub + 1u < superEnd && canMergeStatic(subQ, m_qAll[sub + 1u]))
+                    {
+                        size_t mergeEnd = sub + 2u;
+                        while (mergeEnd < superEnd && canMergeStatic(subQ, m_qAll[mergeEnd]))
+                            ++mergeEnd;
+                        for (size_t s = sub; s < mergeEnd;)
+                        {
+                            const size_t e = std::min(s + static_cast<size_t>(m_mergeChunkMax), mergeEnd);
+                            if (e - s >= 2u && emitChunkOrStream(s, e, m_qAll[s]))
+                            {
+                                s = e;
+                                continue;
+                            }
+                            for (size_t j = s; j < e; ++j)
+                            {
+                                const QueuedDraw &jq = m_qAll[j];
+                                float dummyW = 0.0f;
+                                if (m_cullEnabled && jq.deferredCull && jq.mesh && cullAabb(jq.clip, jq.mesh->lo, jq.mesh->hi, dummyW))
+                                {
+                                    ++m_culledThisFrame;
+                                    continue;
+                                }
+                                m_instScratch.push_back(&jq);
+                            }
+                            s = e;
+                        }
+                        sub = mergeEnd;
+                    }
+                    else
+                    {
+                        float dummyW = 0.0f;
+                        if (m_cullEnabled && subQ.deferredCull && subQ.mesh && cullAabb(subQ.clip, subQ.mesh->lo, subQ.mesh->hi, dummyW))
+                            ++m_culledThisFrame;
+                        else
+                            m_instScratch.push_back(&subQ);
+                        ++sub;
+                    }
+                }
                 if (m_instancingEnabled && m_instScratch.size() >= 2u)
                 {
-                    if (q.bucket != 2u)
-                    {
-                        std::sort(m_instScratch.begin(), m_instScratch.end(), [](const QueuedDraw *a, const QueuedDraw *b) {
-                            if (a->meshId != b->meshId) return a->meshId < b->meshId;
-                            if (a->state.texture != b->state.texture) return a->state.texture < b->state.texture;
-                            return a->seq < b->seq;
-                        });
-                    }
+                    std::sort(m_instScratch.begin(), m_instScratch.end(), [](const QueuedDraw *a, const QueuedDraw *b) {
+                        if (a->meshId != b->meshId) return a->meshId < b->meshId;
+                        if (a->texArrayLayer != b->texArrayLayer) return a->texArrayLayer < b->texArrayLayer;
+                        if (a->state.texture != b->state.texture) return a->state.texture < b->state.texture;
+                        return a->seq < b->seq;
+                    });
                     for (size_t k = 0; k < m_instScratch.size();)
                     {
                         const QueuedDraw *iq0 = m_instScratch[k];
@@ -4454,13 +4668,9 @@ private:
                         if (cnt >= 2u)
                         {
                             if (iq0->bucket == 0u)
-                            {
                                 emitInstanced(&m_instScratch[k], cnt, pkt, true, 0.0f, 0.0f, iq0->psoKey);
-                            }
                             else if (iq0->bucket == 2u)
-                            {
                                 emitInstanced(&m_instScratch[k], cnt, pkt, true, b2MinAlpha(*iq0), 0.0f, iq0->psoKey);
-                            }
                             else
                             {
                                 const float aref = static_cast<float>((iq0->state.alphaTest >> 4) & 0xFFu) / 128.0f;
@@ -4476,9 +4686,7 @@ private:
                                     emitInstanced(&m_instScratch[k], cnt, pkt, true, 0.02f, aref, p2Pso);
                                 }
                                 else if (((iq0->state.alphaTest >> 12) & 3u) == 1u || ((iq0->state.alphaTest >> 12) & 3u) == 3u)
-                                {
                                     m_pass2SkipThisFrame += cnt;
-                                }
                             }
                             m_instSavedThisFrame += cnt - 1u;
                             if (iq0->bucket == 2u)
@@ -4496,7 +4704,40 @@ private:
                     for (const QueuedDraw *jq : m_instScratch)
                         emitBucketSingle(*jq, pkt);
                 }
+                i = superEnd;
+                continue;
+            }
 
+            if (m_mergeEnabled && q.bucket == 2u && q.b2SortTier == 2u && q.mesh && !q.mesh->dynamic && !q.skinned && !q.mesh->srcVerts.empty() &&
+                i + 1u < m_qAll.size() && canMergeStatic(q, m_qAll[i + 1u]))
+            {
+                size_t groupEnd = i + 2u;
+                while (groupEnd < m_qAll.size() && canMergeStatic(q, m_qAll[groupEnd]))
+                    ++groupEnd;
+                m_instScratch.clear();
+                for (size_t s = i; s < groupEnd;)
+                {
+                    const size_t e = std::min(s + static_cast<size_t>(m_mergeChunkMax), groupEnd);
+                    if (e - s >= 2u && emitChunkOrStream(s, e, m_qAll[s]))
+                    {
+                        s = e;
+                        continue;
+                    }
+                    for (size_t j = s; j < e; ++j)
+                    {
+                        const QueuedDraw &jq = m_qAll[j];
+                        float dummyW = 0.0f;
+                        if (m_cullEnabled && jq.deferredCull && jq.mesh && cullAabb(jq.clip, jq.mesh->lo, jq.mesh->hi, dummyW))
+                        {
+                            ++m_culledThisFrame;
+                            continue;
+                        }
+                        m_instScratch.push_back(&jq);
+                    }
+                    s = e;
+                }
+                for (const QueuedDraw *jq : m_instScratch)
+                    emitBucketSingle(*jq, pkt);
                 i = groupEnd;
                 continue;
             }
@@ -4580,6 +4821,15 @@ private:
 
         if (!needDepthTex)
             invalidateDepth(directScanout);
+        if (m_statsEnabled)
+        {
+            const double upMs = static_cast<double>(qStartUs - upStartUs) * 0.001;
+            const double qMs = static_cast<double>(dlStartUs - qStartUs) * 0.001;
+            const double dlMs = static_cast<double>(nowUs() - dlStartUs) * 0.001;
+            m_emaUpMs = m_emaUpMs > 0.0 ? (m_emaUpMs * 0.85 + upMs * 0.15) : upMs;
+            m_emaQMs = m_emaQMs > 0.0 ? (m_emaQMs * 0.85 + qMs * 0.15) : qMs;
+            m_emaDlMs = m_emaDlMs > 0.0 ? (m_emaDlMs * 0.85 + dlMs * 0.15) : dlMs;
+        }
 
         GLuint outTex = 0u;
         uint32_t outW = 0u;
@@ -4932,12 +5182,12 @@ private:
                 }
                 prevStatic = &q;
             }
-            std::fprintf(stderr, "[mali:stats] frame=%llu draws=%u mergeSaved=%u instSaved=%u pass2Skip=%u culled=%u direct=%d drop=%llu drs=%.2f drawMs=%.2f postMs=%.2f swapMs=%.2f capMs=%.2f renderMs=%.2f mem=%.1f/%.1fM arr=%u arrMiss=%u/%llu astc=%u b=%u/%u/%u/%u b2s=%u brk=%u/%u/%u/%u/%u/%u b2brk=%u/%u/%u/%u/%u/%u skin=%u/%u/%u upQ=%zu\n",
+            std::fprintf(stderr, "[mali:stats] frame=%llu draws=%u mergeSaved=%u strSaved=%u instSaved=%u pass2Skip=%u culled=%u direct=%d drop=%llu drs=%.2f drawMs=%.2f upMs=%.2f qMs=%.2f dlMs=%.2f postMs=%.2f swapMs=%.2f capMs=%.2f renderMs=%.2f mem=%.1f/%.1fM arr=%u arrMiss=%u/%llu astc=%u b=%u/%u/%u/%u b2s=%u brk=%u/%u/%u/%u/%u/%u b2brk=%u/%u/%u/%u/%u/%u skin=%u/%u/%u upQ=%zu\n",
                          static_cast<unsigned long long>(m_frameNum), m_drawCallsThisFrame,
-                         m_mergeSavedThisFrame, m_instSavedThisFrame, m_pass2SkipThisFrame, m_culledThisFrame,
+                         m_mergeSavedThisFrame, m_streamSavedThisFrame, m_instSavedThisFrame, m_pass2SkipThisFrame, m_culledThisFrame,
                          m_lastPresentedDirect ? 1 : 0,
                          static_cast<unsigned long long>(m_droppedFrames.load(std::memory_order_relaxed)),
-                         m_drsScale, m_emaDrawMs, m_emaPostMs, m_emaSwapMs, m_emaCapMs, m_emaFrameMs, gpuMb, budMb, liveArrays,
+                         m_drsScale, m_emaDrawMs, m_emaUpMs, m_emaQMs, m_emaDlMs, m_emaPostMs, m_emaSwapMs, m_emaCapMs, m_emaFrameMs, gpuMb, budMb, liveArrays,
                          m_arrMissDrawsThisFrame, static_cast<unsigned long long>(m_arrMissUploads), m_astcHits,
                          bCnt[0], bCnt[1], bCnt[2], bCnt[3], m_b2SavedThisFrame,
                          brkClip, brkArr, brkState, brkDyn, brkSkin, brkNoSrc,
@@ -5612,6 +5862,25 @@ private:
         ++m_drawCallsThisFrame;
     }
 
+    void emitStreamMergedChunk(const QueuedDraw &q, const StreamChunk &chunk, const FramePacket &pkt,
+                               bool allowBgFog, float minAlpha, float maxAlpha)
+    {
+        uint32_t psoKey = q.psoKey;
+        if (chunk.texArrayId >= 0)
+            psoKey = (psoKey & ~31u) | (toArrayProg(psoKey & 31u) & 31u);
+        const ShaderProg &prog = applyPso(psoKey);
+        bindCommonUniforms(prog, q, pkt, allowBgFog, minAlpha, maxAlpha, 1, chunk.texArrayId, 0.0f);
+        const GLuint vao = m_streamMergeVao[m_arenaSlot];
+        if (vao != m_lastVao)
+        {
+            glBindVertexArray(vao);
+            m_lastVao = vao;
+        }
+        glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(chunk.indexCount), GL_UNSIGNED_INT,
+                       reinterpret_cast<const void *>(static_cast<uintptr_t>(chunk.firstIndex) * sizeof(uint32_t)));
+        ++m_drawCallsThisFrame;
+    }
+
     void emitInstanced(const QueuedDraw *const *draws, uint32_t count, const FramePacket &pkt,
                        bool allowBgFog, float minAlpha, float maxAlpha, uint32_t psoKey)
     {
@@ -5750,7 +6019,7 @@ private:
             evictOldMergeSrc(m_frameNum, 1200u, kMaxMergeSrcBytes / 4ull);
         for (auto it = m_mergeRuns.begin(); it != m_mergeRuns.end();)
         {
-            if (it->second.lastUsed + 1800u < m_frameNum)
+            if ((!it->second.vao && it->second.lastUsed + 8u < m_frameNum) || it->second.lastUsed + 1800u < m_frameNum)
             {
                 MergeRun &er = it->second;
                 if (m_lastVao == er.vao)
@@ -5958,6 +6227,9 @@ private:
     double m_emaCapMs = 0.0;
     double m_emaFrameMs = 0.0;
     double m_emaGpuFrameMs = 0.0;
+    double m_emaUpMs = 0.0;
+    double m_emaQMs = 0.0;
+    double m_emaDlMs = 0.0;
     int m_drsOverStreak = 0;
     int m_drsUnderStreak = 0;
     std::chrono::steady_clock::time_point m_lastPresentTime{};
@@ -5996,6 +6268,7 @@ private:
     uint32_t m_culledThisFrame = 0;
     uint32_t m_drawCallsThisFrame = 0;
     uint32_t m_mergeSavedThisFrame = 0;
+    uint32_t m_streamSavedThisFrame = 0;
     uint32_t m_b2SavedThisFrame = 0;
     uint32_t m_instSavedThisFrame = 0;
     uint32_t m_pass2SkipThisFrame = 0;
@@ -6041,6 +6314,9 @@ private:
 
     GLuint m_arenaVao[3] = {};
     GLuint m_arenaVbo[3] = {};
+    GLuint m_streamMergeVao[3] = {};
+    GLuint m_streamMergeVbo[3] = {};
+    GLuint m_streamMergeIbo[3] = {};
     GLuint m_samplers[8] = {};
     int m_arenaSlot = 0;
 
@@ -6056,6 +6332,11 @@ private:
     std::vector<uint8_t> m_astcScratch;
     std::vector<CompactVertex> m_mergeVertsScratch;
     std::vector<uint32_t> m_mergeIndicesScratch;
+    std::vector<CompactVertex> m_streamVertsScratch;
+    std::vector<uint32_t> m_streamIndicesScratch;
+    std::vector<StreamChunk> m_streamChunks;
+    std::vector<int32_t> m_streamChunkForDraw;
+    std::vector<MergeRun *> m_cachedRunForDraw;
     std::vector<std::pair<uint64_t, uint64_t>> m_evictRunsScratch;
     std::vector<const QueuedDraw *> m_instScratch;
     std::vector<QueuedDraw> m_qBg, m_qMirror, m_qAll;
