@@ -211,17 +211,17 @@ namespace
     const char *groupName(int group)
     {
         static const char *en[] = {"", "", "Resolution & filtering", "Lighting & post", "Shadows", "Fog", "Effects & particles", "Distance & detail",
-                                   "Performance cuts (not in any preset)"};
+                                   "Mali optimizations & cuts"};
         static const char *pt[] = {"", "", "Resolução e filtro", "Luz e pós-processamento", "Sombras", "Névoa", "Efeitos e partículas", "Distância e detalhe",
-                                   "Cortes de desempenho (fora das predefinições)"};
+                                   "Otimizações Mali e cortes"};
         group = std::clamp(group, 0, 8);
         return portuguese() ? pt[group] : en[group];
     }
     const char *groupHelp(int group)
     {
         if (group == 8)
-            return portuguese() ? "Cortes que mudam o ritmo da câmera ou das poses distantes: nenhuma predefinição liga estes; cada um só à mão."
-                                : "Cuts that change the camera's or distant poses' timing: no preset turns these on; each only by hand.";
+            return portuguese() ? "Otimizações de GPU/CPU do Mali-G31 e cortes de desempenho fora da predefinição padrão."
+                                : "Mali-G31 GPU/CPU optimizations and performance cuts outside standard presets.";
         return portuguese() ? "Itens que a predefinição gráfica ajusta. Todos valem na hora (nenhum precisa reiniciar)."
                             : "Items the graphics preset sets. All apply at once (none needs a restart).";
     }
@@ -234,7 +234,7 @@ namespace
         {
             const auto &items = native_renderer::tuningItems();
             for (int i = 0; i < static_cast<int>(items.size()); ++i)
-                if (!items[i].quality)
+                if (!items[i].quality && native_renderer::tuningApplies(items[i]))
                     (items[i].debug ? dbg : normal).push_back(i);
             // The Graphics tab by group, a heading before each (the preset alone first).
             for (int group = 1; group <= 8; ++group)
@@ -250,7 +250,7 @@ namespace
                     }
             }
             for (int i = 0; i < static_cast<int>(items.size()); ++i)
-                if (items[i].quality && (items[i].group < 1 || items[i].group > 8))
+                if (items[i].quality && (items[i].group < 1 || items[i].group > 8) && native_renderer::tuningApplies(items[i]))
                     quality.push_back(i);
         }
         return tab == kDebugTab ? dbg : (tab == kQualityTab ? quality : normal);
@@ -288,8 +288,13 @@ namespace
         if (isHeading(k))
             return groupHelp(-k - kHeading);
         if (k < 0)
+#if defined(PS2X_LINUX_SDL2_SHIM)
+            return portuguese() ? "Volta todos os ajustes do renderer aos valores padrão (perfil Médio Mali-G31)."
+                                : "Puts every renderer adjustment back to its default (Mali-G31 Medium profile).";
+#else
             return portuguese() ? "Volta todos os ajustes do renderer aos valores padrão (a predefinição Alto)."
                                 : "Puts every renderer adjustment back to its default (the High preset).";
+#endif
         const auto &item = native_renderer::tuningItems()[k];
         if (!native_renderer::tuningApplies(item))
         {
@@ -312,7 +317,8 @@ namespace
         if (v == "On" || v == "Off")
             v = T(v.c_str());
         if (!native_renderer::tuningApplies(item)) // listed, but this renderer ignores it
-            v += portuguese() ? (item.backends == 1 ? " (só Metal)" : " (só OpenGL)") : (item.backends == 1 ? " (Metal only)" : " (OpenGL only)");
+            v += portuguese() ? (item.backends == 1 ? " (só Metal)" : (item.backends == 4 ? " (só Mali)" : " (só OpenGL)"))
+                              : (item.backends == 1 ? " (Metal only)" : (item.backends == 4 ? " (Mali only)" : " (OpenGL only)"));
         if (item.restart)
             v += portuguese() ? " (reiniciar)" : " (restart)";
         return v;
@@ -363,7 +369,7 @@ namespace
         FILE *f = std::fopen(kSettingsPath, "w");
         if (!f)
             return;
-        std::fprintf(f, "settings_version=39\n");
+        std::fprintf(f, "settings_version=40\n");
         std::fprintf(f, "exact_alpha=%d\nshow_fps=%d\nscreen=%d\nvolume=%d\nlanguage=%d\n", g_settings.exactAlpha ? 1 : 0,
                      g_settings.showFps ? 1 : 0, g_settings.screenMode.load(), g_settings.volume.load(), g_settings.language.load());
         for (const native_renderer::TuningItem &item : native_renderer::tuningItems())
@@ -590,12 +596,13 @@ void load()
     if (beforeGfxPresets)
         std::fprintf(stderr, "[settings] %s is from before round 124: its quality_preset is not read (gfx_preset Off..Max now), every item keeps its value\n",
                      kSettingsPath);
+    const bool beforeMaliV40 = !version || version->value < 40.0;
     for (const KeptValue &kv : g_fileValues)
     {
         const char *key = kv.key.c_str();
         const float number = static_cast<float>(kv.value);
         const int value = static_cast<int>(number);
-        if (old && !std::strcmp(key, "dbg_subsys_prof"))
+        if ((old || beforeMaliV40) && !std::strcmp(key, "dbg_subsys_prof"))
             continue;
         if (beforeExactFog && !std::strcmp(key, "fog_amount"))
             continue;

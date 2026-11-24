@@ -85,6 +85,15 @@ namespace native_renderer
         bool maliCull = true;           // SOTC_MALI_CULL
         bool maliMerge = true;          // SOTC_MALI_MERGE
         bool maliInstancing = true;     // SOTC_MALI_INSTANCING
+        float maliProfile = 1.0f;       // SOTC_MALI_PROFILE (0 Max Perf, 1 Medium, 2 Original PS2/PS3, 3 Custom)
+        float maliDrsMin = 0.65f;       // SOTC_MALI_DRS_MIN (0.50..1.00)
+        float maliBgRate = 2.0f;        // SOTC_MALI_BG_RATE (1..4 frames)
+        bool maliTex16 = true;          // SOTC_MALI_TEX16 (RGB565 for opaque textures)
+        bool maliTexArray = true;       // SOTC_MALI_TEXARRAY (GL_TEXTURE_2D_ARRAY, takes effect at start)
+        bool maliDirectScanout = true;  // SOTC_MALI_DIRECT_SCANOUT (zero-copy FBO 0)
+        bool maliZPrepass = false;      // SOTC_MALI_ZPREPASS
+        float maliCacheMb = 160.0f;     // SOTC_MALI_CACHE_BUDGET_MB (64..224)
+        bool maliStats = false;         // SOTC_MALI_STATS ([mali:stats] log every 120 frames)
         bool p4Move = false;            // SOTC_P4MOVE
         bool p2Ptcl = false;            // SOTC_P2PTCL
         bool p1Chara = false;           // SOTC_P1CHARA
@@ -732,7 +741,7 @@ namespace native_renderer
         // Fur shells clamping (SOTC_FUR_SHELLS): limits consecutive alpha-tested
         // shell layers (colossi fur) to N shells to prevent TBDR tile overdraw.
         // 0 = full PS2 layers (8-16), 4 = default on handhelds.
-        int furShells = 4;
+        float furShells = 4.0f;
         // Round 65: the Quality menu's performance cuts (all off by default on
         // every platform; each saved in settings.cfg, each its own variable).
         // Camera checks: the camera's look / visibility segment tests (not
@@ -785,7 +794,7 @@ namespace native_renderer
         uint8_t group = 0;
         bool inPreset = false;
         bool restart = false;           // takes effect only after a restart (none of the Graphics items so far)
-        uint8_t backends = 3;           // bit 0: Metal, bit 1: OpenGL (the Vita) - where it changes anything
+        uint8_t backends = 7;           // bit 0: Metal (1), bit 1: OpenGL/Vita (2), bit 2: Mali-G31 (4)
         // An action instead of a value (the Debug group's "Mark"): run on
         // Cross / left / right, never saved; its value text from `actionText`.
         void (*action)() = nullptr;
@@ -874,6 +883,15 @@ namespace native_renderer
     void applyPreset(Tuning &t, int preset);
     // The preset these values match, or kPresetCustom.
     int matchingPreset(const Tuning &t);
+    enum MaliProfile
+    {
+        kMaliProfileMaxPerf = 0,
+        kMaliProfileMedium = 1,
+        kMaliProfileOriginal = 2,
+        kMaliProfileCustom = 3
+    };
+    void applyMaliProfile(Tuning &t, int profile);
+    int matchingMaliProfile(const Tuning &t);
     // Round 124: the preset items and their values now, one line
     // ("preset High render_scale=1 texture_filter=2 ..."), for [gfx124].
     std::string gfxLine(const Tuning &t);

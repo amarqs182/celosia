@@ -1780,7 +1780,7 @@ public:
         m_shaderCacheEnabled = envBool("SOTC_MALI_SHADER_CACHE", true);
         m_gpuSkinEnabled = envBool("SOTC_MALI_GPU_SKIN", true);
         m_mergeEnabled = envBool("SOTC_MALI_MERGE", true);
-        m_texArrayEnabled = envBool("SOTC_MALI_TEXARRAY", true);
+        m_texArrayEnabled = tuning().maliTexArray;
         m_instancingEnabled = envBool("SOTC_MALI_INSTANCING", true);
         m_keepCurrentEnabled = envBool("SOTC_MALI_KEEP_CURRENT", true);
         m_directScanoutEnabled = envBool("SOTC_MALI_DIRECT_SCANOUT", true);
@@ -3517,13 +3517,29 @@ private:
             m_cullEnabled = liveTune.maliCull;
             m_mergeEnabled = liveTune.maliMerge;
             m_instancingEnabled = liveTune.maliInstancing;
+            m_tex16Enabled = liveTune.maliTex16;
+            m_directScanoutEnabled = liveTune.maliDirectScanout;
+            m_zPrepassEnabled = liveTune.maliZPrepass;
+            m_bgRate = static_cast<uint32_t>(std::clamp(static_cast<int>(liveTune.maliBgRate + 0.5f), 1, 4));
+            m_statsEnabled = liveTune.maliStats;
+            m_furShells = std::clamp(static_cast<int>(liveTune.furShells + 0.5f), 0, 16);
+            {
+                const uint64_t wantCacheBytes = static_cast<uint64_t>(std::clamp(static_cast<int>(liveTune.maliCacheMb + 0.5f), 64, 224)) * 1024ull * 1024ull;
+                if (wantCacheBytes != m_cacheBudgetBytes)
+                {
+                    m_cacheBudgetBytes = wantCacheBytes;
+                    m_texArrayBudgetBytes = std::min(140ull * 1024ull * 1024ull, (m_cacheBudgetBytes * 5ull) / 8ull);
+                }
+            }
             m_screenMode = hostmenu::settings().screenMode.load(std::memory_order_relaxed);
             {
                 const float userScale = std::clamp(liveTune.renderScale, 0.50f, 2.00f);
-                if (std::fabs(userScale - m_drsMax) > 1e-3f)
+                const float userDrsMin = std::clamp(liveTune.maliDrsMin, 0.50f, userScale);
+                if (std::fabs(userScale - m_drsMax) > 1e-3f || std::fabs(userDrsMin - m_drsMin) > 1e-3f)
                 {
                     m_drsMax = userScale;
-                    m_drsScale = std::clamp(m_drsScale, std::min(m_drsMin, m_drsMax), m_drsMax);
+                    m_drsMin = userDrsMin;
+                    m_drsScale = std::clamp(m_drsScale, m_drsMin, m_drsMax);
                 }
             }
             const bool wantTrilinear = liveTune.maliTrilinear;
@@ -3566,6 +3582,8 @@ private:
         m_qBg.clear();
         m_qAll.clear();
         m_qAll.reserve(pkt.draws.size());
+        uint64_t prevFurMeshId = 0ull;
+        int furShellCount = 0;
         for (const RawDraw &rd : pkt.draws)
         {
             auto it = m_meshes.find(rd.meshId);
@@ -3608,6 +3626,25 @@ private:
                 continue;
             }
             q.skinned = mesh.skinned && rd.state.skinPalette != 0u;
+            if (m_furShells > 0 && q.skinned && rd.state.alphaTest && rd.state.blend != Blend::Opaque)
+            {
+                if (rd.meshId == prevFurMeshId)
+                {
+                    ++furShellCount;
+                    if (furShellCount > m_furShells)
+                        continue;
+                }
+                else
+                {
+                    prevFurMeshId = rd.meshId;
+                    furShellCount = 1;
+                }
+            }
+            else
+            {
+                prevFurMeshId = 0ull;
+                furShellCount = 0;
+            }
 
             if (q.skinned)
                 ++m_skinGpuDrawsThisFrame;
@@ -5434,6 +5471,7 @@ private:
     int m_screenMode = -1;
     bool m_drsDrawOnly = false;
     int m_atPass2Mode = 1;
+    int m_furShells = 4;
     bool m_zPrepassEnabled = false;
     bool m_postEnabled = true;
     bool m_postBloomEnabled = true;

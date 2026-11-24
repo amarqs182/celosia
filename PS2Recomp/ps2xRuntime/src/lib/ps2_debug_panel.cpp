@@ -2249,7 +2249,8 @@ namespace
                     {
                         for (int i = 0; i < choices; ++i)
                         {
-                            if (item.number == &native_renderer::Tuning::preset && i == native_renderer::kPresetCustom)
+                            if ((item.number == &native_renderer::Tuning::preset && i == native_renderer::kPresetCustom) ||
+                                (item.number == &native_renderer::Tuning::maliProfile && i == native_renderer::kMaliProfileCustom))
                                 continue; // not a choice: what any other mix of values is
                             // The choice's own name (the preset's text is the preset the
                             // values match: every row read "Custom", ImGui's ID conflict).
@@ -2277,7 +2278,7 @@ namespace
                     }
                 }
                 if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("%s%s", applies ? "" : (item.backends == 1 ? "(Metal only: no effect on OpenGL) " : "(OpenGL / Vita only: no effect on Metal) "), item.help);
+                    ImGui::SetTooltip("%s%s", applies ? "" : (item.backends == 1 ? "(Metal only: no effect on OpenGL) " : (item.backends == 4 ? "(Mali-G31 only) " : "(OpenGL / Vita only: no effect on this backend) ")), item.help);
                 if (!applies)
                 {
                     ImGui::PopStyleVar();
