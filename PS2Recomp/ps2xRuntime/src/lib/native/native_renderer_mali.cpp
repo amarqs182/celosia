@@ -1584,6 +1584,7 @@ struct MaliMesh
     bool pendingEvict = false;
     uint64_t gpuBytes = 0;
     uint64_t lastUsed = 0;
+    uint32_t revision = 0;
     // Phase 6C: Optional CPU source copy for safe GL_UNSIGNED_INT static run merging.
     std::vector<CompactVertex> srcVerts;
     std::vector<uint32_t> srcIndices;
@@ -1609,6 +1610,7 @@ struct MaliTex
     uint8_t fmtCode = 2;      // 0 = RGB565, 1 = RGB5_A1, 2 = RGBA8, 3..10 = ASTC
     uint64_t gpuBytes = 0;
     uint64_t lastUsed = 0;
+    uint32_t revision = 0;
     std::vector<uint8_t> rawData; // Phase 7G: kept for lazy 2D upload if a non-array draw needs tx.tex
     std::vector<uint32_t> astcLevelSizes;
 };
@@ -1811,6 +1813,7 @@ inline bool canMergeStatic(const QueuedDraw &a, const QueuedDraw &b)
 {
     return a.bucket == b.bucket &&
            a.bucket <= 2u &&
+           a.b2SortTier == b.b2SortTier &&
            a.mesh && b.mesh &&
            !a.mesh->dynamic && !b.mesh->dynamic &&
            !a.skinned && !b.skinned &&
@@ -1876,7 +1879,7 @@ inline bool canInstanceStatic(const QueuedDraw &a, const QueuedDraw &b)
 inline bool sameMaterialSuperGroup(const QueuedDraw &a, const QueuedDraw &b)
 {
     return a.bucket == b.bucket &&
-           (a.bucket <= 1u || (a.bucket == 2u && a.b2SortTier <= 1u && b.b2SortTier <= 1u && a.b2SortTier == b.b2SortTier)) &&
+           (a.bucket <= 1u || (a.bucket == 2u && (a.b2SortTier == 0u || a.b2SortTier == 2u) && a.b2SortTier == b.b2SortTier)) &&
            a.mesh && b.mesh &&
            !a.mesh->dynamic && !b.mesh->dynamic &&
            !a.skinned && !b.skinned &&
@@ -2439,6 +2442,7 @@ private:
         GlContextGuard guard;
         if (m_makeCurrent)
             m_makeCurrent();
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
 
 #if defined(__linux__)
         if (m_shaderCacheEnabled && !m_shaderCacheDir.empty())
@@ -2791,6 +2795,7 @@ private:
             if (cmd.kind == UploadCmd::StaticMesh || cmd.kind == UploadCmd::IndexedMesh)
             {
                 MaliMesh &mesh = m_meshes[cmd.id];
+                ++mesh.revision;
                 mesh.pendingEvict = false;
                 mesh.lastUsed = pkt.frameNum;
                 mesh.indexed = (cmd.kind == UploadCmd::IndexedMesh);
@@ -2860,6 +2865,7 @@ private:
             else if (cmd.kind == UploadCmd::SkinnedMesh)
             {
                 MaliMesh &mesh = m_meshes[cmd.id];
+                ++mesh.revision;
                 mesh.pendingEvict = false;
                 mesh.lastUsed = pkt.frameNum;
                 mesh.dynamic = false;
@@ -3530,6 +3536,7 @@ private:
         {
             const MaliMesh *m = m_qAll[j].mesh;
             key = fnv1aHash(&m_qAll[j].meshId, sizeof(uint64_t), key);
+            key = fnv1aHash(&m->revision, sizeof(uint32_t), key);
             if (texArrayId >= 0)
                 key = fnv1aHash(&m_qAll[j].texArrayLayer, sizeof(uint8_t), key);
             totalVerts += static_cast<uint32_t>(m->srcVerts.size());
@@ -3809,13 +3816,13 @@ private:
             if (mesh.skinned && (rd.state.skinPalette == 0u || rd.state.skinPalette > pkt.skinPalettes.size()))
             {
                 ++m_skinInvalidThisFrame;
-                if (m_statsEnabled && !m_skinInvalidLogged)
+                if (m_statsEnabled && m_skinInvalidLogCount < 8u)
                 {
                     std::fprintf(stderr, "[mali:skin:invalid] frame=%llu mesh=%016llx pal=%u pals=%zu\n",
                                  static_cast<unsigned long long>(m_frameNum),
                                  static_cast<unsigned long long>(rd.meshId),
                                  rd.state.skinPalette, pkt.skinPalettes.size());
-                    m_skinInvalidLogged = true;
+                    ++m_skinInvalidLogCount;
                 }
                 continue;
             }
@@ -3884,7 +3891,7 @@ private:
                 const bool canAlphaTestBucket = ate && (atst == 5u || atst == 6u) &&
                                                 !rd.state.background && !rd.state.overlay && !rd.state.noDepthWrite &&
                                                 rd.state.blend != Blend::Additive && rd.state.blend != Blend::Subtract;
-                const bool texOpaque = (texPtr == nullptr || texPtr->minAlpha >= 124u);
+                const bool texOpaque = (rd.state.texture == 0u) || (texPtr != nullptr && texPtr->minAlpha >= 124u);
                 const bool fullAlpha = !rd.state.fresnel && rd.state.opacity >= 0.99f && mesh.minAlpha >= 124u && texOpaque;
                 const bool alphaTestAlwaysPasses = !ate || (atst == 1u) ||
                                                    (fullAlpha && ((atst == 5u && aref8 <= 120u) ||
@@ -3919,7 +3926,7 @@ private:
                                          (rd.state.blend == Blend::Normal || rd.state.blend == Blend::Additive || rd.state.blend == Blend::Subtract);
                     const uint32_t b2Prog = canSoft ? (q.skinned ? (fastFog ? 11u : 4u) : (fastFog ? 8u : 12u)) : cutProg;
                     q.psoKey = makePsoKey(b2Prog, rd.state.blend, true, dw, df);
-                    q.b2SortTier = (!rd.state.overlay && dw && rd.state.blend == Blend::Opaque) ? 0u : (rd.state.overlay ? 1u : 2u);
+                    q.b2SortTier = rd.state.overlay ? 2u : (dw ? (rd.state.blend == Blend::Opaque ? 0u : 1u) : 3u);
                 }
             }
 
@@ -4012,7 +4019,7 @@ private:
             {
                 if (a.b2SortTier != b.b2SortTier)
                     return a.b2SortTier < b.b2SortTier;
-                if (a.b2SortTier <= 1u)
+                if (a.b2SortTier == 0u || a.b2SortTier == 2u)
                 {
                     if (a.psoKey != b.psoKey) return a.psoKey < b.psoKey;
                     if (a.stateHash != b.stateHash) return a.stateHash < b.stateHash;
@@ -4191,6 +4198,8 @@ private:
             {
                 makeTarget(mt, rw, rh, true, needDepthTex);
                 m_prevMainValid = false;
+                m_shadowDepthAttached = 0;
+                m_glowDepthAttached = 0;
             }
             if (m_waterMode >= 2 && hasReflectionSample && !m_mirrorTarget.fbo)
                 makeTarget(m_mirrorTarget, 256u, 256u, true, false);
@@ -4377,10 +4386,10 @@ private:
                 glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
                 if (shadowAmt > 0.0f)
                 {
-                    if (m_lastSamplerIdx != 0u)
+                    if (m_lastSamplerIdx != ~0u)
                     {
                         glBindSampler(0, 0);
-                        m_lastSamplerIdx = 0u;
+                        m_lastSamplerIdx = ~0u;
                     }
                     glDisable(GL_DEPTH_TEST);
                     glBindVertexArray(m_emptyVao);
@@ -4439,6 +4448,8 @@ private:
                 }
                 else
                 {
+                    glClearStencil(0);
+                    glClear(GL_STENCIL_BUFFER_BIT);
                     glDisable(GL_STENCIL_TEST);
                 }
                 resetPsoAndUniformCaches();
@@ -4459,10 +4470,10 @@ private:
                 for (size_t k = i; k < glowEnd; ++k)
                     emitBucketSingle(m_qAll[k], pkt);
 
-                if (m_lastSamplerIdx != 0u)
+                if (m_lastSamplerIdx != ~0u)
                 {
                     glBindSampler(0, 0);
-                    m_lastSamplerIdx = 0u;
+                    m_lastSamplerIdx = ~0u;
                 }
                 glDisable(GL_DEPTH_TEST);
                 glDepthMask(GL_FALSE);
@@ -4602,7 +4613,7 @@ private:
             };
 
             // Phase 6.1/7C/8 + Streaming Merge + Cross-Clip Instancing across Material Super-Groups.
-            if ((q.bucket <= 1u || (q.bucket == 2u && q.b2SortTier <= 1u)) &&
+            if ((q.bucket <= 1u || (q.bucket == 2u && (q.b2SortTier == 0u || q.b2SortTier == 2u))) &&
                 q.mesh && !q.mesh->dynamic && !q.skinned && !q.state.reflectionSample && !q.state.refractionSample)
             {
                 size_t superEnd = i + 1u;
@@ -4708,7 +4719,7 @@ private:
                 continue;
             }
 
-            if (m_mergeEnabled && q.bucket == 2u && q.b2SortTier == 2u && q.mesh && !q.mesh->dynamic && !q.skinned && !q.mesh->srcVerts.empty() &&
+            if (m_mergeEnabled && q.bucket == 2u && (q.b2SortTier == 1u || q.b2SortTier == 3u) && q.mesh && !q.mesh->dynamic && !q.skinned && !q.mesh->srcVerts.empty() &&
                 i + 1u < m_qAll.size() && canMergeStatic(q, m_qAll[i + 1u]))
             {
                 size_t groupEnd = i + 2u;
@@ -4854,10 +4865,10 @@ private:
             if (runPost)
             {
                 const uint64_t postStartUs = nowUs();
-                if (m_lastSamplerIdx != 0u)
+                if (m_lastSamplerIdx != ~0u)
                 {
                     glBindSampler(0, 0);
-                    m_lastSamplerIdx = 0u;
+                    m_lastSamplerIdx = ~0u;
                 }
                 glDisable(GL_DEPTH_TEST);
                 glDepthMask(GL_FALSE);
@@ -6037,10 +6048,11 @@ private:
             }
         }
 
-        // Reclaim CPU rawData from array textures unused for > 1800 frames (~30-45s) without evicting the GPU array texture.
+        // Reclaim CPU rawData only for textures that already have a standalone GL_TEXTURE_2D uploaded;
+        // array textures with !has2D keep rawData until ensureStandalone2D() uploads or the texture is evicted.
         for (auto &[id, t] : m_textures)
         {
-            if (t.arrayId >= 0 && !t.rawData.empty() && t.lastUsed + 1800u < m_frameNum)
+            if (t.has2D && !t.rawData.empty() && t.lastUsed + 1800u < m_frameNum)
             {
                 std::vector<uint8_t>().swap(t.rawData);
                 std::vector<uint32_t>().swap(t.astcLevelSizes);
@@ -6281,7 +6293,7 @@ private:
     uint32_t m_skinMaxQwordsThisFrame = 0;
     uint32_t m_skinInvalidThisFrame = 0;
     bool m_skinErrLogged = false;
-    bool m_skinInvalidLogged = false;
+    uint32_t m_skinInvalidLogCount = 0u;
     std::deque<UploadCmd> m_deferredUploads;
     uint64_t m_mergeSrcBytes = 0;
     uint64_t m_mergeRunBytes = 0;

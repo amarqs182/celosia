@@ -2796,6 +2796,7 @@ namespace sotc_native
     uint64_t g_skinnedPacketBytes = 0;                               // what they hold
     native_renderer::IdSet g_litPackets;                              // packets with normals
     native_renderer::IdSet g_skinnedIds;                              // g_skinnedPackets' keys (most packets are not: no map lookup for them)
+    native_renderer::IdSet g_everSkinnedIds;                          // packets ever identified as skinned (survives g_skinnedPackets 1800-frame sweep)
     uint64_t g_skinnedDraws = 0;                                       // this frame's skinned meshes
 
     // ---- Skinned parts as the display list's DMA reads them (round 12) -----
@@ -10917,6 +10918,7 @@ namespace sotc_native
                     g_skinnedPacketBytes += packet.bytes;
                     g_skinnedPackets.emplace(id, std::move(packet));
                     g_skinnedIds.insert(id);
+                    g_everSkinnedIds.insert(id);
                 }
                 return;
             }
@@ -12805,9 +12807,10 @@ namespace sotc_native
             const bool reorderSafe = !twoPasses && pktBlend == native_renderer::Blend::Opaque &&
                                      pktLayer >= 2u && pktLayer <= 11u &&
                                      ((pktFlags & 0x2200u) != 0x2200u) && (((pktFlags >> 17) & 1u) == 0u);
-            const bool ready1 = skinnedPacket || (known && e->ready) || native_renderer::meshKnown(id);
+            const bool knownStatic = !g_everSkinnedIds.count(id);
+            const bool ready1 = skinnedPacket || (knownStatic && ((known && e->ready) || native_renderer::meshKnown(id)));
             const bool ready2 = !twoPasses || (known && e->readyTwo) || native_renderer::meshKnown(id ^ (1ull << 61));
-            const bool needsBuild = !skinnedPacket && ((!ready1 && !native_renderer::hasMesh(id)) ||
+            const bool needsBuild = !skinnedPacket && (!knownStatic || (!ready1 && !native_renderer::hasMesh(id)) ||
                                                        (twoPasses && !ready2 && !native_renderer::hasMesh(id ^ (1ull << 61))));
             const bool fallbackReady = e && e->hasComplete && !skinnedPacket && native_renderer::meshKnown(e->completeId) &&
                                        (!twoPasses || (e->completeTwoPasses && native_renderer::meshKnown(e->completeId ^ (1ull << 61))));
@@ -12818,7 +12821,7 @@ namespace sotc_native
             bool here = false;
             if (needsBuild && !changedInPlace && native_renderer::tuning().asyncBuilds)
             {
-                here = isTerrainPkt && terrainBuildBudgetLeft();
+                here = !knownStatic || (isTerrainPkt && terrainBuildBudgetLeft());
                 if (!here && !native_renderer::asyncBudgetLeft())
                 {
                     if (fallbackReady)
@@ -12853,7 +12856,7 @@ namespace sotc_native
                 // Never stall the synchronous drawPacket hot path on SD-card I/O or mutex contention
                 // when asyncBuilds is enabled; only use the disk cache synchronously when asyncBuilds is off.
                 const bool useSyncDiskCache = !native_renderer::tuning().asyncBuilds;
-                const uint64_t syncCacheKey = (useSyncDiskCache && !changedInPlace && ((data & 0x1FFFFFFu) + size <= 0x2000000u))
+                const uint64_t syncCacheKey = (useSyncDiskCache && knownStatic && !changedInPlace && ((data & 0x1FFFFFFu) + size <= 0x2000000u))
                     ? staticMeshContentKey(g_ram + (data & 0x1FFFFFFu), size, twoPasses, reorderSafe, mode)
                     : 0ull;
                 bool syncHit = false;
@@ -12894,6 +12897,7 @@ namespace sotc_native
                         {
                             skinnedPacket = &g_skinnedPackets.emplace(id, makeSkinnedPacket(std::move(strips))).first->second;
                             g_skinnedIds.insert(id);
+                            g_everSkinnedIds.insert(id);
                         }
                         catch (const std::bad_alloc &)
                         {
@@ -12962,11 +12966,11 @@ namespace sotc_native
             {
                 // Publish as resolved only once all required passes are complete.
                 e->skinned = skinnedPacket;
-                e->ready = skinnedPacket || native_renderer::meshKnown(id);
+                e->ready = skinnedPacket || (knownStatic && native_renderer::meshKnown(id));
                 e->readyTwo = !twoPasses || native_renderer::meshKnown(id ^ (1ull << 61));
                 e->lit = g_litPackets.count(id);
                 e->resolved = e->ready && e->readyTwo;
-                if (e->resolved && !skinnedPacket)
+                if (e->resolved && !skinnedPacket && knownStatic)
                 {
                     e->completeId = id;
                     e->completeTwoPasses = twoPasses;
@@ -12974,7 +12978,7 @@ namespace sotc_native
                     e->hasComplete = true;
                 }
             }
-            const bool activeComplete = skinnedPacket || usingFallback || (native_renderer::meshKnown(id) && (!twoPasses || native_renderer::meshKnown(id ^ (1ull << 61))));
+            const bool activeComplete = skinnedPacket || usingFallback || (knownStatic && native_renderer::meshKnown(id) && (!twoPasses || native_renderer::meshKnown(id ^ (1ull << 61))));
             if (!activeComplete && !changedInPlace)
             {
                 // Replacement or new build in flight with no fallback: hold atomically so pass 1
