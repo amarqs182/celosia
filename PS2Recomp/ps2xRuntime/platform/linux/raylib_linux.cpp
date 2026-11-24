@@ -671,14 +671,14 @@ void InitWindow(int width, int height, const char *title)
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
     SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, std::getenv("SOTC_NATIVE_NOSHADOWS") ? 0 : 8);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+    const bool fullscreen = []() {
+        const char *e = std::getenv("SOTC_FULLSCREEN");
+        if (e) return std::atoi(e) != 0;
+        return true; // default full screen on embedded handhelds
+    }();
     SDL_DisplayMode dm{};
     if (SDL_GetCurrentDisplayMode(0, &dm) == 0 && dm.w > 0 && dm.h > 0)
     {
-        static const bool fullscreen = []() {
-            const char *e = std::getenv("SOTC_FULLSCREEN");
-            if (e) return std::atoi(e) != 0;
-            return true; // default full screen on embedded handhelds
-        }();
         if (fullscreen)
         {
             width = dm.w;
@@ -691,7 +691,7 @@ void InitWindow(int width, int height, const char *title)
     g_height = height;
 
     Uint32 winFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_ALLOW_HIGHDPI;
-    if (std::getenv("SOTC_FULLSCREEN") && std::atoi(std::getenv("SOTC_FULLSCREEN")) != 0)
+    if (fullscreen)
         winFlags |= SDL_WINDOW_FULLSCREEN;
     else
         winFlags |= SDL_WINDOW_RESIZABLE;
@@ -744,7 +744,7 @@ void InitWindow(int width, int height, const char *title)
                  glMajor, glMinor, reinterpret_cast<const char *>(glGetString(GL_VERSION)), glDepth, glStencil);
     g_glReady = true;
     initQuadProgram();
-    glViewport(0, 0, width, height);
+    glViewport(0, 0, g_width, g_height);
     // The screen transform (glOrtho(0, w, h, 0) on the Vita) lives in the
     // quad program's vertex shader; there is no fixed-function state here.
     glEnable(GL_BLEND);
@@ -1306,12 +1306,14 @@ void SetTextureFilter(Texture2D texture, int filter)
 
 bool IsKeyDown(int key)
 {
+    std::lock_guard<std::mutex> lock(g_inputMutex);
     const int i = keyIndex(key);
     return i >= 0 && g_keyDown[static_cast<size_t>(i)];
 }
 
 bool IsKeyPressed(int key)
 {
+    std::lock_guard<std::mutex> lock(g_inputMutex);
     const int i = keyIndex(key);
     return i >= 0 && g_keyPressed[static_cast<size_t>(i)];
 }
@@ -1346,13 +1348,17 @@ namespace
 
 bool IsGamepadAvailable(int gamepad)
 {
-    return gamepad == 0 && (g_controllers[0] != nullptr || g_controllers[1] != nullptr);
+    if (gamepad != 0)
+        return false;
+    std::lock_guard<std::mutex> lock(g_inputMutex);
+    return g_controllers[0] != nullptr || g_controllers[1] != nullptr;
 }
 
 bool IsGamepadButtonDown(int gamepad, int button)
 {
     if (gamepad != 0)
         return false;
+    std::lock_guard<std::mutex> lock(g_inputMutex);
     return (g_pad.buttons & gamepadButtonBit(button)) != 0u;
 }
 
@@ -1360,6 +1366,7 @@ bool IsGamepadButtonPressed(int gamepad, int button)
 {
     if (gamepad != 0)
         return false;
+    std::lock_guard<std::mutex> lock(g_inputMutex);
     return (g_padPressed & gamepadButtonBit(button)) != 0u;
 }
 
@@ -1367,6 +1374,11 @@ float GetGamepadAxisMovement(int gamepad, int axis)
 {
     if (gamepad != 0)
         return 0.0f;
+    PadState pad{};
+    {
+        std::lock_guard<std::mutex> lock(g_inputMutex);
+        pad = g_pad;
+    }
     auto norm = [](unsigned char v)
     {
         const float f = (static_cast<float>(v) - 128.0f) / 127.0f;
@@ -1374,10 +1386,10 @@ float GetGamepadAxisMovement(int gamepad, int axis)
     };
     switch (axis)
     {
-    case GAMEPAD_AXIS_LEFT_X: return norm(g_pad.lx);
-    case GAMEPAD_AXIS_LEFT_Y: return norm(g_pad.ly);
-    case GAMEPAD_AXIS_RIGHT_X: return norm(g_pad.rx);
-    case GAMEPAD_AXIS_RIGHT_Y: return norm(g_pad.ry);
+    case GAMEPAD_AXIS_LEFT_X: return norm(pad.lx);
+    case GAMEPAD_AXIS_LEFT_Y: return norm(pad.ly);
+    case GAMEPAD_AXIS_RIGHT_X: return norm(pad.rx);
+    case GAMEPAD_AXIS_RIGHT_Y: return norm(pad.ry);
     default: return 0.0f;
     }
 }

@@ -437,7 +437,7 @@ namespace ps2x::iop::detail
             rate = (voice.adsr1 >> 8u) & 0x7Fu, increase = true, exponential = (voice.adsr1 & 0x8000u) != 0u;
             break;
         case Phase::Decay:
-            if (voice.level <= (((voice.adsr1 & 0xFu) + 1) << 11))
+            if (voice.level <= static_cast<int32_t>(((voice.adsr1 & 0xFu) + 1u) << 11))
                 return 0;
             rate = ((voice.adsr1 >> 4u) & 0xFu) << 2u, increase = false, exponential = true;
             break;

@@ -142,7 +142,10 @@ namespace ps2_stubs
             uint32_t kernSrc = glyphSrc + 0x2010u;
             uint32_t kernAlloc = runtime->guestMalloc(0xc400u, 0x40u);
             if (glyphAlloc != 0u)
-                *reinterpret_cast<uint32_t *>(getMemPtr(rdram, glyphAlloc + 0x2000u)) = kernAlloc;
+            {
+                if (uint8_t *kp = getMemPtr(rdram, glyphAlloc + 0x2000u))
+                    *reinterpret_cast<uint32_t *>(kp) = kernAlloc;
+            }
             if (kernAlloc != 0u)
             {
                 uint8_t *dst = getMemPtr(rdram, kernAlloc);

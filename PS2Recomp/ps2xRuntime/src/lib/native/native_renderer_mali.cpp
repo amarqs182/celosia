@@ -235,8 +235,8 @@ inline uint64_t computeTexContentHash(const uint8_t *rgba, size_t len, uint32_t 
 }
 
 #if defined(PS2X_MALI_GLES)
-#define MALI_VERT_HDR "#version 310 es\nprecision highp float;\nprecision highp int;\n"
-#define MALI_FRAG_HDR "#version 310 es\nprecision mediump float;\nprecision highp int;\nprecision mediump sampler2D;\n"
+#define MALI_VERT_HDR "#version 320 es\nprecision highp float;\nprecision highp int;\n"
+#define MALI_FRAG_HDR "#version 320 es\nprecision mediump float;\nprecision highp int;\nprecision mediump sampler2D;\n"
 #else
 #define MALI_VERT_HDR "#version 330 core\n"
 #define MALI_FRAG_HDR "#version 330 core\n"
@@ -1452,7 +1452,7 @@ bool linkProgCached(ShaderProg &out, const char *name, const char *vsSrc, const 
     std::string binPath;
     if (useCache && !cacheDir.empty())
     {
-        binPath = cacheDir + "/" + name + "_v15.bin";
+        binPath = cacheDir + "/" + name + "_v16.bin";
         if (FILE *fp = std::fopen(binPath.c_str(), "rb"))
         {
             GLenum fmt = 0;
@@ -6048,14 +6048,42 @@ private:
             }
         }
 
-        // Reclaim CPU rawData only for textures that already have a standalone GL_TEXTURE_2D uploaded;
-        // array textures with !has2D keep rawData until ensureStandalone2D() uploads or the texture is evicted.
+        // Reclaim CPU rawData for textures that already have a standalone GL_TEXTURE_2D uploaded,
+        // and cap retained !has2D rawData at 24 MiB (LRU) so RAM stays bounded while keeping
+        // active character/horse array textures ready for ensureStandalone2D().
+        uint64_t totalRawBytes = 0;
+        std::vector<std::pair<uint64_t, uint64_t>> rawCands;
         for (auto &[id, t] : m_textures)
         {
-            if (t.has2D && !t.rawData.empty() && t.lastUsed + 1800u < m_frameNum)
+            if (t.rawData.empty())
+                continue;
+            if (t.has2D && t.lastUsed + 1800u < m_frameNum)
             {
                 std::vector<uint8_t>().swap(t.rawData);
                 std::vector<uint32_t>().swap(t.astcLevelSizes);
+            }
+            else
+            {
+                totalRawBytes += t.rawData.size();
+                if (t.lastUsed + 1800u < m_frameNum)
+                    rawCands.push_back({t.lastUsed, id});
+            }
+        }
+        constexpr uint64_t kMaxRetainedRawBytes = 24ull * 1024ull * 1024ull;
+        if (totalRawBytes > kMaxRetainedRawBytes && !rawCands.empty())
+        {
+            std::sort(rawCands.begin(), rawCands.end());
+            for (const auto &[used, id] : rawCands)
+            {
+                (void)used;
+                if (totalRawBytes <= kMaxRetainedRawBytes)
+                    break;
+                if (auto it = m_textures.find(id); it != m_textures.end() && !it->second.rawData.empty())
+                {
+                    totalRawBytes = (totalRawBytes >= it->second.rawData.size()) ? (totalRawBytes - it->second.rawData.size()) : 0ull;
+                    std::vector<uint8_t>().swap(it->second.rawData);
+                    std::vector<uint32_t>().swap(it->second.astcLevelSizes);
+                }
             }
         }
 
