@@ -460,6 +460,35 @@ namespace
     struct sigaction g_prevSigsegv{};
     bool g_sigsegvInstalled = false;
     std::atomic<uint64_t> g_fastmemTraps{0};
+    bool g_fastmemStatTraps = false;
+
+    static inline void writeFastmemEvent(const char *tag, uint32_t vaddr, uint64_t pc, uint32_t insn, uint64_t num)
+    {
+        char buf[160];
+        size_t pos = 0;
+        auto pushStr = [&](const char *s) {
+            while (*s && pos < sizeof(buf))
+                buf[pos++] = *s++;
+        };
+        auto pushHex = [&](uint64_t v, int digits) {
+            static constexpr char kHex[] = "0123456789abcdef";
+            for (int shift = (digits - 1) * 4; shift >= 0 && pos < sizeof(buf); shift -= 4)
+                buf[pos++] = kHex[(v >> shift) & 0xfu];
+        };
+        pushStr(tag);
+        pushStr(" vaddr=");
+        pushHex(vaddr, 8);
+        pushStr(" pc=");
+        pushHex(pc, 16);
+        pushStr(" insn=");
+        pushHex(insn, 8);
+        pushStr(" n=");
+        pushHex(num, 16);
+        if (pos < sizeof(buf))
+            buf[pos++] = '\n';
+        const ssize_t ignored = ::write(STDERR_FILENO, buf, pos);
+        (void)ignored;
+    }
 
     static inline int createFastmemFd(const char *name)
     {
@@ -720,20 +749,13 @@ namespace
                 {
                     uc->uc_mcontext.pc += 4u;
                     const uint64_t trapNum = g_fastmemTraps.fetch_add(1u, std::memory_order_relaxed) + 1u;
-                    static const bool statTraps = []() {
-                        const char *st = std::getenv("SOTC_FASTMEM_STAT");
-                        return st && std::atoi(st) != 0;
-                    }();
-                    if (statTraps && (trapNum <= 16u || (trapNum & (trapNum - 1u)) == 0u || (trapNum % 1000u) == 0u))
+                    if (g_fastmemStatTraps && (trapNum <= 16u || (trapNum & (trapNum - 1u)) == 0u || (trapNum % 1000u) == 0u))
                     {
-                        std::fprintf(stderr, "[fastmem] trap #%llu vaddr=%08x pc=%llx insn=%08x\n",
-                                     static_cast<unsigned long long>(trapNum), vaddr,
-                                     static_cast<unsigned long long>(uc->uc_mcontext.pc - 4u), insn);
+                        writeFastmemEvent("[fastmem] trap", vaddr, static_cast<uint64_t>(uc->uc_mcontext.pc - 4u), insn, trapNum);
                     }
                     return;
                 }
-                std::fprintf(stderr, "[fastmem] unhandled fault vaddr=%08x pc=%llx insn=%08x\n",
-                             vaddr, static_cast<unsigned long long>(uc->uc_mcontext.pc), insn);
+                writeFastmemEvent("[fastmem] unhandled fault", vaddr, static_cast<uint64_t>(uc->uc_mcontext.pc), insn, 0u);
             }
         }
         if (g_prevSigsegv.sa_flags & SA_SIGINFO)
@@ -748,10 +770,11 @@ namespace
         else
         {
             auto *uc = reinterpret_cast<ucontext_t *>(uctx);
-            std::fprintf(stderr, "[fastmem] external segv addr=%p base=%p pc=%llx traps=%llu\n",
-                         si ? si->si_addr : nullptr, static_cast<void *>(basePtr),
-                         uc ? static_cast<unsigned long long>(uc->uc_mcontext.pc) : 0ull,
-                         static_cast<unsigned long long>(g_fastmemTraps.load(std::memory_order_relaxed)));
+            writeFastmemEvent("[fastmem] external segv",
+                              static_cast<uint32_t>(reinterpret_cast<uintptr_t>(si ? si->si_addr : nullptr) & 0xffffffffu),
+                              uc ? static_cast<uint64_t>(uc->uc_mcontext.pc) : 0ull,
+                              0u,
+                              g_fastmemTraps.load(std::memory_order_relaxed));
             struct sigaction dfl{};
             dfl.sa_handler = SIG_DFL;
             ::sigaction(SIGSEGV, &dfl, nullptr);
@@ -761,6 +784,8 @@ namespace
 
     static void installFastmemSigsegv()
     {
+        const char *st = std::getenv("SOTC_FASTMEM_STAT");
+        g_fastmemStatTraps = (st && std::atoi(st) != 0);
         struct sigaction cur{};
         ::sigaction(SIGSEGV, nullptr, &cur);
         if ((cur.sa_flags & SA_SIGINFO) && cur.sa_sigaction == fastmemSigsegv)
@@ -1023,11 +1048,27 @@ bool PS2Memory::initialize(size_t ramSize)
         // Initialize I/O registers
         m_ioRegisters.clear();
 
-        // Initialize GS registers
-        memset(&gs_regs, 0, sizeof(gs_regs));
-        // memset zero-fills std::atomic<uint64_t>::csr's bytes, which is not itself
-        // a guaranteed-valid atomic store; make the zero-initialization explicit.
+        // Initialize GS registers explicitly (GSRegisters contains std::atomic fields).
+        gs_regs.pmode = 0;
+        gs_regs.smode1 = 0;
+        gs_regs.smode2 = 0;
+        gs_regs.srfsh = 0;
+        gs_regs.synch1 = 0;
+        gs_regs.synch2 = 0;
+        gs_regs.syncv = 0;
+        gs_regs.dispfb1 = 0;
+        gs_regs.display1 = 0;
+        gs_regs.dispfb2 = 0;
+        gs_regs.display2 = 0;
+        gs_regs.extbuf = 0;
+        gs_regs.extdata = 0;
+        gs_regs.extwrite = 0;
+        gs_regs.bgcolor = 0;
         gs_regs.csr.store(0);
+        gs_regs.vsyncTick.store(0);
+        gs_regs.imr = 0;
+        gs_regs.busdir = 0;
+        gs_regs.siglblid = 0;
         gs_regs.dispfb1 = (0ULL << 0) | (10ULL << 9) | (0ULL << 15) | (0ULL << 32) | (0ULL << 43);
         gs_regs.display1 = (0ULL << 0) | (0ULL << 12) | (0ULL << 23) | (0ULL << 27) | (639ULL << 32) | (447ULL << 44);
         gs_regs.dispfb2 = gs_regs.dispfb1;

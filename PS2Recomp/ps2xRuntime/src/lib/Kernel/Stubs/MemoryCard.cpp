@@ -289,7 +289,7 @@ namespace ps2_stubs
             std::tm tm{};
             if (!localtimeSafeMc(&value, &tm))
             {
-                std::memset(&out, 0, sizeof(out));
+                out = {};
                 return;
             }
 
@@ -308,7 +308,7 @@ namespace ps2_stubs
                                  uint32_t sizeBytes,
                                  std::time_t modifiedTime)
         {
-            std::memset(&entry, 0, sizeof(entry));
+            entry = {};
             writeMcDateTime(entry._Create, modifiedTime);
             writeMcDateTime(entry._Modify, modifiedTime);
             entry.FileSizeByte = isDirectory ? 0u : sizeBytes;

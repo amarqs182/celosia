@@ -163,7 +163,8 @@ void GS::init(uint8_t *vram, uint32_t vramSize, GSRegisters *privRegs)
 void GS::reset()
 {
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
-    std::memset(m_ctx, 0, sizeof(m_ctx));
+    m_ctx[0] = {};
+    m_ctx[1] = {};
     m_prim = {};
     m_primRegister = {};
     m_prmodeRegister = {};
