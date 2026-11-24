@@ -365,6 +365,71 @@ void main()
 }
 )";
 
+static const char *kMaliSkinArrVert = MALI_VERT_HDR R"(
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec4 aColor;
+layout(location = 3) in vec2 aUV;
+layout(location = 4) in vec3 aBone;
+layout(location = 5) in vec3 aWeight;
+
+uniform highp vec4 uBones[192];
+uniform vec4 uClip[4];
+uniform vec4 uDirections[4];
+uniform vec4 uColours[4];
+uniform vec4 uMisc;
+uniform vec4 uFogB;
+uniform vec4 uFogC;
+uniform vec4 uGuard;
+uniform highp float uTexLayerBias;
+
+out highp vec4 vUV;
+out mediump vec4 vColor;
+out highp vec4 vScreen;
+out highp float vLogW;
+flat out highp float vTexLayer;
+
+void main()
+{
+    int b0 = clamp(int(aBone.x + 0.5), 0, 188);
+    int b1 = clamp(int(aBone.y + 0.5), 0, 188);
+    int b2 = clamp(int(aBone.z + 0.5), 0, 188);
+    vec3 pos = aWeight.x * (uBones[b0].xyz * aPos.x + uBones[b0 + 1].xyz * aPos.y + uBones[b0 + 2].xyz * aPos.z + uBones[b0 + 3].xyz)
+             + aWeight.y * (uBones[b1].xyz * aPos.x + uBones[b1 + 1].xyz * aPos.y + uBones[b1 + 2].xyz * aPos.z + uBones[b1 + 3].xyz)
+             + aWeight.z * (uBones[b2].xyz * aPos.x + uBones[b2 + 1].xyz * aPos.y + uBones[b2 + 2].xyz * aPos.z + uBones[b2 + 3].xyz);
+    vec3 nrm = aWeight.x * (uBones[b0].xyz * aNormal.x + uBones[b0 + 1].xyz * aNormal.y + uBones[b0 + 2].xyz * aNormal.z)
+             + aWeight.y * (uBones[b1].xyz * aNormal.x + uBones[b1 + 1].xyz * aNormal.y + uBones[b1 + 2].xyz * aNormal.z)
+             + aWeight.z * (uBones[b2].xyz * aNormal.x + uBones[b2 + 1].xyz * aNormal.y + uBones[b2 + 2].xyz * aNormal.z);
+
+    vec4 c = uClip[0] * pos.x + uClip[1] * pos.y + uClip[2] * pos.z + uClip[3];
+    gl_Position = vec4(c.x, c.y, c.w - 0.2, c.w);
+
+    float wSafe = max(c.w, 1e-3);
+    float fog = uFogB.z > 0.5 ? clamp(uFogB.w + uFogC.x / wSafe, 0.0, 255.0) / 255.0 : 1.0;
+    vUV = vec4(aUV + uMisc.zw, c.w, fog * c.w);
+    vLogW = log2(wSafe);
+
+    vec4 col = aColor * (1.0 / 128.0);
+    col.a *= uMisc.y;
+    if (uMisc.x < -0.5)
+    {
+        vec4 p = uDirections[0] * pos.x + uDirections[1] * pos.y + uDirections[2] * pos.z + uDirections[3];
+        float ndv = dot(normalize(p.xyz), uDirections[1].xyz);
+        col.a *= 0.2 + 0.8 * (1.0 - abs(ndv));
+    }
+    else if (uMisc.x > 0.5)
+    {
+        vec4 d = max(uDirections[0] * nrm.x + uDirections[1] * nrm.y + uDirections[2] * nrm.z + uDirections[3], 0.0);
+        d.w = 1.0;
+        vec4 light = uColours[0] * d.x + uColours[1] * d.y + uColours[2] * d.z + uColours[3];
+        col.rgb = min(col.rgb * light.rgb, vec3(255.0 / 128.0));
+    }
+    vColor = col;
+    vScreen = vec4(c.x, c.y, c.w, uGuard.x > 0.0 ? c.w - uGuard.y : 1.0);
+    vTexLayer = uTexLayerBias;
+}
+)";
+
 static const char *kMaliDepthVert = MALI_VERT_HDR R"(
 layout(location = 0) in vec3 aPos;
 uniform vec4 uClip[4];
@@ -1452,7 +1517,7 @@ bool linkProgCached(ShaderProg &out, const char *name, const char *vsSrc, const 
     std::string binPath;
     if (useCache && !cacheDir.empty())
     {
-        binPath = cacheDir + "/" + name + "_v16.bin";
+        binPath = cacheDir + "/" + name + "_v17.bin";
         if (FILE *fp = std::fopen(binPath.c_str(), "rb"))
         {
             GLenum fmt = 0;
@@ -1774,9 +1839,14 @@ inline uint32_t toArrayProg(uint32_t progIdx)
     {
     case 0u: return 16u;
     case 1u: return 17u;
+    case 3u: return 22u;
+    case 4u: return 23u;
     case 6u: return 13u;
     case 7u: return 14u;
     case 8u: return 15u;
+    case 9u: return 24u;
+    case 10u: return 25u;
+    case 11u: return 26u;
     case 12u: return 18u;
     default: return progIdx;
     }
@@ -2524,6 +2594,11 @@ private:
             !linkTracked(m_progSkinOpaqueFast, "skin_opaque_fast", kMaliSkinVert, kMaliOpaqueFastFrag) ||
             !linkTracked(m_progSkinCutFast, "skin_cut_fast", kMaliSkinVert, kMaliCutFastFrag) ||
             !linkTracked(m_progSkinSoftFast, "skin_soft_fast", kMaliSkinVert, kMaliSoftFastFrag) ||
+            !linkTracked(m_progSkinArrOpaque, "skin_arr_opaque", kMaliSkinArrVert, kMaliArrOpaqueFrag) ||
+            !linkTracked(m_progSkinArrCut, "skin_arr_cut", kMaliSkinArrVert, kMaliArrCutFrag) ||
+            !linkTracked(m_progSkinArrOpaqueFast, "skin_arr_opaque_fast", kMaliSkinArrVert, kMaliArrOpaqueFastFrag) ||
+            !linkTracked(m_progSkinArrCutFast, "skin_arr_cut_fast", kMaliSkinArrVert, kMaliArrCutFastFrag) ||
+            !linkTracked(m_progSkinArrSoftFast, "skin_arr_soft_fast", kMaliSkinArrVert, kMaliArrSoftFastFrag) ||
             !linkTracked(m_progArrOpaqueFast, "arr_opaque_fast", kMaliWorldArrVert, kMaliArrOpaqueFastFrag) ||
             !linkTracked(m_progArrCutFast, "arr_cut_fast", kMaliWorldArrVert, kMaliArrCutFastFrag) ||
             !linkTracked(m_progArrSoftFast, "arr_soft_fast", kMaliWorldArrVert, kMaliArrSoftFastFrag) ||
@@ -2671,6 +2746,11 @@ private:
         delProg(m_progSkinOpaqueFast);
         delProg(m_progSkinCutFast);
         delProg(m_progSkinSoftFast);
+        delProg(m_progSkinArrOpaque);
+        delProg(m_progSkinArrCut);
+        delProg(m_progSkinArrOpaqueFast);
+        delProg(m_progSkinArrCutFast);
+        delProg(m_progSkinArrSoftFast);
         delProg(m_progArrOpaqueFast);
         delProg(m_progArrCutFast);
         delProg(m_progArrSoftFast);
@@ -3961,7 +4041,7 @@ private:
             {
                 q.texArrayId = (m_texArrayEnabled && texPtr && texPtr->arrayId >= 0) ? texPtr->arrayId : -1;
                 q.texArrayLayer = (q.texArrayId >= 0) ? texPtr->arrayLayer : 0u;
-                if (m_texArrayEnabled && !mesh.dynamic && !q.skinned && texPtr && q.texArrayId < 0 &&
+                if (m_texArrayEnabled && !mesh.dynamic && texPtr && q.texArrayId < 0 &&
                     texPtr->width >= 8u && texPtr->width <= 256u && texPtr->height >= 8u && texPtr->height <= 256u && texPtr->levels > 0u)
                 {
                     ++m_arrMissDrawsThisFrame;
@@ -4147,8 +4227,13 @@ private:
                                             for (size_t v = baseV; v < m_streamVertsScratch.size(); ++v)
                                                 m_streamVertsScratch[v].texLayer = lay;
                                         }
-                                        for (uint32_t idx : jm->srcIndices)
-                                            m_streamIndicesScratch.push_back(baseV + idx);
+                                        const size_t prevIdxCount = m_streamIndicesScratch.size();
+                                        const size_t srcIdxCount = jm->srcIndices.size();
+                                        m_streamIndicesScratch.resize(prevIdxCount + srcIdxCount);
+                                        uint32_t *dstIdx = m_streamIndicesScratch.data() + prevIdxCount;
+                                        const uint32_t *srcIdx = jm->srcIndices.data();
+                                        for (size_t k = 0; k < srcIdxCount; ++k)
+                                            dstIdx[k] = baseV + srcIdx[k];
                                     }
                                     m_streamChunks.push_back({firstIndex, chunkIndices, sq.texArrayId});
                                     m_streamChunkForDraw[s] = static_cast<int32_t>(m_streamChunks.size() - 1u);
@@ -5598,6 +5683,11 @@ private:
         m_progSkinOpaqueFast.shadow.reset();
         m_progSkinCutFast.shadow.reset();
         m_progSkinSoftFast.shadow.reset();
+        m_progSkinArrOpaque.shadow.reset();
+        m_progSkinArrCut.shadow.reset();
+        m_progSkinArrOpaqueFast.shadow.reset();
+        m_progSkinArrCutFast.shadow.reset();
+        m_progSkinArrSoftFast.shadow.reset();
         m_progArrOpaqueFast.shadow.reset();
         m_progArrCutFast.shadow.reset();
         m_progArrSoftFast.shadow.reset();
@@ -5638,6 +5728,11 @@ private:
         case 19u: return m_progWater;
         case 20u: return m_progRefract;
         case 21u: return m_progScreenCopy;
+        case 22u: return m_progSkinArrOpaque;
+        case 23u: return m_progSkinArrCut;
+        case 24u: return m_progSkinArrOpaqueFast;
+        case 25u: return m_progSkinArrCutFast;
+        case 26u: return m_progSkinArrSoftFast;
         default: return m_progDepth;
         }
     }
@@ -5869,7 +5964,7 @@ private:
         uint32_t psoKey = q.psoKey;
         int16_t useArrId = -1;
         float layerBias = 0.0f;
-        if (q.texArrayId >= 0 && !mesh.dynamic && !q.skinned)
+        if (q.texArrayId >= 0 && !mesh.dynamic)
         {
             const uint32_t baseProg = psoKey & 31u;
             const uint32_t arrProg = toArrayProg(baseProg);
@@ -6375,6 +6470,8 @@ private:
     ShaderProg m_progSkinOpaque{}, m_progSkinCut{}, m_progDepth{}, m_progPost{};
     ShaderProg m_progOpaqueFast{}, m_progCutFast{}, m_progSoftFast{}, m_progSoft{};
     ShaderProg m_progSkinOpaqueFast{}, m_progSkinCutFast{}, m_progSkinSoftFast{};
+    ShaderProg m_progSkinArrOpaque{}, m_progSkinArrCut{};
+    ShaderProg m_progSkinArrOpaqueFast{}, m_progSkinArrCutFast{}, m_progSkinArrSoftFast{};
     ShaderProg m_progArrOpaqueFast{}, m_progArrCutFast{}, m_progArrSoftFast{};
     ShaderProg m_progArrOpaque{}, m_progArrCut{}, m_progArrSoft{};
     ShaderProg m_progWater{}, m_progRefract{}, m_progScreenCopy{}, m_progShadowResolve{}, m_progGlowComp{};
