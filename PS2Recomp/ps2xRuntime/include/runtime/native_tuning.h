@@ -74,7 +74,8 @@ namespace native_renderer
         bool maliCa = false;            // SOTC_MALI_CA
         bool maliLensFlare = false;     // SOTC_MALI_LENS_FLARE
         bool maliAo = false;            // SOTC_MALI_AO
-        bool maliWater = true;          // SOTC_MALI_WATER
+        float maliShadows = 1.0f;       // SOTC_MALI_SHADOWS (0 off, 1 fast TBDR stencil, 2 soft PS2/PS3)
+        float maliWater = 1.0f;         // SOTC_MALI_WATER (0 off, 1 fast Fresnel, 2 real 256x256 mirror)
         bool maliTrilinear = false;     // SOTC_MALI_TRILINEAR
         float maliAniso = 0.0f;         // SOTC_MALI_ANISO (0 off, 1 2x, 2 4x)
         bool maliFxaa = false;          // SOTC_MALI_FXAA

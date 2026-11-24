@@ -1207,21 +1207,37 @@ void main()
 }
 )";
 
-// Phase 8B: Lightweight Fresnel-modulated water tint (zero extra reflection FBO pass).
+// Unified Mali Water: Mode 1 = Fast Fresnel, Mode 2 = Real 256x256 Mirror with PS2 32-band wave ripple.
 static const char *kMaliWaterFrag = MALI_FRAG_HDR R"(
 in highp vec4 vUV;
 in mediump vec4 vColor;
 in highp vec4 vScreen;
 in highp float vLogW;
 
-uniform highp vec4 uFogA;
+uniform sampler2D uTex;
+uniform highp vec4 uFogA;    // rippleT, rippleH, realMirror(0/1), rawMirror(0/1)
 uniform mediump vec4 uFogCol;
-uniform mediump vec4 uAlpha;
+uniform mediump vec4 uAlpha; // reflectionTint.rgba
 
 out mediump vec4 oColor;
 
 void main()
 {
+    if (uFogA.z > 0.5)
+    {
+        highp vec2 uv = vScreen.xy / max(vScreen.z, 1e-3) * 0.5 + 0.5;
+        if (uFogA.y > 0.0)
+        {
+            highp float band = floor(clamp(1.0 - uv.y, 0.0, 0.999) * 32.0);
+            uv.x += (sin(2.0 * (12.0 * band + uFogA.x) * 75.39822 / uFogA.y) + 1.0) * (6.4 * band / uFogA.y + 0.2) / 256.0;
+        }
+        mediump vec3 mir = texture(uTex, clamp(uv, vec2(0.002), vec2(0.998))).rgb;
+        if (uFogA.w > 0.5)
+            oColor = vec4(mir, 1.0);
+        else
+            oColor = vec4(clamp(mir * uAlpha.rgb * vColor.rgb, 0.0, 1.0), clamp(vColor.a * uAlpha.a, 0.0, 1.0));
+        return;
+    }
     mediump float fres = clamp(vColor.a, 0.0, 1.0);
     highp vec2 scr = vScreen.xy / max(vScreen.z, 1e-3);
     mediump float wave = 0.5 + 0.5 * sin(scr.x * 22.0 + scr.y * 14.0 + uFogA.x * 2.5);
@@ -1229,8 +1245,81 @@ void main()
     mediump vec3 skyCol = mix(vec3(0.52, 0.64, 0.72), uFogCol.rgb * 1.15, 0.65);
     mediump vec3 raw = mix(deepCol, skyCol, clamp(fres * 0.85 + wave * 0.12, 0.0, 1.0));
     mediump vec3 rgb = clamp(raw, 0.0, 1.0);
-    mediump float a = clamp((0.20 + fres * 0.55) * max(uAlpha.z, 0.35), 0.12, 0.78);
+    mediump float a = clamp((0.20 + fres * 0.55) * max(uAlpha.a, 0.35), 0.12, 0.78);
     oColor = vec4(rgb, a);
+}
+)";
+
+// Water Refraction (layer 9/19): samples on-demand 256x256 copy of the scene so far.
+static const char *kMaliRefractFrag = MALI_FRAG_HDR R"(
+in highp vec4 vUV;
+in mediump vec4 vColor;
+in highp vec4 vScreen;
+in highp float vLogW;
+
+uniform sampler2D uTex;
+uniform mediump vec4 uAlpha; // reflectionTint.rgba
+
+out mediump vec4 oColor;
+
+void main()
+{
+    highp vec2 scr = clamp(vScreen.xy / max(vScreen.z, 1e-3) * 0.5 + 0.5, vec2(0.002), vec2(0.998));
+    oColor = vec4(clamp(texture(uTex, scr).rgb * uAlpha.rgb, 0.0, 1.0), clamp(uAlpha.a, 0.0, 1.0));
+}
+)";
+
+// Heat Haze (screenCopy, layer 23) & Feedback (previousFrame): samples 256x256 copy or previous frame.
+static const char *kMaliScreenCopyFrag = MALI_FRAG_HDR R"(
+in highp vec2 vUV;
+in mediump vec4 vColor;
+
+uniform sampler2D uTex;
+uniform mediump vec4 uAlpha; // x = 1.0 for screenCopy (discard a < 0.02), 0.0 for previousFrame
+
+out mediump vec4 oColor;
+
+void main()
+{
+    mediump vec4 c = vec4(texture(uTex, vec2(vUV.x, 1.0 - vUV.y)).rgb, 1.0) * vColor;
+    if (uAlpha.x > 0.5 && c.a < 0.02)
+        discard;
+    oColor = c;
+}
+)";
+
+// Shadow Resolve: mode 0 = solid stencil darken, mode 1 = R8 mask write, mode 2 = soft R8 mask darken.
+static const char *kMaliShadowResolveFrag = MALI_FRAG_HDR R"(
+in highp vec2 vUV;
+uniform sampler2D uTex;
+uniform mediump vec4 uMisc; // x = amount, y = mode
+out mediump vec4 oColor;
+void main()
+{
+    if (uMisc.y > 1.5)
+        oColor = vec4(0.0, 0.0, 0.0, clamp(texture(uTex, vUV).r * uMisc.x, 0.0, 1.0));
+    else if (uMisc.y > 0.5)
+        oColor = vec4(1.0);
+    else
+        oColor = vec4(0.0, 0.0, 0.0, uMisc.x);
+}
+)";
+
+// Layer 8 Glow Composite: single-pass premultiplied composite of sharp (uTex) + blurred (uBackground) glow.
+static const char *kMaliGlowCompFrag = MALI_FRAG_HDR R"(
+in highp vec2 vUV;
+uniform sampler2D uTex;
+uniform sampler2D uBackground;
+uniform mediump vec4 uPostA; // tint.rgb, amountA
+uniform mediump vec4 uPostB; // tint.rgb, amountB
+out mediump vec4 oColor;
+void main()
+{
+    mediump vec4 s1 = texture(uTex, vUV);
+    mediump vec4 s2 = texture(uBackground, vUV);
+    mediump vec4 g1 = clamp(vec4(s1.rgb * uPostA.rgb, s1.a * uPostA.a), 0.0, 1.0);
+    mediump vec4 g2 = clamp(vec4(s2.rgb * uPostB.rgb, s2.a * uPostB.a), 0.0, 1.0);
+    oColor = vec4(g2.rgb * g2.a + g1.rgb * (g1.a * (1.0 - g2.a)), 1.0 - (1.0 - g1.a) * (1.0 - g2.a));
 }
 )";
 
@@ -1356,7 +1445,7 @@ bool linkProgCached(ShaderProg &out, const char *name, const char *vsSrc, const 
     std::string binPath;
     if (useCache && !cacheDir.empty())
     {
-        binPath = cacheDir + "/" + name + "_v14.bin";
+        binPath = cacheDir + "/" + name + "_v15.bin";
         if (FILE *fp = std::fopen(binPath.c_str(), "rb"))
         {
             GLenum fmt = 0;
@@ -1625,6 +1714,7 @@ struct FramePacket
     Fog fog{};
     Bloom bloom{};
     DepthOfField dof{};
+    GlowComposite glow{};
     std::vector<ScreenBlur> screenBlurs;
     std::vector<UploadCmd> uploads;
     std::vector<DynMeshRec> dynMeshes;
@@ -1648,6 +1738,7 @@ struct FramePacket
         draws.clear();
         screenBlurs.clear();
         dof = DepthOfField{};
+        glow = GlowComposite{};
         hold = false;
     }
 };
@@ -1710,6 +1801,8 @@ inline bool canMergeStatic(const QueuedDraw &a, const QueuedDraw &b)
            !a.mesh->dynamic && !b.mesh->dynamic &&
            !a.skinned && !b.skinned &&
            !a.state.reflectionSample && !b.state.reflectionSample &&
+           !a.state.refractionSample && !b.state.refractionSample &&
+           !a.state.shadowVolume && !b.state.shadowVolume &&
            !a.mesh->srcVerts.empty() && !b.mesh->srcVerts.empty() &&
            a.state.order == b.state.order &&
            a.psoKey == b.psoKey &&
@@ -1742,6 +1835,8 @@ inline bool canInstanceStatic(const QueuedDraw &a, const QueuedDraw &b)
            !a.mesh->dynamic && !b.mesh->dynamic &&
            !a.skinned && !b.skinned &&
            !a.state.reflectionSample && !b.state.reflectionSample &&
+           !a.state.refractionSample && !b.state.refractionSample &&
+           !a.state.shadowVolume && !b.state.shadowVolume &&
            a.stateHash == b.stateHash &&
            a.state.order == b.state.order &&
            a.psoKey == b.psoKey &&
@@ -1775,7 +1870,8 @@ public:
         m_cullEnabled = envBool("SOTC_MALI_CULL", true);
         m_tex16Enabled = envBool("SOTC_MALI_TEX16", true);
         m_tex5551Enabled = envBool("SOTC_MALI_TEX5551", false);
-        m_waterEnabled = envBool("SOTC_MALI_WATER", true);
+        m_waterMode = std::clamp(envInt("SOTC_MALI_WATER", 1), 0, 2);
+        m_shadowMode = std::clamp(envInt("SOTC_MALI_SHADOWS", 1), 0, 2);
         m_drsEnabled = envBool("SOTC_MALI_DRS", true);
         m_shaderCacheEnabled = envBool("SOTC_MALI_SHADER_CACHE", true);
         m_gpuSkinEnabled = envBool("SOTC_MALI_GPU_SKIN", true);
@@ -2000,8 +2096,6 @@ public:
 
     void draw(uint64_t meshId, const float clip[16], const DrawState &state) override
     {
-        if (state.shadowVolume || state.reflectionSource)
-            return;
         RawDraw rd{};
         rd.meshId = meshId;
         std::memcpy(rd.clip, clip, 16 * sizeof(float));
@@ -2013,7 +2107,7 @@ public:
     void setFog(const Fog &fog) override { m_rec.fog = fog; }
     void setBloom(const Bloom &bloom) override { m_rec.bloom = bloom; }
     void addScreenBlur(const ScreenBlur &b) override { m_rec.screenBlurs.push_back(b); }
-    void setGlowComposite(const GlowComposite &) override {}
+    void setGlowComposite(const GlowComposite &g) override { m_rec.glow = g; }
     void setDepthOfField(const DepthOfField &d) override { m_rec.dof = d; }
     void holdFrame() override { m_rec.hold = true; }
 
@@ -2389,6 +2483,10 @@ private:
             !linkTracked(m_progArrCut, "arr_cut", kMaliWorldArrVert, kMaliArrCutFrag) ||
             !linkTracked(m_progArrSoft, "arr_soft", kMaliWorldArrVert, kMaliArrSoftFrag) ||
             !linkTracked(m_progWater, "water", kMaliWorldVert, kMaliWaterFrag) ||
+            !linkTracked(m_progRefract, "refract", kMaliWorldVert, kMaliRefractFrag) ||
+            !linkTracked(m_progScreenCopy, "screen_copy", kMaliScreenVert, kMaliScreenCopyFrag) ||
+            !linkTracked(m_progShadowResolve, "shadow_resolve", kMaliPostVert, kMaliShadowResolveFrag) ||
+            !linkTracked(m_progGlowComp, "glow_comp", kMaliPostVert, kMaliGlowCompFrag) ||
             !linkTracked(m_progBloomMask, "bloom_mask", kMaliPostVert, kMaliBloomMaskFrag) ||
             !linkTracked(m_progKawase, "kawase", kMaliPostVert, kMaliKawaseFrag) ||
             !linkTracked(m_progTemporal, "temporal", kMaliPostVert, kMaliTemporalFrag) ||
@@ -2430,7 +2528,7 @@ private:
                      static_cast<unsigned long long>(m_texArrayBudgetBytes >> 20),
                      m_mergeEnabled ? 1 : 0, m_mergeChunkMax, m_instancingEnabled ? 1 : 0,
                      m_atPass2Mode, m_cullEnabled ? 1 : 0, m_gpuSkinEnabled ? 1 : 0,
-                     m_tex5551Enabled ? 1 : 0, m_waterEnabled ? 1 : 0,
+                     m_tex5551Enabled ? 1 : 0, m_waterMode,
                      m_trilinearEnabled ? 1 : 0, m_anisoLevel, m_maxAniso,
                      m_fxaaEnabled ? 1 : 0, m_rcasEnabled ? 1 : 0,
                      m_postBloomEnabled ? 1 : 0, m_exposureEnabled ? 1 : 0,
@@ -2487,6 +2585,15 @@ private:
         destroyTarget(m_dofHalf);
         destroyTarget(m_aoTarget);
         destroyTarget(m_aoBlur);
+        destroyTarget(m_mirrorTarget);
+        destroyTarget(m_copyTarget);
+        destroyTarget(m_shadowMask);
+        destroyTarget(m_shadowBlur);
+        destroyTarget(m_glowTarget);
+        destroyTarget(m_glowSmall[0]);
+        destroyTarget(m_glowSmall[1]);
+        m_shadowDepthAttached = 0;
+        m_glowDepthAttached = 0;
         if (m_whiteTex) { glDeleteTextures(1, &m_whiteTex); m_whiteTex = 0; }
         auto delProg = [](ShaderProg &p) { if (p.id) { glDeleteProgram(p.id); p.id = 0; } };
         delProg(m_progOpaque);
@@ -2510,6 +2617,10 @@ private:
         delProg(m_progArrCut);
         delProg(m_progArrSoft);
         delProg(m_progWater);
+        delProg(m_progRefract);
+        delProg(m_progScreenCopy);
+        delProg(m_progShadowResolve);
+        delProg(m_progGlowComp);
         delProg(m_progBloomMask);
         delProg(m_progKawase);
         delProg(m_progTemporal);
@@ -3508,7 +3619,12 @@ private:
             m_caEnabled = liveTune.maliCa;
             m_lensFlareEnabled = liveTune.maliLensFlare;
             m_aoEnabled = liveTune.maliAo;
-            m_waterEnabled = liveTune.maliWater;
+            m_waterMode = std::clamp(static_cast<int>(liveTune.maliWater + 0.5f), 0, 2);
+            m_shadowMode = std::clamp(static_cast<int>(liveTune.maliShadows + 0.5f), 0, 2);
+            m_glowEnabled = liveTune.glow;
+            m_refractionEnabled = liveTune.refraction;
+            m_rawMirror = liveTune.rawMirror;
+            m_skyImageEnabled = liveTune.skyImage;
             m_fxaaEnabled = liveTune.maliFxaa;
             m_rcasEnabled = liveTune.maliRcas;
             m_drsEnabled = liveTune.maliDrs;
@@ -3580,12 +3696,22 @@ private:
         // Build draw queues, pre-resolving MaliMesh* and MaliTex* once per draw.
         // Merge-eligible static draws defer culling so MergeRun keys stay camera-invariant across pans.
         m_qBg.clear();
+        m_qMirror.clear();
         m_qAll.clear();
         m_qAll.reserve(pkt.draws.size());
+        bool hasShadows = false;
+        bool hasReflectionSample = false;
+        bool hasCopyFx = false;
         uint64_t prevFurMeshId = 0ull;
         int furShellCount = 0;
         for (const RawDraw &rd : pkt.draws)
         {
+            if (rd.state.shadowVolume && m_shadowMode == 0)
+                continue;
+            if (rd.state.reflectionSource && m_waterMode < 2)
+                continue;
+            if (!m_skyImageEnabled && rd.state.background && !rd.state.reflectionSource)
+                continue;
             auto it = m_meshes.find(rd.meshId);
             if (it == m_meshes.end())
                 continue;
@@ -3593,7 +3719,7 @@ private:
             mesh.lastUsed = m_frameNum;
 
             MaliTex *texPtr = nullptr;
-            if (!rd.state.reflectionSample && rd.state.texture)
+            if (!rd.state.reflectionSample && !rd.state.refractionSample && !rd.state.screenCopy && !rd.state.previousFrame && rd.state.texture)
             {
                 auto tit = m_textures.find(rd.state.texture);
                 if (tit != m_textures.end() && (tit->second.tex != 0u || tit->second.arrayId >= 0))
@@ -3612,6 +3738,14 @@ private:
             q.state = rd.state;
             q.minW = 0.0f;
             q.seq = rd.seq;
+            if (rd.state.shadowVolume)
+            {
+                q.bucket = 4u;
+                q.psoKey = makePsoKey(5u, Blend::Opaque, true, false, 0u);
+                hasShadows = true;
+                m_qAll.push_back(q);
+                continue;
+            }
             if (mesh.skinned && (rd.state.skinPalette == 0u || rd.state.skinPalette > pkt.skinPalettes.size()))
             {
                 ++m_skinInvalidThisFrame;
@@ -3653,10 +3787,26 @@ private:
 
             if (rd.state.reflectionSample)
             {
-                if (!m_waterEnabled)
+                if (m_waterMode == 0)
                     continue;
                 q.bucket = 2u;
-                q.psoKey = makePsoKey(19u, Blend::Normal, true, false, 0u);
+                q.psoKey = makePsoKey(19u, rd.state.blend, true, false, 0u);
+                hasReflectionSample = true;
+            }
+            else if (rd.state.refractionSample)
+            {
+                if (!m_refractionEnabled)
+                    continue;
+                q.bucket = 2u;
+                q.psoKey = makePsoKey(20u, rd.state.blend, true, false, 0u);
+                hasCopyFx = true;
+            }
+            else if (rd.state.screenCopy || rd.state.previousFrame)
+            {
+                q.bucket = 3u;
+                q.psoKey = makePsoKey(21u, rd.state.blend, rd.state.screenDepthTest, false, 0u);
+                if (rd.state.screenCopy)
+                    hasCopyFx = true;
             }
             else if (rd.state.screen || rd.state.screenDepthTest)
             {
@@ -3713,7 +3863,7 @@ private:
                 }
             }
 
-            if (q.bucket <= 2u && !rd.state.reflectionSample)
+            if (q.bucket <= 2u && !rd.state.reflectionSample && !rd.state.refractionSample)
             {
                 q.texArrayId = (m_texArrayEnabled && texPtr && texPtr->arrayId >= 0) ? texPtr->arrayId : -1;
                 q.texArrayLayer = (q.texArrayId >= 0) ? texPtr->arrayLayer : 0u;
@@ -3743,8 +3893,8 @@ private:
                 q.stateHash = sh;
             }
 
-            const bool mergeCandidate = m_mergeEnabled && q.bucket <= 2u && !rd.state.reflectionSample && !mesh.dynamic && !q.skinned && !mesh.srcVerts.empty();
-            if (m_cullEnabled && mesh.hasBox && !mesh.dynamic && !mesh.skinned && !rd.state.screen && !rd.state.overlay && !rd.state.background)
+            const bool mergeCandidate = m_mergeEnabled && q.bucket <= 2u && !rd.state.reflectionSample && !rd.state.refractionSample && !mesh.dynamic && !q.skinned && !mesh.srcVerts.empty();
+            if (m_cullEnabled && mesh.hasBox && !mesh.dynamic && !mesh.skinned && !rd.state.screen && !rd.state.overlay && !rd.state.background && !rd.state.reflectionSource)
             {
                 if (mergeCandidate)
                 {
@@ -3762,6 +3912,11 @@ private:
                 }
             }
 
+            if (rd.state.reflectionSource)
+            {
+                m_qMirror.push_back(q);
+                continue;
+            }
             if (rd.state.background && m_fog.enabled)
             {
                 float bgMinW = 0.0f;
@@ -3817,13 +3972,16 @@ private:
         const uint32_t rh = std::max(240u, static_cast<uint32_t>(std::lround(pkt.height * scale)) & ~3u);
 
         bool has3D = false;
+        bool hasGlowDraws = false;
+        const bool wantGlowOrder = m_glowEnabled && pkt.glow.enabled && (pkt.glow.amountA > 0.0f || pkt.glow.amountB > 0.0f);
         for (const QueuedDraw &q : m_qAll)
         {
             if (q.bucket <= 2u)
-            {
                 has3D = true;
+            if (wantGlowOrder && q.bucket != 4u && q.state.order == pkt.glow.order)
+                hasGlowDraws = true;
+            if (has3D && (!wantGlowOrder || hasGlowDraws))
                 break;
-            }
         }
         const bool wantTeamIcoBloom = has3D && m_postEnabled && m_postBloomEnabled && m_bloom.enabled;
         const bool wantExposure = wantTeamIcoBloom && m_exposureEnabled;
@@ -3848,6 +4006,7 @@ private:
         const bool directScanout =
 #if defined(PS2X_LINUX_SDL2_SHIM)
             m_directScanoutEnabled && !m_hasLetterboxCrop && !runPost && !pkt.hold &&
+            !hasShadows && !hasGlowDraws && !hasCopyFx &&
             std::fabs(scale - 1.0f) <= 0.01f && fullViewportMatch &&
             static_cast<bool>(presentHook()) && drawW > 0u && drawH > 0u;
 #else
@@ -3868,6 +4027,30 @@ private:
             {
                 makeTarget(mt, rw, rh, true, needDepthTex);
                 m_prevMainValid = false;
+            }
+            if (m_waterMode >= 2 && hasReflectionSample && !m_mirrorTarget.fbo)
+                makeTarget(m_mirrorTarget, 256u, 256u, true, false);
+            if (hasCopyFx && !m_copyTarget.fbo)
+                makeTarget(m_copyTarget, 256u, 256u, false, false);
+            if (hasShadows && m_shadowMode >= 2)
+            {
+                if (m_shadowMask.width != rw || m_shadowMask.height != rh)
+                {
+                    makeTarget(m_shadowMask, rw, rh, false, false, true);
+                    m_shadowDepthAttached = 0;
+                }
+                if (!m_shadowBlur.fbo)
+                    makeTarget(m_shadowBlur, 160u, 120u, false, false, true);
+            }
+            if (hasGlowDraws)
+            {
+                if (m_glowTarget.width != rw || m_glowTarget.height != rh)
+                {
+                    makeTarget(m_glowTarget, rw, rh, false, false, false);
+                    m_glowDepthAttached = 0;
+                }
+                if (!m_glowSmall[0].fbo) makeTarget(m_glowSmall[0], 128u, 96u, false, false, false);
+                if (!m_glowSmall[1].fbo) makeTarget(m_glowSmall[1], 64u, 48u, false, false, false);
             }
             if (runPost && !directPostToFbo0 && (m_postTarget.width != pkt.width || m_postTarget.height != pkt.height))
                 makeTarget(m_postTarget, pkt.width, pkt.height, false);
@@ -3890,7 +4073,7 @@ private:
         resetPsoAndUniformCaches();
 
         // Phase 6A: Skip m_qBg -> m_bgTarget completely when !m_fog.enabled (ZFOG=0)!
-        if (m_fog.enabled && !m_qBg.empty() && m_bgTarget.fbo && (m_frameNum % m_bgRate == 0u || m_frameNum <= 2u))
+        if (m_fog.enabled && m_skyImageEnabled && !m_qBg.empty() && m_bgTarget.fbo && (m_frameNum % m_bgRate == 0u || m_frameNum <= 2u))
         {
             glBindFramebuffer(GL_FRAMEBUFFER, m_bgTarget.fbo);
             glViewport(0, 0, static_cast<GLsizei>(m_bgTarget.width), static_cast<GLsizei>(m_bgTarget.height));
@@ -3900,6 +4083,26 @@ private:
             for (const QueuedDraw &q : m_qBg)
                 emitDrawSingle(q, pkt, false, 0.02f, 0.0f);
             invalidateDepth();
+        }
+
+        if (!directScanout && m_waterMode >= 2 && hasReflectionSample && m_mirrorTarget.fbo && !m_qMirror.empty())
+        {
+            std::sort(m_qMirror.begin(), m_qMirror.end(), [](const QueuedDraw &a, const QueuedDraw &b) {
+                if (a.state.order != b.state.order) return a.state.order < b.state.order;
+                if (a.bucket != b.bucket) return a.bucket < b.bucket;
+                if (a.psoKey != b.psoKey) return a.psoKey < b.psoKey;
+                return a.seq < b.seq;
+            });
+            glBindFramebuffer(GL_FRAMEBUFFER, m_mirrorTarget.fbo);
+            glViewport(0, 0, static_cast<GLsizei>(m_mirrorTarget.width), static_cast<GLsizei>(m_mirrorTarget.height));
+            glDepthMask(GL_TRUE);
+            glClearColor(m_fog.colour[0], m_fog.colour[1], m_fog.colour[2], 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            resetPsoAndUniformCaches();
+            for (const QueuedDraw &mq : m_qMirror)
+                emitBucketSingle(mq, pkt);
+            invalidateDepth();
+            resetPsoAndUniformCaches();
         }
 
         if (directScanout)
@@ -3914,7 +4117,16 @@ private:
         }
         glDepthMask(GL_TRUE);
         glClearColor(m_fog.colour[0], m_fog.colour[1], m_fog.colour[2], 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        if (hasShadows)
+        {
+            glStencilMask(0xFF);
+            glClearStencil(0);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+        }
+        else
+        {
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        }
 
         if (m_zPrepassEnabled)
         {
@@ -3947,11 +4159,182 @@ private:
             return minA;
         };
 
+        bool copyValid = false;
+        uint32_t lastCopyOrder = ~0u;
         std::vector<size_t> deferredHud;
         for (size_t i = 0; i < m_qAll.size();)
         {
             const QueuedDraw &q = m_qAll[i];
-            if (runPost && q.bucket == 3u && q.state.order >= 20u && q.state.screen && !q.state.screenDepthTest)
+            if (q.bucket == 4u)
+            {
+                size_t runEnd = i + 1u;
+                while (runEnd < m_qAll.size() && m_qAll[runEnd].bucket == 4u && m_qAll[runEnd].state.order == q.state.order)
+                    ++runEnd;
+                float shadowAmt = 0.0f;
+                glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+                glDepthMask(GL_FALSE);
+                glEnable(GL_DEPTH_TEST);
+                glDepthFunc(GL_LEQUAL);
+                glDisable(GL_CULL_FACE);
+                glDisable(GL_BLEND);
+                glEnable(GL_STENCIL_TEST);
+                glStencilMask(0xFF);
+                glStencilFuncSeparate(GL_FRONT_AND_BACK, GL_ALWAYS, 0, 0xFF);
+                glStencilOpSeparate(GL_FRONT, GL_KEEP, GL_KEEP, GL_INCR_WRAP);
+                glStencilOpSeparate(GL_BACK, GL_KEEP, GL_KEEP, GL_DECR_WRAP);
+                for (size_t k = i; k < runEnd; ++k)
+                {
+                    if (m_qAll[k].state.shadow > 0.0f)
+                        shadowAmt = m_qAll[k].state.shadow;
+                    emitDrawSingle(m_qAll[k], pkt, false, 0.0f, 0.0f);
+                }
+                glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+                if (shadowAmt > 0.0f)
+                {
+                    if (m_lastSamplerIdx != 0u)
+                    {
+                        glBindSampler(0, 0);
+                        m_lastSamplerIdx = 0u;
+                    }
+                    glDisable(GL_DEPTH_TEST);
+                    glBindVertexArray(m_emptyVao);
+                    m_lastVao = m_emptyVao;
+                    if (m_shadowMode >= 2 && m_shadowMask.fbo && m_shadowBlur.fbo)
+                    {
+                        attachSharedDepthStencil(m_shadowMask.fbo, mt, m_shadowDepthAttached, m_shadowDepthAsTex);
+                        glBindFramebuffer(GL_FRAMEBUFFER, m_shadowMask.fbo);
+                        glViewport(0, 0, static_cast<GLsizei>(m_shadowMask.width), static_cast<GLsizei>(m_shadowMask.height));
+                        glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+                        glClear(GL_COLOR_BUFFER_BIT);
+                        glStencilFunc(GL_NOTEQUAL, 0, 0xFF);
+                        glStencilOp(GL_KEEP, GL_KEEP, GL_ZERO);
+                        glUseProgram(m_progShadowResolve.id);
+                        if (m_progShadowResolve.uMisc >= 0)
+                            glUniform4f(m_progShadowResolve.uMisc, 1.0f, 1.0f, 0.0f, 0.0f);
+                        glDrawArrays(GL_TRIANGLES, 0, 3);
+                        glDisable(GL_STENCIL_TEST);
+
+                        glBindFramebuffer(GL_FRAMEBUFFER, m_shadowBlur.fbo);
+                        glViewport(0, 0, static_cast<GLsizei>(m_shadowBlur.width), static_cast<GLsizei>(m_shadowBlur.height));
+                        glUseProgram(m_progKawase.id);
+                        glActiveTexture(GL_TEXTURE0);
+                        glBindTexture(GL_TEXTURE_2D, m_shadowMask.color);
+                        if (m_progKawase.uMisc >= 0)
+                            glUniform4f(m_progKawase.uMisc, 1.5f / static_cast<float>(m_shadowMask.width), 1.5f / static_cast<float>(m_shadowMask.height), 0.0f, 0.0f);
+                        glDrawArrays(GL_TRIANGLES, 0, 3);
+
+                        glBindFramebuffer(GL_FRAMEBUFFER, mt.fbo);
+                        glViewport(0, 0, static_cast<GLsizei>(mt.width), static_cast<GLsizei>(mt.height));
+                        glEnable(GL_BLEND);
+                        glBlendEquation(GL_FUNC_ADD);
+                        glBlendFuncSeparate(GL_ZERO, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
+                        glUseProgram(m_progShadowResolve.id);
+                        glActiveTexture(GL_TEXTURE0);
+                        glBindTexture(GL_TEXTURE_2D, m_shadowBlur.color);
+                        if (m_progShadowResolve.uMisc >= 0)
+                            glUniform4f(m_progShadowResolve.uMisc, shadowAmt, 2.0f, 0.0f, 0.0f);
+                        glDrawArrays(GL_TRIANGLES, 0, 3);
+                        glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                    }
+                    else
+                    {
+                        glStencilFunc(GL_NOTEQUAL, 0, 0xFF);
+                        glStencilOp(GL_KEEP, GL_KEEP, GL_ZERO);
+                        glEnable(GL_BLEND);
+                        glBlendEquation(GL_FUNC_ADD);
+                        glBlendFuncSeparate(GL_ZERO, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
+                        glUseProgram(m_progShadowResolve.id);
+                        if (m_progShadowResolve.uMisc >= 0)
+                            glUniform4f(m_progShadowResolve.uMisc, shadowAmt, 0.0f, 0.0f, 0.0f);
+                        glDrawArrays(GL_TRIANGLES, 0, 3);
+                        glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                        glDisable(GL_STENCIL_TEST);
+                    }
+                }
+                else
+                {
+                    glDisable(GL_STENCIL_TEST);
+                }
+                resetPsoAndUniformCaches();
+                i = runEnd;
+                continue;
+            }
+            if (hasGlowDraws && q.state.order == pkt.glow.order && m_glowTarget.fbo && m_glowSmall[0].fbo && m_glowSmall[1].fbo)
+            {
+                size_t glowEnd = i + 1u;
+                while (glowEnd < m_qAll.size() && m_qAll[glowEnd].state.order == pkt.glow.order && m_qAll[glowEnd].bucket != 4u)
+                    ++glowEnd;
+                attachSharedDepthStencil(m_glowTarget.fbo, mt, m_glowDepthAttached, m_glowDepthAsTex);
+                glBindFramebuffer(GL_FRAMEBUFFER, m_glowTarget.fbo);
+                glViewport(0, 0, static_cast<GLsizei>(m_glowTarget.width), static_cast<GLsizei>(m_glowTarget.height));
+                glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+                glClear(GL_COLOR_BUFFER_BIT);
+                resetPsoAndUniformCaches();
+                for (size_t k = i; k < glowEnd; ++k)
+                    emitBucketSingle(m_qAll[k], pkt);
+
+                if (m_lastSamplerIdx != 0u)
+                {
+                    glBindSampler(0, 0);
+                    m_lastSamplerIdx = 0u;
+                }
+                glDisable(GL_DEPTH_TEST);
+                glDepthMask(GL_FALSE);
+                glDisable(GL_BLEND);
+                glBindVertexArray(m_emptyVao);
+                m_lastVao = m_emptyVao;
+
+                glBindFramebuffer(GL_FRAMEBUFFER, m_glowSmall[0].fbo);
+                glViewport(0, 0, static_cast<GLsizei>(m_glowSmall[0].width), static_cast<GLsizei>(m_glowSmall[0].height));
+                glUseProgram(m_progKawase.id);
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, m_glowTarget.color);
+                if (m_progKawase.uMisc >= 0)
+                    glUniform4f(m_progKawase.uMisc, 1.5f / static_cast<float>(m_glowTarget.width), 1.5f / static_cast<float>(m_glowTarget.height), 0.0f, 0.0f);
+                glDrawArrays(GL_TRIANGLES, 0, 3);
+
+                glBindFramebuffer(GL_FRAMEBUFFER, m_glowSmall[1].fbo);
+                glViewport(0, 0, static_cast<GLsizei>(m_glowSmall[1].width), static_cast<GLsizei>(m_glowSmall[1].height));
+                glBindTexture(GL_TEXTURE_2D, m_glowSmall[0].color);
+                if (m_progKawase.uMisc >= 0)
+                    glUniform4f(m_progKawase.uMisc, 1.5f / static_cast<float>(m_glowSmall[0].width), 1.5f / static_cast<float>(m_glowSmall[0].height), 0.0f, 0.0f);
+                glDrawArrays(GL_TRIANGLES, 0, 3);
+
+                glBindFramebuffer(GL_FRAMEBUFFER, mt.fbo);
+                glViewport(0, 0, static_cast<GLsizei>(mt.width), static_cast<GLsizei>(mt.height));
+                glEnable(GL_BLEND);
+                glBlendEquation(GL_FUNC_ADD);
+                glBlendFuncSeparate(GL_ONE, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
+                glUseProgram(m_progGlowComp.id);
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, m_glowTarget.color);
+                glActiveTexture(GL_TEXTURE1);
+                glBindTexture(GL_TEXTURE_2D, m_glowSmall[1].color);
+                glActiveTexture(GL_TEXTURE0);
+                if (m_progGlowComp.uPostA >= 0)
+                    glUniform4f(m_progGlowComp.uPostA, pkt.glow.tint[0], pkt.glow.tint[1], pkt.glow.tint[2], pkt.glow.amountA);
+                if (m_progGlowComp.uPostB >= 0)
+                    glUniform4f(m_progGlowComp.uPostB, pkt.glow.tint[0], pkt.glow.tint[1], pkt.glow.tint[2], pkt.glow.amountB);
+                glDrawArrays(GL_TRIANGLES, 0, 3);
+                glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+                resetPsoAndUniformCaches();
+                i = glowEnd;
+                continue;
+            }
+            if ((q.state.refractionSample || q.state.screenCopy) && m_copyTarget.fbo && (!copyValid || lastCopyOrder != q.state.order))
+            {
+                glBindFramebuffer(GL_READ_FRAMEBUFFER, mt.fbo);
+                glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_copyTarget.fbo);
+                glBlitFramebuffer(0, 0, static_cast<GLint>(mt.width), static_cast<GLint>(mt.height),
+                                  0, 0, static_cast<GLint>(m_copyTarget.width), static_cast<GLint>(m_copyTarget.height),
+                                  GL_COLOR_BUFFER_BIT, GL_LINEAR);
+                glBindFramebuffer(GL_FRAMEBUFFER, mt.fbo);
+                glViewport(0, 0, static_cast<GLsizei>(mt.width), static_cast<GLsizei>(mt.height));
+                copyValid = true;
+                lastCopyOrder = q.state.order;
+            }
+            if (runPost && q.bucket == 3u && q.state.order >= 20u && q.state.screen && !q.state.screenDepthTest && !q.state.screenCopy && !q.state.previousFrame)
             {
                 deferredHud.push_back(i);
                 ++i;
@@ -4809,7 +5192,7 @@ private:
         hasBox = std::isfinite(lo[0] + lo[1] + lo[2] + hi[0] + hi[1] + hi[2]);
     }
 
-    static void makeTarget(MaliTarget &t, uint32_t w, uint32_t h, bool withDepth, bool depthAsTex = false)
+    static void makeTarget(MaliTarget &t, uint32_t w, uint32_t h, bool withDepth, bool depthAsTex = false, bool singleChannel = false)
     {
         destroyTarget(t);
         t.width = w;
@@ -4821,7 +5204,8 @@ private:
 
         glGenTextures(1, &t.color);
         glBindTexture(GL_TEXTURE_2D, t.color);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, static_cast<GLsizei>(w), static_cast<GLsizei>(h), 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexImage2D(GL_TEXTURE_2D, 0, singleChannel ? GL_R8 : GL_RGBA8, static_cast<GLsizei>(w), static_cast<GLsizei>(h), 0,
+                     singleChannel ? GL_RED : GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -4834,12 +5218,13 @@ private:
             {
                 glGenTextures(1, &t.depth);
                 glBindTexture(GL_TEXTURE_2D, t.depth);
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, static_cast<GLsizei>(w), static_cast<GLsizei>(h), 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, nullptr);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH24_STENCIL8, static_cast<GLsizei>(w), static_cast<GLsizei>(h), 0,
+                             GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, nullptr);
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, t.depth, 0);
+                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, t.depth, 0);
             }
             else
             {
@@ -4850,6 +5235,21 @@ private:
             }
         }
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
+
+    static void attachSharedDepthStencil(GLuint fbo, const MaliTarget &src, GLuint &cachedDepth, bool &cachedAsTex)
+    {
+        if (!fbo || !src.hasDepth || !src.depth)
+            return;
+        if (cachedDepth == src.depth && cachedAsTex == src.depthAsTex)
+            return;
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        if (src.depthAsTex)
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, src.depth, 0);
+        else
+            glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, src.depth);
+        cachedDepth = src.depth;
+        cachedAsTex = src.depthAsTex;
     }
 
     static void destroyTarget(MaliTarget &t)
@@ -4904,6 +5304,8 @@ private:
         m_progArrCut.shadow.reset();
         m_progArrSoft.shadow.reset();
         m_progWater.shadow.reset();
+        m_progRefract.shadow.reset();
+        m_progScreenCopy.shadow.reset();
         glDisable(GL_CULL_FACE);
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, m_bgTarget.color ? m_bgTarget.color : m_whiteTex);
@@ -4933,6 +5335,8 @@ private:
         case 17u: return m_progArrCut;
         case 18u: return m_progArrSoft;
         case 19u: return m_progWater;
+        case 20u: return m_progRefract;
+        case 21u: return m_progScreenCopy;
         default: return m_progDepth;
         }
     }
@@ -5003,7 +5407,27 @@ private:
     {
         float texAlphaScale = 0.0f;
         uint32_t texLevels = 1u;
-        if (texArrayId >= 0 && static_cast<size_t>(texArrayId) < m_texArrays.size())
+        const bool isSpecialSample = q.state.reflectionSample || q.state.refractionSample || q.state.screenCopy || q.state.previousFrame;
+        if (isSpecialSample)
+        {
+            GLuint glTex = m_whiteTex;
+            if (q.state.reflectionSample)
+                glTex = (m_waterMode >= 2 && m_mirrorTarget.color) ? m_mirrorTarget.color : m_whiteTex;
+            else if (q.state.previousFrame)
+                glTex = m_prevMainValid ? m_mainTarget[m_mainIdx ^ 1].color : m_mainTarget[m_mainIdx].color;
+            else
+                glTex = m_copyTarget.color ? m_copyTarget.color : m_whiteTex;
+            if (!glTex)
+                glTex = m_whiteTex;
+            if (glTex != m_lastTex)
+            {
+                glBindTexture(GL_TEXTURE_2D, glTex);
+                m_lastTex = glTex;
+            }
+            texLevels = 1u;
+            texAlphaScale = 1.0f;
+        }
+        else if (texArrayId >= 0 && static_cast<size_t>(texArrayId) < m_texArrays.size())
         {
             MaliTexArray &arr = m_texArrays[texArrayId];
             if (arr.tex != m_lastTexArr)
@@ -5030,7 +5454,7 @@ private:
         }
         if (m_samplers[0])
         {
-            const uint32_t sampIdx = ((texLevels > 1u) ? 4u : 0u) | (q.state.clamp & 3u);
+            const uint32_t sampIdx = isSpecialSample ? 3u : (((texLevels > 1u) ? 4u : 0u) | (q.state.clamp & 3u));
             if (sampIdx != m_lastSamplerIdx)
             {
                 glBindSampler(0, m_samplers[sampIdx]);
@@ -5103,9 +5527,24 @@ private:
 
         if (q.state.reflectionSample)
         {
-            setCached4f(prog.uFogA, sh.fogA, v, q.state.mirrorRipple[0], q.state.mirrorRipple[1], 0.0f, 0.0f);
+            setCached4f(prog.uFogA, sh.fogA, v, q.state.mirrorRipple[0], q.state.mirrorRipple[1],
+                        m_waterMode >= 2 ? 1.0f : 0.0f, m_rawMirror ? 1.0f : 0.0f);
             setCached4f(prog.uGuard, sh.guard, v, 0.0f, 0.0f, 0.0f, 0.0f);
-            setCached4f(prog.uAlpha, sh.alpha, v, minAlpha, maxAlpha, q.state.reflectionTint[3], 0.0f);
+            setCached4f(prog.uAlpha, sh.alpha, v, q.state.reflectionTint[0], q.state.reflectionTint[1],
+                        q.state.reflectionTint[2], q.state.reflectionTint[3]);
+        }
+        else if (q.state.refractionSample)
+        {
+            setCached4f(prog.uFogA, sh.fogA, v, 0.0f, 0.0f, 0.0f, 0.0f);
+            setCached4f(prog.uGuard, sh.guard, v, 0.0f, 0.0f, 0.0f, 0.0f);
+            setCached4f(prog.uAlpha, sh.alpha, v, q.state.reflectionTint[0], q.state.reflectionTint[1],
+                        q.state.reflectionTint[2], q.state.reflectionTint[3]);
+        }
+        else if (q.state.screenCopy || q.state.previousFrame)
+        {
+            setCached4f(prog.uFogA, sh.fogA, v, 0.0f, 0.0f, 0.0f, 0.0f);
+            setCached4f(prog.uGuard, sh.guard, v, 0.0f, 0.0f, q.state.screenDepthTest ? 1.0f : 0.0f, 0.0f);
+            setCached4f(prog.uAlpha, sh.alpha, v, q.state.screenCopy ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
         }
         else
         {
@@ -5457,7 +5896,12 @@ private:
     bool m_cullEnabled = true;
     bool m_tex16Enabled = true;
     bool m_tex5551Enabled = false;
-    bool m_waterEnabled = true;
+    int m_waterMode = 1;
+    int m_shadowMode = 1;
+    bool m_glowEnabled = true;
+    bool m_refractionEnabled = false;
+    bool m_rawMirror = false;
+    bool m_skyImageEnabled = true;
     bool m_drsEnabled = true;
     bool m_shaderCacheEnabled = true;
     bool m_gpuSkinEnabled = true;
@@ -5580,12 +6024,15 @@ private:
     ShaderProg m_progSkinOpaqueFast{}, m_progSkinCutFast{}, m_progSkinSoftFast{};
     ShaderProg m_progArrOpaqueFast{}, m_progArrCutFast{}, m_progArrSoftFast{};
     ShaderProg m_progArrOpaque{}, m_progArrCut{}, m_progArrSoft{};
-    ShaderProg m_progWater{};
+    ShaderProg m_progWater{}, m_progRefract{}, m_progScreenCopy{}, m_progShadowResolve{}, m_progGlowComp{};
     ShaderProg m_progBloomMask{}, m_progKawase{}, m_progTemporal{}, m_progAo{}, m_progAoBlur{};
     GLuint m_emptyVao = 0;
     GLuint m_whiteTex = 0;
-    MaliTarget m_mainTarget[2]{}, m_postTarget{}, m_bgTarget{};
+    MaliTarget m_mainTarget[2]{}, m_postTarget{}, m_bgTarget{}, m_mirrorTarget{}, m_copyTarget{};
+    MaliTarget m_shadowMask{}, m_shadowBlur{}, m_glowTarget{}, m_glowSmall[2]{};
     MaliTarget m_bloomQuarter{}, m_bloomEighth{}, m_bloomHist[2]{}, m_dofHalf{}, m_aoTarget{}, m_aoBlur{};
+    GLuint m_shadowDepthAttached = 0, m_glowDepthAttached = 0;
+    bool m_shadowDepthAsTex = false, m_glowDepthAsTex = false;
     int m_mainIdx = 0;
     int m_lastPresentedMain = 0;
     int m_bloomHistIdx = 0;
@@ -5611,7 +6058,7 @@ private:
     std::vector<uint32_t> m_mergeIndicesScratch;
     std::vector<std::pair<uint64_t, uint64_t>> m_evictRunsScratch;
     std::vector<const QueuedDraw *> m_instScratch;
-    std::vector<QueuedDraw> m_qBg, m_qAll;
+    std::vector<QueuedDraw> m_qBg, m_qMirror, m_qAll;
     std::unordered_set<uint64_t> m_drawnMeshIdsScratch;
     std::unordered_set<uint64_t> m_drawnTexIdsScratch;
     std::unordered_set<uint64_t> m_dumpedTexIds;
