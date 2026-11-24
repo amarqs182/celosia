@@ -9104,7 +9104,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             }
             const Mesh *prevFurMesh = nullptr;
             int furShellCount = 0;
-            const int maxFurShells = native_renderer::tuning().furShells;
+            const int maxFurShells = static_cast<int>(native_renderer::tuning().furShells + 0.5f);
             const uint64_t drawLoopStart = phases.on ? native_renderer::nowUs() : 0u;
             for (size_t li = firstAt; li < endAt; ++li)
             {
