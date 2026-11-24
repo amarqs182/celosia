@@ -216,8 +216,10 @@ namespace native_renderer
                 d.maliLensFlare = std::atoi(std::getenv("SOTC_MALI_LENS_FLARE")) != 0;
             if (on("SOTC_MALI_AO"))
                 d.maliAo = std::atoi(std::getenv("SOTC_MALI_AO")) != 0;
+            if (on("SOTC_MALI_SHADOWS"))
+                d.maliShadows = static_cast<float>(std::clamp(std::atoi(std::getenv("SOTC_MALI_SHADOWS")), 0, 2));
             if (on("SOTC_MALI_WATER"))
-                d.maliWater = std::atoi(std::getenv("SOTC_MALI_WATER")) != 0;
+                d.maliWater = static_cast<float>(std::clamp(std::atoi(std::getenv("SOTC_MALI_WATER")), 0, 2));
             if (on("SOTC_MALI_TRILINEAR"))
                 d.maliTrilinear = std::atoi(std::getenv("SOTC_MALI_TRILINEAR")) != 0;
             if (on("SOTC_MALI_ANISO"))
@@ -311,16 +313,12 @@ namespace native_renderer
             const bool isMali = isMaliEnv();
             if (isMali)
             {
-                d.shadows = false;
-                d.bodyShadows = false;
-                d.reflections = false;
-                d.refraction = false;
-                d.glow = false;
-                d.heatHaze = false;
                 d.bloom = d.maliBloom;
                 d.depthOfField = d.maliDof;
                 d.screenBlur = d.maliMotionBlur >= 0.5f;
                 d.feedback = d.maliMotionBlur >= 1.5f;
+                d.shadows = d.maliShadows >= 0.5f;
+                d.reflections = d.maliWater >= 1.5f;
             }
             d.maliProfile = static_cast<float>(matchingMaliProfile(d));
             if (!isMali) if ((!d.glSoftCut && !d.glAt98) || (!d.glMergeDraws && d.glSort87)) std::fprintf(stderr, "[native] WARNING: conflicting GL tuning (%s%s)\n", (!d.glSoftCut && !d.glAt98) ? "!glSoftCut&&!glAt98 " : "", (!d.glMergeDraws && d.glSort87) ? "!glMergeDraws&&glSort87" : "");
@@ -578,10 +576,14 @@ namespace native_renderer
              "160x120 quarter-res 4-tap contact SSAO with 2x2 dither-canceling blur.",
              "Oclusão de contato SSAO 160x120 com filtro 2x2 anti-ruído.",
              &Tuning::maliAo, nullptr, 0, 1, 1, "SOTC_MALI_AO"},
-            {"mali_water", "Mali Fresnel Water", "Água Fresnel Mali",
-             "Lightweight Fresnel-modulated water tint without an extra reflection render pass.",
-             "Superfície de água leve com Fresnel e cor do céu sem passe extra de reflexão.",
-             &Tuning::maliWater, nullptr, 0, 1, 1, "SOTC_MALI_WATER"},
+            {"mali_shadows", "Shadows (Mali-G31)", "Sombras (Mali-G31)",
+             "Off: none. Fast Stencil: single-pass tile-local TBDR stencil darken. Soft (PS2/PS3): R8 stencil mask + 160x120 Kawase penumbra blur.",
+             "Desligado: nenhuma. Stencil rápido: escurecimento em 1 passe direto na SRAM do Mali. Suaves (PS2/PS3): máscara R8 + borrão Kawase 160x120.",
+             nullptr, &Tuning::maliShadows, 0.0f, 2.0f, 1.0f, "SOTC_MALI_SHADOWS"},
+            {"mali_water", "Water reflections (Mali)", "Reflexos na água (Mali)",
+             "Off: disables water reflections. Fast Fresnel: lightweight Fresnel sky reflection with zero extra geometry pass. Real Mirror (256x256): renders mirrored world layers 12-13 with PS2 32-band wave ripple.",
+             "Desligado: desativa reflexos na água. Fresnel rápido: reflexo leve sem passe extra de geometria. Espelho real (256x256): renderiza as camadas 12-13 espelhadas com ondulação de 32 bandas do PS2.",
+             nullptr, &Tuning::maliWater, 0.0f, 2.0f, 1.0f, "SOTC_MALI_WATER"},
             {"mali_trilinear", "Mali Trilinear Filtering", "Filtro Trilinear Mali",
              "Smooths mipmap transitions on multi-mip textures via hardware sampler objects.",
              "Suaviza transições entre níveis de mipmap nas texturas usando objetos sampler da GPU.",
@@ -997,7 +999,8 @@ namespace native_renderer
             {"mali_ca", 3, "Cost: near zero in final pass.", "Custo: quase zero no passe final."},
             {"mali_lens_flare", 3, "Cost: near zero (reuses bloom buffer).", "Custo: quase zero (reutiliza buffer do bloom)."},
             {"mali_ao", 3, "Cost: medium GPU (160x120 4-tap depth SSAO + blur).", "Custo: GPU médio (SSAO 160x120 + borrão)."},
-            {"mali_water", 3, "Cost: very low GPU (no reflection pass).", "Custo: GPU muito baixo (sem passe de reflexão)."},
+            {"mali_shadows", 4, "Cost: Fast Stencil is tile-local; Soft adds a 160x120 R8 blur pass.", "Custo: Stencil rápido fica na SRAM do tile; Suaves adiciona borrão R8 160x120."},
+            {"mali_water", 6, "Cost: Fast Fresnel has no extra pass; Real Mirror renders layers 12-13 at 256x256.", "Custo: Fresnel rápido sem passe extra; Espelho real renderiza camadas 12-13 em 256x256."},
             {"mali_trilinear", 2, "Cost: low GPU (mip interpolation).", "Custo: GPU baixo (interpolação entre mips)."},
             {"mali_aniso", 2, "Cost: low-medium GPU (2x/4x anisotropic taps).", "Custo: GPU baixo a médio (amostras anisotrópicas 2x/4x)."},
             {"mali_fxaa", 2, "Cost: low GPU (fused in post pass).", "Custo: GPU baixo (fundido no passe pós)."},
@@ -1071,14 +1074,12 @@ namespace native_renderer
                      key == "dbg_render_thread" || key == "dbg_warm_shaders" || key == "dbg_gl_pools" ||
                      key == "dbg_gl_merge" || key == "dbg_gl_lean" || key == "dbg_gl_nodiscard")
                 item.backends = 2;
-            else if (key == "gfx_preset" || key == "texture_filter" || key == "bloom" || key == "glow" || key == "dof" ||
-                     key == "screen_blur" || key == "feedback" || key == "shadows" || key == "body_shadows" ||
-                     key == "reflections" || key == "refraction" || key == "heat_haze" ||
-                     key == "dbg_raw_mirror" || key == "dbg_sky")
+            else if (key == "gfx_preset" || key == "texture_filter" || key == "bloom" || key == "dof" ||
+                     key == "screen_blur" || key == "feedback" || key == "shadows" || key == "reflections")
                 item.backends = 3;
             else if (key == "mali_profile" || key == "mali_bloom" || key == "mali_exposure" || key == "mali_dof" ||
                      key == "mali_motion_blur" || key == "mali_ca" || key == "mali_lens_flare" || key == "mali_ao" ||
-                     key == "mali_water" || key == "mali_trilinear" || key == "mali_aniso" || key == "mali_fxaa" ||
+                     key == "mali_shadows" || key == "mali_water" || key == "mali_trilinear" || key == "mali_aniso" || key == "mali_fxaa" ||
                      key == "mali_rcas" || key == "mali_drs" || key == "mali_drs_min" || key == "mali_at_pass2" ||
                      key == "mali_bg_rate" || key == "mali_fast_shaders" || key == "mali_cull" || key == "mali_merge" ||
                      key == "mali_instancing" || key == "mali_tex16" || key == "mali_texarray" ||
@@ -1200,10 +1201,18 @@ namespace native_renderer
             static const char *maliAnisoPt[] = {"Desligado", "2x", "4x"};
             static const char *maliAtPass2En[] = {"Off", "Smart Auto", "Always"};
             static const char *maliAtPass2Pt[] = {"Desligado", "Auto inteligente", "Sempre"};
+            static const char *maliShadowsEn[] = {"Off", "Fast Stencil", "Soft (PS2/PS3)"};
+            static const char *maliShadowsPt[] = {"Desligado", "Stencil rápido", "Suaves (PS2/PS3)"};
+            static const char *maliWaterEn[] = {"Off", "Fast Fresnel", "Real Mirror (256x256)"};
+            static const char *maliWaterPt[] = {"Desligado", "Fresnel rápido", "Espelho real (256x256)"};
             static const char *maliProfileEn[] = {"Max Performance", "Medium", "Original (PS2/PS3)", "Custom"};
             static const char *maliProfilePt[] = {"Desempenho máximo", "Médio", "Original (PS2/PS3)", "Personalizado"};
             if (item.number == &Tuning::maliProfile)
                 return {4, maliProfileEn, maliProfilePt};
+            if (item.number == &Tuning::maliShadows)
+                return {3, maliShadowsEn, maliShadowsPt};
+            if (item.number == &Tuning::maliWater)
+                return {3, maliWaterEn, maliWaterPt};
             if (item.number == &Tuning::maliAtPass2)
                 return {3, maliAtPass2En, maliAtPass2Pt};
             if (item.number == &Tuning::maliAniso)
@@ -1241,12 +1250,17 @@ namespace native_renderer
             {"mali_bloom", &Tuning::maliBloom, nullptr},
             {"bloom_strength", nullptr, &Tuning::bloomStrength},
             {"mali_exposure", &Tuning::maliExposure, nullptr},
+            {"glow", &Tuning::glow, nullptr},
             {"mali_dof", &Tuning::maliDof, nullptr},
             {"mali_motion_blur", nullptr, &Tuning::maliMotionBlur},
             {"mali_ca", &Tuning::maliCa, nullptr},
             {"mali_lens_flare", &Tuning::maliLensFlare, nullptr},
             {"mali_ao", &Tuning::maliAo, nullptr},
-            {"mali_water", &Tuning::maliWater, nullptr},
+            {"mali_shadows", nullptr, &Tuning::maliShadows},
+            {"body_shadows", &Tuning::bodyShadows, nullptr},
+            {"mali_water", nullptr, &Tuning::maliWater},
+            {"refraction", &Tuning::refraction, nullptr},
+            {"heat_haze", &Tuning::heatHaze, nullptr},
             {"vertex_fog", &Tuning::vertexFog, nullptr},
             {"fog_amount", nullptr, &Tuning::vertexFogAmount},
             {"zfog", &Tuning::zFog, nullptr},
@@ -1276,11 +1290,11 @@ namespace native_renderer
         constexpr int kMaliProfileFieldCount = static_cast<int>(sizeof(kMaliProfileFields) / sizeof(kMaliProfileFields[0]));
         constexpr float kMaliProfileValues[kMaliProfileCustom][kMaliProfileFieldCount] = {
             // Max Performance: max FPS regardless of visuals
-            {0.75f, 1, 0.50f, 0, 0, 0, 0,  0, 1.0f, 0, 0, 0, 0, 0, 0, 0,  0, 1.0f, 0, 4,  0, 1, 1, 0, 0, 2,  0, 1, 1, 1, 1,  1, 1, 1, 1, 1, 1, 1, 1, 1, 0},
+            {0.75f, 1, 0.50f, 0, 0, 0, 0,  0, 1.0f, 0, 0, 0, 0, 0, 0, 0,  0, 0, 0, 0, 0,  0, 1.0f, 0, 4,  0, 1, 1, 0, 0, 2,  0, 1, 1, 1, 1,  1, 1, 1, 1, 1, 1, 1, 1, 1, 0},
             // Medium: balanced native visuals + light Team ICO post-FX
-            {1.00f, 1, 0.65f, 0, 0, 0, 1,  1, 1.0f, 1, 0, 1, 0, 1, 0, 1,  1, 1.0f, 0, 2,  1, 1, 0, 1, 1, 4,  0, 0, 0, 1, 0,  1, 1, 1, 1, 1, 1, 1, 1, 1, 0},
+            {1.00f, 1, 0.65f, 0, 0, 0, 1,  1, 1.0f, 1, 1, 0, 1, 0, 1, 0,  1, 1, 1, 0, 0,  1, 1.0f, 0, 2,  1, 1, 0, 1, 1, 4,  0, 0, 0, 1, 0,  1, 1, 1, 1, 1, 1, 1, 1, 1, 0},
             // Original (PS2/PS3): full fidelity or better
-            {1.00f, 0, 0.85f, 1, 2, 1, 1,  1, 1.0f, 1, 1, 2, 1, 1, 1, 1,  1, 1.0f, 1, 1,  1, 0, 0, 1, 1, 0,  1, 0, 0, 0, 0,  1, 1, 1, 1, 1, 1, 1, 1, 1, 0},
+            {1.00f, 0, 0.85f, 1, 2, 1, 1,  1, 1.0f, 1, 1, 1, 2, 1, 1, 1,  2, 1, 2, 1, 1,  1, 1.0f, 1, 1,  1, 0, 0, 1, 1, 0,  1, 0, 0, 0, 0,  1, 1, 1, 1, 1, 1, 1, 1, 1, 0},
         };
 
         bool maliProfileMatches(const Tuning &t, int profile)
@@ -1313,12 +1327,8 @@ namespace native_renderer
         t.depthOfField = t.maliDof;
         t.screenBlur = t.maliMotionBlur >= 0.5f;
         t.feedback = t.maliMotionBlur >= 1.5f;
-        t.shadows = false;
-        t.bodyShadows = false;
-        t.reflections = false;
-        t.refraction = false;
-        t.glow = false;
-        t.heatHaze = false;
+        t.shadows = t.maliShadows >= 0.5f;
+        t.reflections = t.maliWater >= 1.5f;
         t.maliProfile = static_cast<float>(profile);
     }
 
@@ -1353,7 +1363,8 @@ namespace native_renderer
         t.maliCa = preset >= kPresetHigh;
         t.maliLensFlare = preset >= kPresetMedium;
         t.maliAo = preset >= kPresetHigh;
-        t.maliWater = preset >= kPresetLow;
+        t.maliShadows = preset >= kPresetHigh ? 2.0f : (preset >= kPresetLow ? 1.0f : 0.0f);
+        t.maliWater = preset >= kPresetHigh ? 2.0f : (preset >= kPresetLow ? 1.0f : 0.0f);
         t.maliTrilinear = preset >= kPresetHigh;
         t.maliAniso = preset >= kPresetMax ? 2.0f : (preset >= kPresetHigh ? 1.0f : 0.0f);
         t.maliFxaa = preset >= kPresetHigh;
@@ -1560,6 +1571,14 @@ namespace native_renderer
             t.screenBlur = v >= 0.5f;
             t.feedback = v >= 1.5f;
         }
+        else if (item.number == &Tuning::maliShadows)
+        {
+            t.shadows = v >= 0.5f;
+        }
+        else if (item.number == &Tuning::maliWater)
+        {
+            t.reflections = v >= 1.5f;
+        }
         t.preset = static_cast<float>(matchingPreset(t));
         t.maliProfile = static_cast<float>(matchingMaliProfile(t));
     }
@@ -1597,9 +1616,9 @@ namespace native_renderer
     bool tuningRestore(const char *key, float value)
     {
         if (isMaliEnv() && (!std::strcmp(key, "gfx_preset") || !std::strcmp(key, "shadows") ||
-                            !std::strcmp(key, "body_shadows") || !std::strcmp(key, "reflections") ||
-                            !std::strcmp(key, "refraction") || !std::strcmp(key, "glow") ||
-                            !std::strcmp(key, "heat_haze")))
+                            !std::strcmp(key, "reflections") || !std::strcmp(key, "bloom") ||
+                            !std::strcmp(key, "dof") || !std::strcmp(key, "screen_blur") ||
+                            !std::strcmp(key, "feedback")))
             return true;
         if (!isMaliEnv() && !std::strcmp(key, "mali_profile"))
             return true;
@@ -1641,6 +1660,14 @@ namespace native_renderer
             {
                 tuning().screenBlur = tuning().maliMotionBlur >= 0.5f;
                 tuning().feedback = tuning().maliMotionBlur >= 1.5f;
+            }
+            else if (item.number == &Tuning::maliShadows)
+            {
+                tuning().shadows = tuning().maliShadows >= 0.5f;
+            }
+            else if (item.number == &Tuning::maliWater)
+            {
+                tuning().reflections = tuning().maliWater >= 1.5f;
             }
             tuning().preset = static_cast<float>(matchingPreset(tuning()));
             tuning().maliProfile = static_cast<float>(matchingMaliProfile(tuning()));

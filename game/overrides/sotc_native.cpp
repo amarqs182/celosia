@@ -13306,7 +13306,7 @@ namespace sotc_native
                 const char *r = std::getenv("SOTC_RENDERER");
                 return r && std::strcmp(r, "mali") == 0;
             }();
-            const bool simpleWater = isMaliRenderer && native_renderer::tuning().maliWater;
+            const bool simpleWater = isMaliRenderer && native_renderer::tuning().maliWater >= 0.5f && native_renderer::tuning().maliWater < 1.5f;
             const bool layer14 = ((sflags >> 25) & 1u) != 0;
             const bool reflective = (layer14 || (sflags & 0x2200u) == 0x2200u) && (!noReflect || simpleWater) && !state.debugColour;
             if (runs && e && e->resolved && !usingFallback && !posed && !twoTextures && !reflective && info && (!detailTexturesOn() || info->texMode != 2u) && mesh == id)
