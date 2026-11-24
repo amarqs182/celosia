@@ -3764,13 +3764,17 @@ private:
         // Merge-eligible static draws defer culling so MergeRun keys stay camera-invariant across pans.
         m_qBg.clear();
         m_qMirror.clear();
-        m_qAll.clear();
-        m_qAll.reserve(pkt.draws.size());
+        m_qUnsorted.clear();
+        m_qUnsorted.reserve(pkt.draws.size());
         bool hasShadows = false;
         bool hasReflectionSample = false;
         bool hasCopyFx = false;
         uint64_t prevFurMeshId = 0ull;
         int furShellCount = 0;
+        struct MeshCacheSlot { uint64_t id = 0; MaliMesh *ptr = nullptr; bool valid = false; };
+        struct TexCacheSlot { uint64_t id = 0; MaliTex *ptr = nullptr; bool valid = false; };
+        MeshCacheSlot meshCache[8];
+        TexCacheSlot texCache[8];
         for (const RawDraw &rd : pkt.draws)
         {
             if (rd.state.shadowVolume && m_shadowMode == 0)
@@ -3779,20 +3783,44 @@ private:
                 continue;
             if (!m_skyImageEnabled && rd.state.background && !rd.state.reflectionSource)
                 continue;
-            auto it = m_meshes.find(rd.meshId);
-            if (it == m_meshes.end())
-                continue;
-            MaliMesh &mesh = it->second;
+            MaliMesh *meshPtr = nullptr;
+            {
+                MeshCacheSlot &mc = meshCache[(rd.meshId ^ (rd.meshId >> 17)) & 7u];
+                if (mc.valid && mc.id == rd.meshId)
+                {
+                    meshPtr = mc.ptr;
+                }
+                else
+                {
+                    auto it = m_meshes.find(rd.meshId);
+                    if (it == m_meshes.end())
+                        continue;
+                    meshPtr = &it->second;
+                    mc = {rd.meshId, meshPtr, true};
+                }
+            }
+            MaliMesh &mesh = *meshPtr;
             mesh.lastUsed = m_frameNum;
 
             MaliTex *texPtr = nullptr;
             if (!rd.state.reflectionSample && !rd.state.refractionSample && !rd.state.screenCopy && !rd.state.previousFrame && rd.state.texture)
             {
-                auto tit = m_textures.find(rd.state.texture);
-                if (tit != m_textures.end() && (tit->second.tex != 0u || tit->second.arrayId >= 0))
+                TexCacheSlot &tc = texCache[(rd.state.texture ^ (rd.state.texture >> 17)) & 7u];
+                if (tc.valid && tc.id == rd.state.texture)
                 {
-                    texPtr = &tit->second;
-                    texPtr->lastUsed = m_frameNum;
+                    texPtr = tc.ptr;
+                    if (texPtr)
+                        texPtr->lastUsed = m_frameNum;
+                }
+                else
+                {
+                    auto tit = m_textures.find(rd.state.texture);
+                    if (tit != m_textures.end() && (tit->second.tex != 0u || tit->second.arrayId >= 0))
+                    {
+                        texPtr = &tit->second;
+                        texPtr->lastUsed = m_frameNum;
+                    }
+                    tc = {rd.state.texture, texPtr, true};
                 }
             }
 
@@ -3801,7 +3829,6 @@ private:
             q.mesh = &mesh;
             q.tex = texPtr;
             std::memcpy(q.clip, rd.clip, 16 * sizeof(float));
-            q.clipHash = fnv1aHash(rd.clip, 16u * sizeof(float));
             q.state = rd.state;
             q.minW = 0.0f;
             q.seq = rd.seq;
@@ -3810,7 +3837,7 @@ private:
                 q.bucket = 4u;
                 q.psoKey = makePsoKey(5u, Blend::Opaque, true, false, 0u);
                 hasShadows = true;
-                m_qAll.push_back(q);
+                m_qUnsorted.push_back(q);
                 continue;
             }
             if (mesh.skinned && (rd.state.skinPalette == 0u || rd.state.skinPalette > pkt.skinPalettes.size()))
@@ -3939,25 +3966,29 @@ private:
                 {
                     ++m_arrMissDrawsThisFrame;
                 }
-                const uint64_t mergeTexKey = (q.texArrayId >= 0)
-                    ? (0x8000000000000000ull | static_cast<uint64_t>(static_cast<uint16_t>(q.texArrayId)))
-                    : q.state.texture;
-                uint64_t sh = fnv1aHash(&q.psoKey, sizeof(q.psoKey));
-                sh = fnv1aHash(&mergeTexKey, sizeof(mergeTexKey), sh);
-                sh = fnv1aHash(&q.state.clamp, sizeof(q.state.clamp), sh);
-                sh = fnv1aHash(&q.state.alphaTest, sizeof(q.state.alphaTest), sh);
-                const uint8_t flags = (q.state.lit ? 1u : 0u) | (q.state.fresnel ? 2u : 0u) |
-                                      (q.state.fogged ? 4u : 0u) | (q.state.background ? 8u : 0u) |
-                                      (q.state.backgroundFge ? 16u : 0u);
-                sh = fnv1aHash(&flags, sizeof(flags), sh);
-                sh = fnv1aHash(&q.state.opacity, sizeof(q.state.opacity), sh);
-                sh = fnv1aHash(q.state.uvOffset, sizeof(q.state.uvOffset), sh);
-                sh = fnv1aHash(&q.state.lodK, sizeof(q.state.lodK), sh);
-                sh = fnv1aHash(&q.state.lodScale, sizeof(q.state.lodScale), sh);
-                sh = fnv1aHash(&q.state.maxLod, sizeof(q.state.maxLod), sh);
-                if (q.state.lit || q.state.fresnel)
-                    sh = fnv1aHash(q.state.light, sizeof(q.state.light), sh);
-                q.stateHash = sh;
+                if (q.bucket <= 1u || q.b2SortTier == 0u || q.b2SortTier == 2u)
+                {
+                    q.clipHash = fnv1aHash(rd.clip, 16u * sizeof(float));
+                    const uint64_t mergeTexKey = (q.texArrayId >= 0)
+                        ? (0x8000000000000000ull | static_cast<uint64_t>(static_cast<uint16_t>(q.texArrayId)))
+                        : q.state.texture;
+                    uint64_t sh = fnv1aHash(&q.psoKey, sizeof(q.psoKey));
+                    sh = fnv1aHash(&mergeTexKey, sizeof(mergeTexKey), sh);
+                    sh = fnv1aHash(&q.state.clamp, sizeof(q.state.clamp), sh);
+                    sh = fnv1aHash(&q.state.alphaTest, sizeof(q.state.alphaTest), sh);
+                    const uint8_t flags = (q.state.lit ? 1u : 0u) | (q.state.fresnel ? 2u : 0u) |
+                                          (q.state.fogged ? 4u : 0u) | (q.state.background ? 8u : 0u) |
+                                          (q.state.backgroundFge ? 16u : 0u);
+                    sh = fnv1aHash(&flags, sizeof(flags), sh);
+                    sh = fnv1aHash(&q.state.opacity, sizeof(q.state.opacity), sh);
+                    sh = fnv1aHash(q.state.uvOffset, sizeof(q.state.uvOffset), sh);
+                    sh = fnv1aHash(&q.state.lodK, sizeof(q.state.lodK), sh);
+                    sh = fnv1aHash(&q.state.lodScale, sizeof(q.state.lodScale), sh);
+                    sh = fnv1aHash(&q.state.maxLod, sizeof(q.state.maxLod), sh);
+                    if (q.state.lit || q.state.fresnel)
+                        sh = fnv1aHash(q.state.light, sizeof(q.state.light), sh);
+                    q.stateHash = sh;
+                }
             }
 
             const bool mergeCandidate = m_mergeEnabled && q.bucket <= 2u && !rd.state.reflectionSample && !rd.state.refractionSample && !mesh.dynamic && !q.skinned && !mesh.srcVerts.empty();
@@ -3990,13 +4021,19 @@ private:
                 if (!q.deferredCull || !cullAabb(rd.clip, mesh.lo, mesh.hi, bgMinW))
                     m_qBg.push_back(q);
             }
-            m_qAll.push_back(q);
+            m_qUnsorted.push_back(q);
         }
 
-        // Sort per-layer; within Opaque and Alpha-Test buckets, group skinned draws by palette
-        // and static draws deterministically by state+texture+clamp+clipHash+alphaTest+meshId.
-        std::sort(m_qAll.begin(), m_qAll.end(), [](const QueuedDraw &a, const QueuedDraw &b)
+        // Sort by 4-byte index to avoid moving ~288-byte QueuedDraw structs during std::sort,
+        // then scatter into m_qAll in one sequential pass.
+        const uint32_t qCount = static_cast<uint32_t>(m_qUnsorted.size());
+        m_qOrder.resize(qCount);
+        for (uint32_t idx = 0; idx < qCount; ++idx)
+            m_qOrder[idx] = idx;
+        std::sort(m_qOrder.begin(), m_qOrder.end(), [this](uint32_t ia, uint32_t ib)
         {
+            const QueuedDraw &a = m_qUnsorted[ia];
+            const QueuedDraw &b = m_qUnsorted[ib];
             if (a.state.order != b.state.order)
                 return a.state.order < b.state.order;
             if (a.bucket != b.bucket)
@@ -4033,6 +4070,9 @@ private:
             }
             return a.seq < b.seq;
         });
+        m_qAll.resize(qCount);
+        for (uint32_t k = 0; k < qCount; ++k)
+            m_qAll[k] = m_qUnsorted[m_qOrder[k]];
 
         m_streamVertsScratch.clear();
         m_streamIndicesScratch.clear();
@@ -6379,7 +6419,8 @@ private:
     std::vector<MergeRun *> m_cachedRunForDraw;
     std::vector<std::pair<uint64_t, uint64_t>> m_evictRunsScratch;
     std::vector<const QueuedDraw *> m_instScratch;
-    std::vector<QueuedDraw> m_qBg, m_qMirror, m_qAll;
+    std::vector<QueuedDraw> m_qBg, m_qMirror, m_qUnsorted, m_qAll;
+    std::vector<uint32_t> m_qOrder;
     std::unordered_set<uint64_t> m_drawnMeshIdsScratch;
     std::unordered_set<uint64_t> m_drawnTexIdsScratch;
     std::unordered_set<uint64_t> m_dumpedTexIds;
