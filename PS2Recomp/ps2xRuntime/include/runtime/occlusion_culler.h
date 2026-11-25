@@ -15,9 +15,9 @@ namespace native_renderer
     namespace occlusion
     {
         // Registers a static opaque-candidate mesh's vertex positions (called
-        // from uploadMesh on the game thread). Meshes outside [3, 18000] verts
-        // or with non-opaque vertex alpha are ignored.
+        // from uploadMesh / uploadIndexedMesh on the game thread).
         void registerMesh(uint64_t id, const Vertex *vertices, uint32_t count, bool perFrame);
+        void registerIndexedMesh(uint64_t id, const Vertex *vertices, uint32_t count, const uint32_t *indices, uint32_t indexCount);
 
         // Records whether an uploaded texture has fully opaque mip-0 alpha so
         // foliage/cutout cards are excluded from acting as solid occluders.
