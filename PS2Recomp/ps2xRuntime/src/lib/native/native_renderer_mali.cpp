@@ -1765,6 +1765,8 @@ struct RawDraw
     float clip[16] = {};
     DrawState state{};
     uint32_t seq = 0;
+    uint32_t multiOffset = 0;
+    uint32_t multiCount = 0;
 };
 
 struct QueuedDraw
@@ -1803,6 +1805,7 @@ struct FramePacket
     std::vector<SkinPaletteEntry> skinPalettes;
     std::vector<float> skinPaletteData;
     std::vector<RawDraw> draws;
+    std::vector<uint64_t> multiMeshIds;
     std::vector<uint64_t> confirmEvictMeshes;
     std::vector<uint64_t> cancelEvictMeshes;
     std::vector<uint64_t> confirmEvictTex;
@@ -1817,6 +1820,7 @@ struct FramePacket
         skinPalettes.clear();
         skinPaletteData.clear();
         draws.clear();
+        multiMeshIds.clear();
         screenBlurs.clear();
         dof = DepthOfField{};
         glow = GlowComposite{};
@@ -2219,6 +2223,26 @@ public:
         std::memcpy(rd.clip, clip, 16 * sizeof(float));
         rd.state = state;
         rd.seq = m_recDrawSeq++;
+        m_rec.draws.push_back(rd);
+    }
+
+    void drawMulti(const uint64_t *meshes, uint32_t count, const float clip[16], const DrawState &state) override
+    {
+        if (!count)
+            return;
+        if (count == 1u)
+        {
+            draw(meshes[0], clip, state);
+            return;
+        }
+        RawDraw rd{};
+        rd.meshId = fnv1aHash(meshes, static_cast<size_t>(count) * sizeof(uint64_t)) | (1ull << 62);
+        std::memcpy(rd.clip, clip, 16 * sizeof(float));
+        rd.state = state;
+        rd.seq = m_recDrawSeq++;
+        rd.multiOffset = static_cast<uint32_t>(m_rec.multiMeshIds.size());
+        rd.multiCount = count;
+        m_rec.multiMeshIds.insert(m_rec.multiMeshIds.end(), meshes, meshes + count);
         m_rec.draws.push_back(rd);
     }
 
@@ -2703,6 +2727,14 @@ private:
         m_meshes.clear();
         m_mergeSrcBytes = 0;
         m_gpuMeshBytes = 0;
+        for (auto &[id, mm] : m_multiMeshes)
+        {
+            if (mm.vao) glDeleteVertexArrays(1, &mm.vao);
+            if (mm.vbo) glDeleteBuffers(1, &mm.vbo);
+            if (mm.ibo) glDeleteBuffers(1, &mm.ibo);
+        }
+        m_multiMeshes.clear();
+        m_multiMeshBytes = 0;
         for (auto &[id, t] : m_textures)
             if (t.tex) glDeleteTextures(1, &t.tex);
         m_textures.clear();
@@ -3028,12 +3060,21 @@ private:
             }
             for (const RawDraw &rd : pkt.draws)
             {
-                if (!m_drawnMeshIdsScratch.empty())
+                if (!m_drawnMeshIdsScratch.empty() && rd.multiCount == 0u)
                     m_drawnMeshIdsScratch.erase(rd.meshId);
                 if (rd.state.texture && !m_drawnTexIdsScratch.empty())
                     m_drawnTexIdsScratch.erase(rd.state.texture);
                 if (m_drawnMeshIdsScratch.empty() && m_drawnTexIdsScratch.empty())
                     break;
+            }
+            if (!m_drawnMeshIdsScratch.empty())
+            {
+                for (uint64_t mid : pkt.multiMeshIds)
+                {
+                    m_drawnMeshIdsScratch.erase(mid);
+                    if (m_drawnMeshIdsScratch.empty())
+                        break;
+                }
             }
             for (auto it = m_deferredUploads.begin(); it != m_deferredUploads.end();)
             {
@@ -3742,6 +3783,140 @@ private:
         return &run;
     }
 
+    MaliMesh *resolveMultiMesh(const RawDraw &rd, const FramePacket &pkt)
+    {
+        if (rd.multiCount < 2u || static_cast<size_t>(rd.multiOffset) + rd.multiCount > pkt.multiMeshIds.size())
+            return nullptr;
+
+        const uint64_t *ids = pkt.multiMeshIds.data() + rd.multiOffset;
+        uint64_t revHash = rd.meshId;
+        uint32_t totalVerts = 0u;
+        uint32_t totalIndices = 0u;
+        for (uint32_t k = 0; k < rd.multiCount; ++k)
+        {
+            auto it = m_meshes.find(ids[k]);
+            if (it == m_meshes.end())
+                return nullptr;
+            MaliMesh &m = it->second;
+            if (m.dynamic || m.skinned || m.srcVerts.empty() || m.srcIndices.empty())
+                return nullptr;
+            m.lastUsed = m_frameNum;
+            revHash = fnv1aHash(&m.revision, sizeof(m.revision), revHash);
+            totalVerts += static_cast<uint32_t>(m.srcVerts.size());
+            totalIndices += static_cast<uint32_t>(m.srcIndices.size());
+        }
+
+        if (auto mit = m_multiMeshes.find(revHash); mit != m_multiMeshes.end())
+        {
+            mit->second.lastUsed = m_frameNum;
+            return &mit->second;
+        }
+
+        if (totalVerts == 0u || totalIndices == 0u || totalVerts > 65536u || totalIndices > 196608u)
+            return nullptr;
+
+        const uint64_t bytes = static_cast<uint64_t>(totalVerts) * sizeof(CompactVertex) +
+                               static_cast<uint64_t>(totalIndices) * sizeof(uint32_t);
+        if (bytes > kMaxMultiMeshBytes)
+            return nullptr;
+
+        if (m_multiMeshBytes + bytes > kMaxMultiMeshBytes)
+        {
+            m_evictRunsScratch.clear();
+            for (const auto &[mk, mm] : m_multiMeshes)
+            {
+                if (mm.lastUsed + 16u < m_frameNum)
+                    m_evictRunsScratch.push_back({mm.lastUsed, mk});
+            }
+            std::sort(m_evictRunsScratch.begin(), m_evictRunsScratch.end());
+            for (const auto &[used, mk] : m_evictRunsScratch)
+            {
+                (void)used;
+                if (m_multiMeshBytes + bytes <= kMaxMultiMeshBytes)
+                    break;
+                auto it = m_multiMeshes.find(mk);
+                if (it == m_multiMeshes.end())
+                    continue;
+                MaliMesh &em = it->second;
+                if (m_lastVao == em.vao)
+                    m_lastVao = ~0u;
+                if (em.vao) glDeleteVertexArrays(1, &em.vao);
+                if (em.vbo) glDeleteBuffers(1, &em.vbo);
+                if (em.ibo) glDeleteBuffers(1, &em.ibo);
+                m_multiMeshBytes = (m_multiMeshBytes >= em.gpuBytes) ? (m_multiMeshBytes - em.gpuBytes) : 0ull;
+                m_multiMeshes.erase(it);
+            }
+            if (m_multiMeshBytes + bytes > kMaxMultiMeshBytes)
+                return nullptr;
+        }
+
+        MaliMesh &cm = m_multiMeshes[revHash];
+        cm.srcVerts.resize(totalVerts);
+        cm.srcIndices.resize(totalIndices);
+        bool allBox = true;
+        cm.lo[0] = cm.lo[1] = cm.lo[2] = 1e30f;
+        cm.hi[0] = cm.hi[1] = cm.hi[2] = -1e30f;
+        cm.minAlpha = 0xFFu;
+        cm.maxAlpha = 0u;
+        cm.hasIntermediateAlpha = false;
+        uint32_t vOff = 0u;
+        uint32_t iOff = 0u;
+        for (uint32_t k = 0; k < rd.multiCount; ++k)
+        {
+            const MaliMesh &m = m_meshes.find(ids[k])->second;
+            const size_t vc = m.srcVerts.size();
+            const size_t ic = m.srcIndices.size();
+            std::memcpy(cm.srcVerts.data() + vOff, m.srcVerts.data(), vc * sizeof(CompactVertex));
+            uint32_t *dstIdx = cm.srcIndices.data() + iOff;
+            const uint32_t *srcIdx = m.srcIndices.data();
+            for (size_t j = 0; j < ic; ++j)
+                dstIdx[j] = vOff + srcIdx[j];
+            if (allBox && m.hasBox)
+            {
+                for (int a = 0; a < 3; ++a)
+                {
+                    if (m.lo[a] < cm.lo[a]) cm.lo[a] = m.lo[a];
+                    if (m.hi[a] > cm.hi[a]) cm.hi[a] = m.hi[a];
+                }
+            }
+            else
+            {
+                allBox = false;
+            }
+            if (m.minAlpha < cm.minAlpha) cm.minAlpha = m.minAlpha;
+            if (m.maxAlpha > cm.maxAlpha) cm.maxAlpha = m.maxAlpha;
+            if (m.hasIntermediateAlpha) cm.hasIntermediateAlpha = true;
+            vOff += static_cast<uint32_t>(vc);
+            iOff += static_cast<uint32_t>(ic);
+        }
+        cm.hasBox = allBox;
+        cm.indexed = true;
+        cm.dynamic = false;
+        cm.skinned = false;
+        cm.vertexCount = totalVerts;
+        cm.indexCount = totalIndices;
+        cm.gpuBytes = bytes;
+        cm.srcBytes = bytes;
+        cm.lastUsed = m_frameNum;
+        cm.revision = 1u;
+
+        glGenVertexArrays(1, &cm.vao);
+        glGenBuffers(1, &cm.vbo);
+        glGenBuffers(1, &cm.ibo);
+        glBindVertexArray(cm.vao);
+        m_lastVao = cm.vao;
+        glBindBuffer(GL_ARRAY_BUFFER, cm.vbo);
+        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(bytes - static_cast<uint64_t>(totalIndices) * sizeof(uint32_t)),
+                     cm.srcVerts.data(), GL_STATIC_DRAW);
+        setupCompactVertexAttribs();
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, cm.ibo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(static_cast<uint64_t>(totalIndices) * sizeof(uint32_t)),
+                     cm.srcIndices.data(), GL_STATIC_DRAW);
+
+        m_multiMeshBytes += bytes;
+        return &cm;
+    }
+
     bool needsAlphaTestPass2(const QueuedDraw &q, float aref) const
     {
         if (m_atPass2Mode == 0 || aref <= 0.02f)
@@ -3876,30 +4051,8 @@ private:
         struct TexCacheSlot { uint64_t id = 0; MaliTex *ptr = nullptr; bool valid = false; };
         MeshCacheSlot meshCache[8];
         TexCacheSlot texCache[8];
-        for (const RawDraw &rd : pkt.draws)
+        auto enqueueDraw = [&](const RawDraw &rd, uint64_t meshId, MaliMesh *meshPtr)
         {
-            if (rd.state.shadowVolume && m_shadowMode == 0)
-                continue;
-            if (rd.state.reflectionSource && m_waterMode < 2)
-                continue;
-            if (!m_skyImageEnabled && rd.state.background && !rd.state.reflectionSource)
-                continue;
-            MaliMesh *meshPtr = nullptr;
-            {
-                MeshCacheSlot &mc = meshCache[(rd.meshId ^ (rd.meshId >> 17)) & 7u];
-                if (mc.valid && mc.id == rd.meshId)
-                {
-                    meshPtr = mc.ptr;
-                }
-                else
-                {
-                    auto it = m_meshes.find(rd.meshId);
-                    if (it == m_meshes.end())
-                        continue;
-                    meshPtr = &it->second;
-                    mc = {rd.meshId, meshPtr, true};
-                }
-            }
             MaliMesh &mesh = *meshPtr;
             mesh.lastUsed = m_frameNum;
 
@@ -3926,7 +4079,7 @@ private:
             }
 
             QueuedDraw q{};
-            q.meshId = rd.meshId;
+            q.meshId = meshId;
             q.mesh = &mesh;
             q.tex = texPtr;
             std::memcpy(q.clip, rd.clip, 16 * sizeof(float));
@@ -3938,12 +4091,8 @@ private:
                 q.bucket = 4u;
                 q.psoKey = makePsoKey(5u, Blend::Opaque, true, false, 0u);
                 hasShadows = true;
-                if (q.bucket <= 2u)
-                has3D = true;
-            if (wantGlowOrder && q.bucket != 4u && q.state.order == pkt.glow.order)
-                hasGlowDraws = true;
-            m_qUnsorted.push_back(q);
-                continue;
+                m_qUnsorted.push_back(q);
+                return;
             }
             if (mesh.skinned && (rd.state.skinPalette == 0u || rd.state.skinPalette > pkt.skinPalettes.size()))
             {
@@ -3952,24 +4101,24 @@ private:
                 {
                     std::fprintf(stderr, "[mali:skin:invalid] frame=%llu mesh=%016llx pal=%u pals=%zu\n",
                                  static_cast<unsigned long long>(m_frameNum),
-                                 static_cast<unsigned long long>(rd.meshId),
+                                 static_cast<unsigned long long>(meshId),
                                  rd.state.skinPalette, pkt.skinPalettes.size());
                     ++m_skinInvalidLogCount;
                 }
-                continue;
+                return;
             }
             q.skinned = mesh.skinned && rd.state.skinPalette != 0u;
             if (m_furShells > 0 && q.skinned && rd.state.alphaTest && rd.state.blend != Blend::Opaque)
             {
-                if (rd.meshId == prevFurMeshId)
+                if (meshId == prevFurMeshId)
                 {
                     ++furShellCount;
                     if (furShellCount > m_furShells)
-                        continue;
+                        return;
                 }
                 else
                 {
-                    prevFurMeshId = rd.meshId;
+                    prevFurMeshId = meshId;
                     furShellCount = 1;
                 }
             }
@@ -3981,13 +4130,13 @@ private:
 
             if (q.skinned)
                 ++m_skinGpuDrawsThisFrame;
-            else if (mesh.dynamic && ((rd.meshId >> 63) & 1ull))
+            else if (mesh.dynamic && ((meshId >> 63) & 1ull))
                 ++m_skinCpuDrawsThisFrame;
 
             if (rd.state.reflectionSample)
             {
                 if (m_waterMode == 0)
-                    continue;
+                    return;
                 q.bucket = 2u;
                 q.psoKey = makePsoKey(19u, rd.state.blend, true, false, 0u);
                 hasReflectionSample = true;
@@ -3995,7 +4144,7 @@ private:
             else if (rd.state.refractionSample)
             {
                 if (!m_refractionEnabled)
-                    continue;
+                    return;
                 q.bucket = 2u;
                 q.psoKey = makePsoKey(20u, rd.state.blend, true, false, 0u);
                 hasCopyFx = true;
@@ -4018,7 +4167,7 @@ private:
                 const uint32_t atst = (rd.state.alphaTest >> 1) & 7u;
                 const uint32_t afail = (rd.state.alphaTest >> 12) & 3u;
                 if (ate && atst == 0u && afail == 0u)
-                    continue;
+                    return;
                 const uint32_t aref8 = (rd.state.alphaTest >> 4) & 0xFFu;
                 const bool canAlphaTestBucket = ate && (atst == 5u || atst == 6u) &&
                                                 !rd.state.background && !rd.state.overlay && !rd.state.noDepthWrite &&
@@ -4123,7 +4272,7 @@ private:
                     if (cullAabb(rd.clip, mesh.lo, mesh.hi, minW))
                     {
                         ++m_culledThisFrame;
-                        continue;
+                        return;
                     }
                     q.minW = minW;
                 }
@@ -4132,7 +4281,7 @@ private:
             if (rd.state.reflectionSource)
             {
                 m_qMirror.push_back(q);
-                continue;
+                return;
             }
             if (rd.state.background && m_fog.enabled)
             {
@@ -4145,6 +4294,50 @@ private:
             if (wantGlowOrder && q.bucket != 4u && q.state.order == pkt.glow.order)
                 hasGlowDraws = true;
             m_qUnsorted.push_back(q);
+        };
+
+        for (const RawDraw &rd : pkt.draws)
+        {
+            if (rd.state.shadowVolume && m_shadowMode == 0)
+                continue;
+            if (rd.state.reflectionSource && m_waterMode < 2)
+                continue;
+            if (!m_skyImageEnabled && rd.state.background && !rd.state.reflectionSource)
+                continue;
+            if (rd.multiCount >= 2u)
+            {
+                if (MaliMesh *cm = resolveMultiMesh(rd, pkt))
+                {
+                    enqueueDraw(rd, rd.meshId, cm);
+                    continue;
+                }
+                if (static_cast<size_t>(rd.multiOffset) + rd.multiCount <= pkt.multiMeshIds.size())
+                {
+                    for (uint32_t k = 0; k < rd.multiCount; ++k)
+                    {
+                        const uint64_t mid = pkt.multiMeshIds[rd.multiOffset + k];
+                        auto it = m_meshes.find(mid);
+                        if (it != m_meshes.end())
+                            enqueueDraw(rd, mid, &it->second);
+                    }
+                }
+                continue;
+            }
+            MaliMesh *meshPtr = nullptr;
+            MeshCacheSlot &mc = meshCache[(rd.meshId ^ (rd.meshId >> 17)) & 7u];
+            if (mc.valid && mc.id == rd.meshId)
+            {
+                meshPtr = mc.ptr;
+            }
+            else
+            {
+                auto it = m_meshes.find(rd.meshId);
+                if (it == m_meshes.end())
+                    continue;
+                meshPtr = &it->second;
+                mc = {rd.meshId, meshPtr, true};
+            }
+            enqueueDraw(rd, rd.meshId, meshPtr);
         }
 
         // Sort by 4-byte index to avoid moving ~288-byte QueuedDraw structs during std::sort,
@@ -6221,6 +6414,24 @@ private:
         }
         if (m_mergeSrcBytes > (kMaxMergeSrcBytes * 7ull) / 8ull)
             evictOldMergeSrc(m_frameNum, 1200u, kMaxMergeSrcBytes / 4ull);
+        for (auto it = m_multiMeshes.begin(); it != m_multiMeshes.end();)
+        {
+            if (it->second.lastUsed + 1800u < m_frameNum)
+            {
+                MaliMesh &em = it->second;
+                if (m_lastVao == em.vao)
+                    m_lastVao = ~0u;
+                if (em.vao) glDeleteVertexArrays(1, &em.vao);
+                if (em.vbo) glDeleteBuffers(1, &em.vbo);
+                if (em.ibo) glDeleteBuffers(1, &em.ibo);
+                m_multiMeshBytes = (m_multiMeshBytes >= em.gpuBytes) ? (m_multiMeshBytes - em.gpuBytes) : 0ull;
+                it = m_multiMeshes.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
         for (auto it = m_mergeRuns.begin(); it != m_mergeRuns.end();)
         {
             if ((!it->second.vao && it->second.lastUsed + 8u < m_frameNum) || it->second.lastUsed + 1800u < m_frameNum)
@@ -6583,6 +6794,9 @@ private:
     std::unordered_set<uint64_t> m_drawnTexIdsScratch;
     std::unordered_set<uint64_t> m_dumpedTexIds;
     std::unordered_map<uint64_t, MaliMesh> m_meshes;
+    static constexpr uint64_t kMaxMultiMeshBytes = 16ull * 1024ull * 1024ull;
+    uint64_t m_multiMeshBytes = 0;
+    std::unordered_map<uint64_t, MaliMesh> m_multiMeshes;
     std::unordered_map<uint64_t, MaliTex> m_textures;
     std::vector<MaliTexArray> m_texArrays;
     std::unordered_map<uint64_t, MergeRun> m_mergeRuns;
