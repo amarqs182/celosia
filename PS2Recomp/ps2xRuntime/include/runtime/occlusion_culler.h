@@ -7,6 +7,7 @@
 // before touching VU1/display-list construction or draw submission.
 
 #include <cstdint>
+#include <vector>
 
 namespace native_renderer
 {
@@ -46,6 +47,12 @@ namespace native_renderer
         // test individual BVH node AABBs in O(1) via isBoxOccludedClip().
         bool prepareModelPrevClip(const float currentCamera[16], const float modelRowMajor[16], float outPmPrev[16]);
         bool isBoxOccludedClip(const float pmPrev[16], const float lo[3], const float hi[3], float minDist, float bias, float margin);
+
+        // Per-draw mesh AABB culling against the previous frame's Hi-Z pyramid
+        // using reprojected clip_prev = (VP_prev * inv(VP_cur)) * clip.
+        bool isMeshOccluded(uint64_t meshId, const float clip[16], float minDist, float bias, float margin);
+        uint32_t filterOccludedMeshes(const uint64_t *meshes, uint32_t count, const float clip[16],
+                                      float minDist, float bias, float margin, std::vector<uint64_t> &outKept);
 
         void shutdown();
     }
