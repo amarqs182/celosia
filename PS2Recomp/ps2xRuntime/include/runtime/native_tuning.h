@@ -743,6 +743,7 @@ namespace native_renderer
         // Models' detail levels picked as if 1.6x as far (coarser sooner;
         // none vanishes sooner) (SOTC_SAC_LOD).
         bool sacLod = false;
+        bool sacLodLow = false;
         // Fur shells clamping (SOTC_FUR_SHELLS): limits consecutive alpha-tested
         // shell layers (colossi fur) to N shells to prevent TBDR tile overdraw.
         // 0 = full PS2 layers (8-16), 4 = default on handhelds.
