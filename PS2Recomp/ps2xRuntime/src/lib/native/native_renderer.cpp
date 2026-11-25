@@ -248,7 +248,7 @@ namespace native_renderer
             if (on("SOTC_MALI_DRS_MIN"))
                 d.maliDrsMin = std::clamp(number("SOTC_MALI_DRS_MIN", d.maliDrsMin), 0.50f, 1.00f);
             if (on("SOTC_MALI_BG_RATE"))
-                d.maliBgRate = static_cast<float>(std::clamp(std::atoi(std::getenv("SOTC_MALI_BG_RATE")), 1, 4));
+                d.maliBgRate = static_cast<float>(std::clamp(std::atoi(std::getenv("SOTC_MALI_BG_RATE")), 1, 16));
             if (on("SOTC_MALI_TEX16"))
                 d.maliTex16 = std::atoi(std::getenv("SOTC_MALI_TEX16")) != 0;
             if (on("SOTC_MALI_TEXARRAY"))
@@ -611,7 +611,7 @@ namespace native_renderer
             {"mali_bg_rate", "Sky fog update rate", "Taxa do céu (Névoa)",
              "How often the distant sky background for depth fog updates (every 1, 2, 3, or 4 frames).",
              "Frequência de atualização do fundo do céu para a névoa de profundidade (a cada 1, 2, 3 ou 4 quadros).",
-             nullptr, &Tuning::maliBgRate, 1.0f, 4.0f, 1.0f, "SOTC_MALI_BG_RATE"},
+             nullptr, &Tuning::maliBgRate, 1.0f, 16.0f, 1.0f, "SOTC_MALI_BG_RATE"},
             {"fur_shells", "Colossi fur shells", "Camadas de pelo (Colossos)",
              "Limits consecutive alpha-tested fur layers on colossi to avoid GPU overdraw. 0 draws all PS2 layers.",
              "Limita as camadas semitransparentes de pelo nos colossos para evitar overdraw na GPU. 0 desenha todas as camadas do PS2.",

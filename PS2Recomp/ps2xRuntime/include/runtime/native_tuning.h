@@ -88,7 +88,7 @@ namespace native_renderer
         bool maliInstancing = true;     // SOTC_MALI_INSTANCING
         float maliProfile = 1.0f;       // SOTC_MALI_PROFILE (0 Max Perf, 1 Medium, 2 Original PS2/PS3, 3 Custom)
         float maliDrsMin = 0.65f;       // SOTC_MALI_DRS_MIN (0.50..1.00)
-        float maliBgRate = 2.0f;        // SOTC_MALI_BG_RATE (1..4 frames)
+        float maliBgRate = 16.0f;       // SOTC_MALI_BG_RATE (1..16 frames)
         bool maliTex16 = true;          // SOTC_MALI_TEX16 (RGB565 for opaque textures)
         bool maliTexArray = true;       // SOTC_MALI_TEXARRAY (GL_TEXTURE_2D_ARRAY, takes effect at start)
         bool maliDirectScanout = true;  // SOTC_MALI_DIRECT_SCANOUT (zero-copy FBO 0)
