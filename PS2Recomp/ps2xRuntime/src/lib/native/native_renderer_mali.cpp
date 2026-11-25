@@ -4351,8 +4351,35 @@ private:
         // then scatter into m_qAll in one sequential pass.
         // Assign deterministic first-seen submission sequence numbers per state/clip group so
         // frame-to-frame camera/light hash changes never scramble overlapping tree/foliage order.
-        m_stateFirstSeq.clear();
-        m_clipFirstSeq.clear();
+        m_stateFirstSeq.assign(m_stateFirstSeq.size(), {0ull, 0u});
+        m_clipFirstSeq.assign(m_clipFirstSeq.size(), {0ull, 0u});
+        const size_t needCap = std::max<size_t>(256u, m_qUnsorted.size() * 2u);
+        size_t pow2 = 256u;
+        while (pow2 < needCap)
+            pow2 <<= 1u;
+        if (m_stateFirstSeq.size() < pow2)
+            m_stateFirstSeq.assign(pow2, {0ull, 0u});
+        if (m_clipFirstSeq.size() < pow2)
+            m_clipFirstSeq.assign(pow2, {0ull, 0u});
+        const size_t mask = m_stateFirstSeq.size() - 1u;
+        auto firstSeq = [mask](std::vector<std::pair<uint64_t, uint32_t>> &tab, uint64_t key, uint32_t seq) -> uint32_t
+        {
+            if (key == 0ull)
+                key = 1ull;
+            size_t idx = static_cast<size_t>(key ^ (key >> 33)) & mask;
+            for (;;)
+            {
+                auto &slot = tab[idx];
+                if (slot.first == 0ull)
+                {
+                    slot = {key, seq};
+                    return seq;
+                }
+                if (slot.first == key)
+                    return slot.second;
+                idx = (idx + 1u) & mask;
+            }
+        };
         for (QueuedDraw &qd : m_qUnsorted)
         {
             if (qd.bucket <= 1u || (qd.bucket == 2u && (qd.b2SortTier == 0u || qd.b2SortTier == 2u)))
@@ -4362,9 +4389,9 @@ private:
                     (static_cast<uint64_t>(qd.state.order & 0xFFu) << 56) ^
                     (static_cast<uint64_t>(qd.bucket & 0xFu) << 52) ^
                     (static_cast<uint64_t>(pal) * 0x517cc1b727220a95ull);
-                qd.stateFirstSeq = m_stateFirstSeq.emplace(sgKey, qd.seq).first->second;
+                qd.stateFirstSeq = firstSeq(m_stateFirstSeq, sgKey, qd.seq);
                 const uint64_t cgKey = sgKey ^ (qd.clipHash * 0x9e3779b97f4a7c15ull);
-                qd.clipFirstSeq = m_clipFirstSeq.emplace(cgKey, qd.seq).first->second;
+                qd.clipFirstSeq = firstSeq(m_clipFirstSeq, cgKey, qd.seq);
             }
         }
         const uint32_t qCount = static_cast<uint32_t>(m_qUnsorted.size());
@@ -4477,8 +4504,9 @@ private:
                                     chunkIndices += static_cast<uint32_t>(jm->srcIndices.size());
                                 }
                                 if (chunkVerts > 0u && chunkIndices > 0u &&
-                                    m_streamVertsScratch.size() + chunkVerts <= 96000u &&
-                                    m_streamIndicesScratch.size() + chunkIndices <= 192000u)
+                                    chunkVerts <= 4096u &&
+                                    m_streamVertsScratch.size() + chunkVerts <= 24000u &&
+                                    m_streamIndicesScratch.size() + chunkIndices <= 48000u)
                                 {
                                     const uint32_t firstIndex = static_cast<uint32_t>(m_streamIndicesScratch.size());
                                     for (size_t j = s; j < e; ++j)
@@ -6819,8 +6847,8 @@ private:
     std::vector<size_t> m_deferredHudScratch;
     std::vector<QueuedDraw> m_qBg, m_qMirror, m_qUnsorted, m_qAll;
     std::vector<uint32_t> m_qOrder;
-    std::unordered_map<uint64_t, uint32_t> m_stateFirstSeq;
-    std::unordered_map<uint64_t, uint32_t> m_clipFirstSeq;
+    std::vector<std::pair<uint64_t, uint32_t>> m_stateFirstSeq;
+    std::vector<std::pair<uint64_t, uint32_t>> m_clipFirstSeq;
     std::unordered_set<uint64_t> m_drawnMeshIdsScratch;
     std::unordered_set<uint64_t> m_drawnTexIdsScratch;
     std::unordered_set<uint64_t> m_dumpedTexIds;
