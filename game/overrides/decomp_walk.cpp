@@ -73,6 +73,7 @@
 #include "ps2_runtime_macros.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/native_tuning.h"
+#include "runtime/occlusion_culler.h"
 #include "runtime/native_renderer.h"
 #include "runtime/ps2_thread_load.h"
 
@@ -1376,6 +1377,9 @@ namespace decomp_walk
                 load4(cp, 0x1E0u, P);
                 load4(cp, 0x5A0u, VP);
                 load4(cp, 0x1A0u, V);
+                const native_renderer::Tuning &occT = native_renderer::tuning();
+                if (occT.occCull)
+                    native_renderer::occlusion::setFrameCamera(&VP[0].x);
                 const V4 pr = rows(P, r, 0.0f, 0.0f, 1.0f);
                 V4 clipP = rows(VP, world.x, world.y, world.z, 1.0f);
                 clipP.w += pr.x;
@@ -1413,21 +1417,32 @@ namespace decomp_walk
                     f20 = -1.0f;
                 if (f20 < 0.0f)
                     level = -1.0f;
-                else if (f21 < 0.0f)
-                    level = f20;
                 else
                 {
-                    // The level's root box through camera x model: culled when every corner is out by one same plane.
-                    const uint32_t table = hu(hd, 0x30u + static_cast<uint32_t>(static_cast<int32_t>(f20)) * 4u);
-                    const uint8_t *tb = host(rdram, table, 0x20u);
                     level = f20;
-                    if (tb)
+                    const bool checkOcc = occT.occCull && (f21 >= 0.0f ? f21 : dist3(world.x - eye.x, world.y - eye.y, world.z - eye.z)) >= occT.occMinDist;
+                    if (f21 >= 0.0f || checkOcc)
                     {
-                        V4 PM[4];
-                        for (int i = 0; i < 4; ++i)
-                            PM[i] = rows(VP, M[i].x, M[i].y, M[i].z, M[i].w);
-                        if (boxOut(PM, hq(tb, 0u), hq(tb, 0x10u)))
-                            level = -2.0f;
+                        // The level's root box through camera x model: culled when every corner is out by one same plane,
+                        // or when conservatively occluded behind solid geometry in the previous frame's CPU Hi-Z pyramid.
+                        const uint32_t table = hu(hd, 0x30u + static_cast<uint32_t>(static_cast<int32_t>(f20)) * 4u);
+                        const uint8_t *tb = host(rdram, table, 0x20u);
+                        if (tb)
+                        {
+                            const V4 lo = hq(tb, 0u);
+                            const V4 hi = hq(tb, 0x10u);
+                            if (f21 >= 0.0f)
+                            {
+                                V4 PM[4];
+                                for (int i = 0; i < 4; ++i)
+                                    PM[i] = rows(VP, M[i].x, M[i].y, M[i].z, M[i].w);
+                                if (boxOut(PM, lo, hi))
+                                    level = -2.0f;
+                            }
+                            if (level >= 0.0f && checkOcc &&
+                                native_renderer::occlusion::isBoxOccluded(&M[0].x, &lo.x, &hi.x, occT.occBias, occT.occMargin))
+                                level = -2.0f;
+                        }
                     }
                 }
             }
@@ -1588,6 +1603,9 @@ namespace decomp_walk
                 load4(cp, 0x1E0u, P);
                 load4(cp, 0x5A0u, VP);
                 load4(cp, 0x1A0u, V);
+                const native_renderer::Tuning &occT = native_renderer::tuning();
+                if (occT.occCull)
+                    native_renderer::occlusion::setFrameCamera(&VP[0].x);
                 const V4 pr = rows(P, rr, 0.0f, 0.0f, 1.0f);
                 V4 clipP = rows(VP, world.x, world.y, world.z, 1.0f);
                 clipP.w += pr.x;
@@ -1626,20 +1644,30 @@ namespace decomp_walk
                     f20 = -1.0f;
                 if (f20 < 0.0f)
                     level = -1.0f;
-                else if (f21 < 0.0f)
-                    level = f20;
                 else
                 {
-                    const uint32_t table = hu(hd, 0x30u + static_cast<uint32_t>(static_cast<int32_t>(f20)) * 4u);
-                    const uint8_t *tb = host(rdram, table, 0x20u);
                     level = f20;
-                    if (tb)
+                    const bool checkOcc = occT.occCull && (f21 >= 0.0f ? f21 : dist3(world.x - eye.x, world.y - eye.y, world.z - eye.z)) >= occT.occMinDist;
+                    if (f21 >= 0.0f || checkOcc)
                     {
-                        V4 PM[4];
-                        for (int i = 0; i < 4; ++i)
-                            PM[i] = rows(VP, M[i].x, M[i].y, M[i].z, M[i].w);
-                        if (boxOut(PM, hq(tb, 0u), hq(tb, 0x10u)))
-                            level = -2.0f;
+                        const uint32_t table = hu(hd, 0x30u + static_cast<uint32_t>(static_cast<int32_t>(f20)) * 4u);
+                        const uint8_t *tb = host(rdram, table, 0x20u);
+                        if (tb)
+                        {
+                            const V4 lo = hq(tb, 0u);
+                            const V4 hi = hq(tb, 0x10u);
+                            if (f21 >= 0.0f)
+                            {
+                                V4 PM[4];
+                                for (int i = 0; i < 4; ++i)
+                                    PM[i] = rows(VP, M[i].x, M[i].y, M[i].z, M[i].w);
+                                if (boxOut(PM, lo, hi))
+                                    level = -2.0f;
+                            }
+                            if (level >= 0.0f && checkOcc &&
+                                native_renderer::occlusion::isBoxOccluded(&M[0].x, &lo.x, &hi.x, occT.occBias, occT.occMargin))
+                                level = -2.0f;
+                        }
                     }
                 }
             }

@@ -334,7 +334,7 @@ add_library(ps2_runtime STATIC
 
 # Native renderer: the front picks Metal (macOS) or OpenGL (macOS with
 # SOTC_NATIVE_GL=1, the Vita through vitaGL).
-target_sources(ps2_runtime PRIVATE src/lib/native/native_renderer.cpp src/lib/native/native_renderer_gl.cpp src/lib/native/native_recorder.cpp src/lib/native/native_renderer_mali.cpp src/lib/native/r36s_boot_menu.cpp)
+target_sources(ps2_runtime PRIVATE src/lib/native/native_renderer.cpp src/lib/native/native_renderer_gl.cpp src/lib/native/native_recorder.cpp src/lib/native/native_renderer_mali.cpp src/lib/native/occlusion_culler.cpp src/lib/native/r36s_boot_menu.cpp)
 # The scene recorder's blocks are zlib-compressed (the Vita SDK has libz).
 find_package(ZLIB QUIET)
 if(TARGET ZLIB::ZLIB)
@@ -589,6 +589,7 @@ if(PS2X_IS_LINUX AND PS2X_IS_AARCH64_TARGET)
     endif()
     set_source_files_properties(src/lib/native/native_renderer_gl.cpp PROPERTIES COMPILE_OPTIONS "-fno-math-errno;-fno-trapping-math")
     set_source_files_properties(src/lib/native/native_renderer_mali.cpp PROPERTIES COMPILE_OPTIONS "-fno-math-errno;-fno-trapping-math;-mcpu=cortex-a35")
+    set_source_files_properties(src/lib/native/occlusion_culler.cpp PROPERTIES COMPILE_OPTIONS "-fno-math-errno;-fno-trapping-math;-mcpu=cortex-a35")
     target_compile_options(ps2EntryRunner PRIVATE ${PS2X_LINUX_GAME_OPT})
 
     set(PS2X_LINUX_OVERRIDE_OPTS -O3)

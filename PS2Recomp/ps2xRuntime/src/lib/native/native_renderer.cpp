@@ -4,6 +4,7 @@
 // (GLES3, once native_renderer_gl.cpp grows the ES path there, r36s);
 // elsewhere none.
 #include "native_backend.h"
+#include "runtime/occlusion_culler.h"
 #include "runtime/ps2_diag.h"
 #include "runtime/native_tuning.h"
 #include "runtime/native_recorder.h"
@@ -241,6 +242,14 @@ namespace native_renderer
                 d.maliFastShaders = std::atoi(std::getenv("SOTC_MALI_FAST_SHADERS")) != 0;
             if (on("SOTC_MALI_CULL"))
                 d.maliCull = std::atoi(std::getenv("SOTC_MALI_CULL")) != 0;
+            if (on("SOTC_OCC_CULL"))
+                d.occCull = std::atoi(std::getenv("SOTC_OCC_CULL")) != 0;
+            if (on("SOTC_OCC_MIN_DIST"))
+                d.occMinDist = std::clamp(number("SOTC_OCC_MIN_DIST", d.occMinDist), 0.0f, 100.0f);
+            if (on("SOTC_OCC_BIAS"))
+                d.occBias = std::clamp(number("SOTC_OCC_BIAS", d.occBias), 0.0f, 0.25f);
+            if (on("SOTC_OCC_MARGIN"))
+                d.occMargin = std::clamp(number("SOTC_OCC_MARGIN", d.occMargin), 0.0f, 0.15f);
             if (on("SOTC_MALI_MERGE"))
                 d.maliMerge = std::atoi(std::getenv("SOTC_MALI_MERGE")) != 0;
             if (on("SOTC_MALI_INSTANCING"))
@@ -628,6 +637,22 @@ namespace native_renderer
              "Skips static 3D meshes whose bounding box lies outside the camera frustum.",
              "Descarta malhas 3D estáticas cuja caixa delimitadora está fora do campo de visão da câmera.",
              &Tuning::maliCull, nullptr, 0, 1, 1, "SOTC_MALI_CULL"},
+            {"occ_cull", "CPU Hi-Z Occlusion Culling", "Oclusão Hi-Z (Thread CPU)",
+             "Runs a background CPU software Z-pyramid to skip objects hidden behind solid walls and terrain.",
+             "Executa uma pirâmide de profundidade Hi-Z em uma thread separada da CPU para ocultar objetos atrás de paredes e relevo.",
+             &Tuning::occCull, nullptr, 0, 1, 1, "SOTC_OCC_CULL"},
+            {"occ_min_dist", "Hi-Z Min Distance", "Distância Mín. Hi-Z",
+             "Minimum distance from camera before occlusion culling applies (protects Wander, Agro and nearby geometry).",
+             "Distância mínima da câmera para ativar o corte por oclusão (protege Wander, Agro e paredes muito próximas).",
+             nullptr, &Tuning::occMinDist, 0.0f, 100.0f, 2.0f, "SOTC_OCC_MIN_DIST"},
+            {"occ_bias", "Hi-Z Depth Bias", "Tolerância Prof. Hi-Z",
+             "Depth safety margin so surfaces flush against an occluder wall do not flicker.",
+             "Margem de segurança na profundidade para evitar que objetos colados em paredes pisquem.",
+             nullptr, &Tuning::occBias, 0.0f, 0.25f, 0.01f, "SOTC_OCC_BIAS"},
+            {"occ_margin", "Hi-Z Screen Margin", "Margem de Tela Hi-Z",
+             "Expands each object's projected box on screen to compensate for 1-frame camera motion.",
+             "Expande a caixa projetada na tela para compensar o giro rápido da câmera entre quadros.",
+             nullptr, &Tuning::occMargin, 0.0f, 0.15f, 0.005f, "SOTC_OCC_MARGIN"},
             {"mali_merge", "Mali Static Draw Merge", "Merge Estático Mali",
              "Combines consecutive static draws sharing a texture array and state into a single cached VBO/IBO draw call.",
              "Combina desenhos estáticos consecutivos do mesmo array de textura e estado em uma única chamada de desenho.",
@@ -1012,6 +1037,10 @@ namespace native_renderer
             {"mali_at_pass2", 6, "Cost: GPU (skipping pass 2 saves ~300+ draws/frame).", "Custo: GPU (pular o passe 2 economiza ~300+ draws/quadro)."},
             {"mali_fast_shaders", 8, "Cost: saves GPU ALU cycles per fragment.", "Custo: economiza ciclos de ALU da GPU por fragmento."},
             {"mali_cull", 8, "Cost: saves vertex & fragment work off-screen.", "Custo: economiza vértices e fragmentos fora da tela."},
+            {"occ_cull", 8, "Cost: uses spare CPU cores (cpu1/cpu2) to cut occluded objects & draws.", "Custo: usa núcleos livres da CPU (cpu1/cpu2) para cortar objetos ocultos e draw calls."},
+            {"occ_min_dist", 8, "Cost: none (0 m culls closer props; higher protects foreground).", "Custo: nenhum (menor = corta mais perto; maior = protege primeiro plano)."},
+            {"occ_bias", 8, "Cost: none (higher = fewer pop-in artifacts, less aggressive).", "Custo: nenhum (maior = menos chance de falhas visuais, menos agressivo)."},
+            {"occ_margin", 8, "Cost: none (higher = safer during fast camera turns).", "Custo: nenhum (maior = mais seguro ao girar a câmera rápido)."},
             {"mali_merge", 8, "Cost: cuts CPU driver draw-call overhead.", "Custo: reduz drasticamente o número de draw calls na CPU."},
             {"mali_instancing", 8, "Cost: cuts CPU draw calls on repeated props.", "Custo: reduz draw calls em objetos repetidos."},
             {"mali_tex16", 8, "Cost: saves 50% texture VRAM & DDR bandwidth.", "Custo: economiza 50% de VRAM e banda de texturas."},
@@ -1477,6 +1506,12 @@ namespace native_renderer
         }
         else if (item.number == &Tuning::maliDrsMin)
             std::snprintf(b, sizeof(b), "%.0f%%", v * 100.0f);
+        else if (item.number == &Tuning::occMinDist)
+            std::snprintf(b, sizeof(b), "%.0f m", v);
+        else if (item.number == &Tuning::occBias)
+            std::snprintf(b, sizeof(b), "%.0f%%", v * 100.0f);
+        else if (item.number == &Tuning::occMargin)
+            std::snprintf(b, sizeof(b), "%.1f%%", v * 100.0f);
         else if (item.number == &Tuning::furShells)
         {
             if (v < 0.5f)
@@ -2950,6 +2985,7 @@ namespace native_renderer
         }
         if (native_recorder::active())
             native_recorder::front::mesh(id, vertices, count, perFrame);
+        occlusion::registerMesh(id, vertices, count, perFrame);
         if (!backend())
             return;
         if (!tuning().frameTiming())
@@ -3088,6 +3124,7 @@ namespace native_renderer
         }
         if (native_recorder::active())
             native_recorder::front::texture(id, width, height, rgba, levels);
+        occlusion::registerTexture(id, width, height, rgba);
         if (!backend())
             return;
         if (!tuning().frameTiming())
@@ -3197,6 +3234,14 @@ namespace native_renderer
     }
     // A draw of the world's rigid surfaces (the sky and the terrain's layers).
     inline bool terrainDraw(const DrawState &s) { return s.order >= 1u && s.order <= 3u && !s.screen && !s.skinPalette; }
+    // Solid opaque static draws used as CPU Hi-Z software occluders (excludes
+    // sky, alpha-cutout foliage/cards, water/noDepthWrite, overlays and skinning).
+    inline bool solidOccluderDraw(const DrawState &s)
+    {
+        return !s.screen && !s.background && !s.overlay && !s.shadowVolume && !s.reflectionSource && !s.reflectionSample &&
+               !s.refractionSample && !s.screenCopy && !s.previousFrame && !s.noDepthWrite && s.skinPalette == 0u &&
+               (s.blend == Blend::Opaque || s.blend == Blend::Normal) && s.opacity >= 0.98f && occlusion::isOpaqueTexture(s.texture);
+    }
     // Still on the worker, and not in the backend already: a build the scene
     // recorder asked for again (hasMesh says no for what it has not got) is
     // of the same content (ids hash it), so the backend's copy is drawn.
@@ -3237,6 +3282,8 @@ namespace native_renderer
                 native_recorder::front::draw(&mesh, 1, clip, state, 2);
             return;
         }
+        if (t.occCull && solidOccluderDraw(state))
+            occlusion::submitDraw(mesh, clip);
         if (native_recorder::active())
             native_recorder::front::draw(&mesh, 1, clip, state, 0);
         if (!t.textures || !t.lighting)
@@ -3325,6 +3372,8 @@ namespace native_renderer
                 native_recorder::front::draw(list, n, clip, state, 2);
             return;
         }
+        if (t.occCull && solidOccluderDraw(state))
+            occlusion::submitDrawMulti(list, n, clip);
         if (native_recorder::active())
             native_recorder::front::draw(list, n, clip, state, 0);
         if (!t.textures || !t.lighting)
@@ -3384,6 +3433,7 @@ namespace native_renderer
     {
         RaceScope race("endFrame");
         g_lastFrameDraws.store(g_frameDraws.exchange(0u, std::memory_order_relaxed), std::memory_order_relaxed);
+        occlusion::endFrame(tuning().occCull, tuning().maliStats);
         if (g_asyncBuilds)
             g_asyncBuilds->flush(); // this frame's builds start now
         // SOTC_QUALITY_CYCLE=N (comparing the quality settings on one scene,
@@ -3500,6 +3550,7 @@ namespace native_renderer
     }
     void shutdown()
     {
+        occlusion::shutdown();
         if (g_backend)
             g_backend->shutdown();
     }
