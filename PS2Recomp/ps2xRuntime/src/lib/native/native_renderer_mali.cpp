@@ -1950,6 +1950,7 @@ inline bool sameMaterialSuperGroup(const QueuedDraw &a, const QueuedDraw &b)
 {
     return a.bucket == b.bucket &&
            (a.bucket <= 1u || (a.bucket == 2u && (a.b2SortTier == 0u || a.b2SortTier == 2u) && a.b2SortTier == b.b2SortTier)) &&
+           a.stateHash == b.stateHash &&
            a.mesh && b.mesh &&
            !a.mesh->dynamic && !b.mesh->dynamic &&
            !a.skinned && !b.skinned &&
@@ -3689,16 +3690,32 @@ private:
         for (size_t j = from; j < to; ++j)
         {
             const MaliMesh *m = m_qAll[j].mesh;
-            const uint32_t baseV = static_cast<uint32_t>(m_mergeVertsScratch.size());
-            m_mergeVertsScratch.insert(m_mergeVertsScratch.end(), m->srcVerts.begin(), m->srcVerts.end());
+            const size_t baseVSize = m_mergeVertsScratch.size();
+            const uint32_t baseV = static_cast<uint32_t>(baseVSize);
+            const size_t srcVCount = m->srcVerts.size();
+            m_mergeVertsScratch.resize(baseVSize + srcVCount);
+            CompactVertex *dstV = m_mergeVertsScratch.data() + baseVSize;
+            const CompactVertex *srcV = m->srcVerts.data();
             if (texArrayId >= 0)
             {
                 const uint8_t layer = m_qAll[j].texArrayLayer;
-                for (size_t v = baseV; v < m_mergeVertsScratch.size(); ++v)
-                    m_mergeVertsScratch[v].texLayer = layer;
+                for (size_t v = 0; v < srcVCount; ++v)
+                {
+                    dstV[v] = srcV[v];
+                    dstV[v].texLayer = layer;
+                }
             }
-            for (uint32_t idx : m->srcIndices)
-                m_mergeIndicesScratch.push_back(baseV + idx);
+            else
+            {
+                std::memcpy(dstV, srcV, srcVCount * sizeof(CompactVertex));
+            }
+            const size_t prevIdxCount = m_mergeIndicesScratch.size();
+            const size_t srcIdxCount = m->srcIndices.size();
+            m_mergeIndicesScratch.resize(prevIdxCount + srcIdxCount);
+            uint32_t *dstIdx = m_mergeIndicesScratch.data() + prevIdxCount;
+            const uint32_t *srcIdx = m->srcIndices.data();
+            for (size_t k = 0; k < srcIdxCount; ++k)
+                dstIdx[k] = baseV + srcIdx[k];
         }
 
         if (!run.vao) glGenVertexArrays(1, &run.vao);
@@ -3849,6 +3866,9 @@ private:
         bool hasShadows = false;
         bool hasReflectionSample = false;
         bool hasCopyFx = false;
+        bool has3D = false;
+        bool hasGlowDraws = false;
+        const bool wantGlowOrder = m_glowEnabled && pkt.glow.enabled && (pkt.glow.amountA > 0.0f || pkt.glow.amountB > 0.0f);
         uint64_t prevFurMeshId = 0ull;
         int furShellCount = 0;
         struct MeshCacheSlot { uint64_t id = 0; MaliMesh *ptr = nullptr; bool valid = false; };
@@ -3917,7 +3937,11 @@ private:
                 q.bucket = 4u;
                 q.psoKey = makePsoKey(5u, Blend::Opaque, true, false, 0u);
                 hasShadows = true;
-                m_qUnsorted.push_back(q);
+                if (q.bucket <= 2u)
+                has3D = true;
+            if (wantGlowOrder && q.bucket != 4u && q.state.order == pkt.glow.order)
+                hasGlowDraws = true;
+            m_qUnsorted.push_back(q);
                 continue;
             }
             if (mesh.skinned && (rd.state.skinPalette == 0u || rd.state.skinPalette > pkt.skinPalettes.size()))
@@ -4049,22 +4073,36 @@ private:
                 if (q.bucket <= 1u || q.b2SortTier == 0u || q.b2SortTier == 2u)
                 {
                     q.clipHash = fnv1aHash(rd.clip, 16u * sizeof(float));
-                    const uint64_t mergeTexKey = (q.texArrayId >= 0)
+                    struct StateHashKey
+                    {
+                        uint64_t mergeTexKey;
+                        uint32_t psoKey;
+                        uint32_t clamp;
+                        uint32_t alphaTest;
+                        float opacity;
+                        float uvOffset[2];
+                        float lodK;
+                        float lodScale;
+                        uint8_t maxLod;
+                        uint8_t flags;
+                        uint16_t pad;
+                    } sk{};
+                    sk.mergeTexKey = (q.texArrayId >= 0)
                         ? (0x8000000000000000ull | static_cast<uint64_t>(static_cast<uint16_t>(q.texArrayId)))
                         : q.state.texture;
-                    uint64_t sh = fnv1aHash(&q.psoKey, sizeof(q.psoKey));
-                    sh = fnv1aHash(&mergeTexKey, sizeof(mergeTexKey), sh);
-                    sh = fnv1aHash(&q.state.clamp, sizeof(q.state.clamp), sh);
-                    sh = fnv1aHash(&q.state.alphaTest, sizeof(q.state.alphaTest), sh);
-                    const uint8_t flags = (q.state.lit ? 1u : 0u) | (q.state.fresnel ? 2u : 0u) |
-                                          (q.state.fogged ? 4u : 0u) | (q.state.background ? 8u : 0u) |
-                                          (q.state.backgroundFge ? 16u : 0u);
-                    sh = fnv1aHash(&flags, sizeof(flags), sh);
-                    sh = fnv1aHash(&q.state.opacity, sizeof(q.state.opacity), sh);
-                    sh = fnv1aHash(q.state.uvOffset, sizeof(q.state.uvOffset), sh);
-                    sh = fnv1aHash(&q.state.lodK, sizeof(q.state.lodK), sh);
-                    sh = fnv1aHash(&q.state.lodScale, sizeof(q.state.lodScale), sh);
-                    sh = fnv1aHash(&q.state.maxLod, sizeof(q.state.maxLod), sh);
+                    sk.psoKey = q.psoKey;
+                    sk.clamp = q.state.clamp;
+                    sk.alphaTest = q.state.alphaTest;
+                    sk.opacity = q.state.opacity;
+                    sk.uvOffset[0] = q.state.uvOffset[0];
+                    sk.uvOffset[1] = q.state.uvOffset[1];
+                    sk.lodK = q.state.lodK;
+                    sk.lodScale = q.state.lodScale;
+                    sk.maxLod = q.state.maxLod;
+                    sk.flags = (q.state.lit ? 1u : 0u) | (q.state.fresnel ? 2u : 0u) |
+                               (q.state.fogged ? 4u : 0u) | (q.state.background ? 8u : 0u) |
+                               (q.state.backgroundFge ? 16u : 0u);
+                    uint64_t sh = fnv1aHash(&sk, sizeof(sk));
                     if (q.state.lit || q.state.fresnel)
                         sh = fnv1aHash(q.state.light, sizeof(q.state.light), sh);
                     q.stateHash = sh;
@@ -4101,6 +4139,10 @@ private:
                 if (!q.deferredCull || !cullAabb(rd.clip, mesh.lo, mesh.hi, bgMinW))
                     m_qBg.push_back(q);
             }
+            if (q.bucket <= 2u)
+                has3D = true;
+            if (wantGlowOrder && q.bucket != 4u && q.state.order == pkt.glow.order)
+                hasGlowDraws = true;
             m_qUnsorted.push_back(q);
         }
 
@@ -4219,13 +4261,24 @@ private:
                                     for (size_t j = s; j < e; ++j)
                                     {
                                         const MaliMesh *jm = m_qAll[j].mesh;
-                                        const uint32_t baseV = static_cast<uint32_t>(m_streamVertsScratch.size());
-                                        m_streamVertsScratch.insert(m_streamVertsScratch.end(), jm->srcVerts.begin(), jm->srcVerts.end());
+                                        const size_t baseVSize = m_streamVertsScratch.size();
+                                        const uint32_t baseV = static_cast<uint32_t>(baseVSize);
+                                        const size_t srcVCount = jm->srcVerts.size();
+                                        m_streamVertsScratch.resize(baseVSize + srcVCount);
+                                        CompactVertex *dstV = m_streamVertsScratch.data() + baseVSize;
+                                        const CompactVertex *srcV = jm->srcVerts.data();
                                         if (sq.texArrayId >= 0)
                                         {
                                             const uint8_t lay = m_qAll[j].texArrayLayer;
-                                            for (size_t v = baseV; v < m_streamVertsScratch.size(); ++v)
-                                                m_streamVertsScratch[v].texLayer = lay;
+                                            for (size_t v = 0; v < srcVCount; ++v)
+                                            {
+                                                dstV[v] = srcV[v];
+                                                dstV[v].texLayer = lay;
+                                            }
+                                        }
+                                        else
+                                        {
+                                            std::memcpy(dstV, srcV, srcVCount * sizeof(CompactVertex));
                                         }
                                         const size_t prevIdxCount = m_streamIndicesScratch.size();
                                         const size_t srcIdxCount = jm->srcIndices.size();
@@ -4267,18 +4320,6 @@ private:
         const uint32_t rw = std::max(320u, static_cast<uint32_t>(std::lround(pkt.width * scale)) & ~3u);
         const uint32_t rh = std::max(240u, static_cast<uint32_t>(std::lround(pkt.height * scale)) & ~3u);
 
-        bool has3D = false;
-        bool hasGlowDraws = false;
-        const bool wantGlowOrder = m_glowEnabled && pkt.glow.enabled && (pkt.glow.amountA > 0.0f || pkt.glow.amountB > 0.0f);
-        for (const QueuedDraw &q : m_qAll)
-        {
-            if (q.bucket <= 2u)
-                has3D = true;
-            if (wantGlowOrder && q.bucket != 4u && q.state.order == pkt.glow.order)
-                hasGlowDraws = true;
-            if (has3D && (!wantGlowOrder || hasGlowDraws))
-                break;
-        }
         const bool wantTeamIcoBloom = has3D && m_postEnabled && m_postBloomEnabled && m_bloom.enabled;
         const bool wantExposure = wantTeamIcoBloom && m_exposureEnabled;
         const bool wantDof = has3D && m_postEnabled && m_dofEnabled && pkt.dof.enabled && pkt.dof.slices > 0;
@@ -4459,7 +4500,7 @@ private:
 
         bool copyValid = false;
         uint32_t lastCopyOrder = ~0u;
-        std::vector<size_t> deferredHud;
+        m_deferredHudScratch.clear();
         for (size_t i = 0; i < m_qAll.size();)
         {
             const QueuedDraw &q = m_qAll[i];
@@ -4658,7 +4699,7 @@ private:
             }
             if (runPost && q.bucket == 3u && q.state.order >= 20u && q.state.screen && !q.state.screenDepthTest && !q.state.screenCopy && !q.state.previousFrame)
             {
-                deferredHud.push_back(i);
+                m_deferredHudScratch.push_back(i);
                 ++i;
                 continue;
             }
@@ -5126,10 +5167,10 @@ private:
                     glBindFramebuffer(GL_FRAMEBUFFER, dstFbo);
                 }
 
-                if (!deferredHud.empty())
+                if (!m_deferredHudScratch.empty())
                 {
                     resetPsoAndUniformCaches();
-                    for (size_t hi : deferredHud)
+                    for (size_t hi : m_deferredHudScratch)
                         emitBucketSingle(m_qAll[hi], pkt);
                 }
 
@@ -5886,7 +5927,7 @@ private:
                 if (qwords > m_skinMaxQwordsThisFrame)
                     m_skinMaxQwordsThisFrame = qwords;
                 glUniform4fv(prog.uBones, static_cast<GLsizei>(qwords), pkt.skinPaletteData.data() + pe.offsetFloats);
-                if (m_statsEnabled && !m_skinErrLogged)
+                if (m_statsEnabled && !m_skinErrLogged && m_frameNum <= 10u)
                 {
                     const GLenum err = glGetError();
                     if (err != GL_NO_ERROR)
@@ -6516,6 +6557,7 @@ private:
     std::vector<MergeRun *> m_cachedRunForDraw;
     std::vector<std::pair<uint64_t, uint64_t>> m_evictRunsScratch;
     std::vector<const QueuedDraw *> m_instScratch;
+    std::vector<size_t> m_deferredHudScratch;
     std::vector<QueuedDraw> m_qBg, m_qMirror, m_qUnsorted, m_qAll;
     std::vector<uint32_t> m_qOrder;
     std::unordered_set<uint64_t> m_drawnMeshIdsScratch;
