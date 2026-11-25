@@ -3239,10 +3239,18 @@ namespace native_renderer
     // sky, alpha-cutout foliage/cards, water/noDepthWrite, overlays and skinning).
     inline bool solidOccluderDraw(const DrawState &s)
     {
-        return !s.screen && !s.background && !s.overlay && !s.shadowVolume && !s.reflectionSource && !s.reflectionSample &&
-               !s.refractionSample && !s.screenCopy && !s.previousFrame && !s.noDepthWrite && s.skinPalette == 0u &&
-               (s.blend == Blend::Opaque || (s.blend == Blend::Normal && occlusion::isOpaqueTexture(s.texture))) &&
-               s.opacity >= 0.98f;
+        if (s.screen || s.background || s.overlay || s.shadowVolume || s.reflectionSource || s.reflectionSample ||
+            s.refractionSample || s.screenCopy || s.previousFrame || s.noDepthWrite || s.fresnel ||
+            s.skinPalette != 0u || s.opacity < 0.99f || s.texture == 0ull)
+            return false;
+        if (s.blend != Blend::Opaque && s.blend != Blend::Normal)
+            return false;
+        if (!occlusion::isOpaqueTexture(s.texture))
+            return false;
+        const bool ate = (s.alphaTest & 1u) != 0u;
+        const uint32_t atst = (s.alphaTest >> 1) & 7u;
+        const uint32_t aref8 = (s.alphaTest >> 4) & 0xFFu;
+        return !ate || atst == 1u || (atst == 5u && aref8 <= 120u) || (atst == 6u && aref8 <= 116u);
     }
     inline bool canOcclusionCullDraw(const DrawState &s)
     {
