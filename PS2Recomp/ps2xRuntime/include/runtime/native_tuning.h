@@ -84,6 +84,10 @@ namespace native_renderer
         float maliAtPass2 = 1.0f;       // SOTC_MALI_AT_PASS2 (0 off, 1 smart auto, 2 always)
         bool maliFastShaders = true;    // SOTC_MALI_FAST_SHADERS
         bool maliCull = true;           // SOTC_MALI_CULL
+        bool occCull = false;           // SOTC_OCC_CULL (CPU background-thread Hi-Z occlusion culling)
+        float occMinDist = 18.0f;       // SOTC_OCC_MIN_DIST (never occlusion-cull closer than this distance)
+        float occBias = 0.04f;          // SOTC_OCC_BIAS (depth tolerance so coplanar walls stay visible)
+        float occMargin = 0.03f;        // SOTC_OCC_MARGIN (screen-space AABB margin to guard camera panning)
         bool maliMerge = true;          // SOTC_MALI_MERGE
         bool maliInstancing = true;     // SOTC_MALI_INSTANCING
         float maliProfile = 1.0f;       // SOTC_MALI_PROFILE (0 Max Perf, 1 Medium, 2 Original PS2/PS3, 3 Custom)
