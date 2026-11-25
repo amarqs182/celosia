@@ -40,6 +40,13 @@ namespace native_renderer
         // Returns true ONLY when conservatively guaranteed occluded behind solids.
         bool isBoxOccluded(const float modelRowMajor[16], const float lo[3], const float hi[3], float bias, float margin);
 
+        // Fast-path helpers for BVH sub-part traversal inside modelDisp: compute
+        // outPmPrev = VP_prev * model once per model (returning false if Hi-Z is
+        // inactive or currentCamera doesn't match the captured main camera), then
+        // test individual BVH node AABBs in O(1) via isBoxOccludedClip().
+        bool prepareModelPrevClip(const float currentCamera[16], const float modelRowMajor[16], float outPmPrev[16]);
+        bool isBoxOccludedClip(const float pmPrev[16], const float lo[3], const float hi[3], float minDist, float bias, float margin);
+
         void shutdown();
     }
 }
