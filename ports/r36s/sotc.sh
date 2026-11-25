@@ -1,6 +1,6 @@
 #!/bin/sh
 # SotC launcher for R36S (RK3326 / Mali-G31 GLES 3.2 / SDL2 KMSDRM)
-cd "$(dirname "$0")" || exit 1
+cd /roms/ports/sotc_data || exit 1
 PORT_DIR="$(pwd)"
 
 LOCKFILE="/tmp/sotc.lock"

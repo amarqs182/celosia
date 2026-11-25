@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<gameList>
+	<game>
+		<path>./sotc.sh</path>
+		<name>Shadow of the Colossus</name>
+		<desc>Shadow of the Colossus is an action game that squares a young boy against a group of towering colossi. You assume the role of a nameless hero trying to rid the world of giant creatures and find his lost love. Armed with only a magical sword and bow, you must identify the weaknesses of the giants and figure out how to exploit them.</desc>
+		<image>./images/sotc-image.jpg</image>
+		<video>./videos/sotc-video.mp4</video>
+		<marquee>./images/sotc-marquee.png</marquee>
+		<thumbnail>./images/sotc-thumb.png</thumbnail>
+		<rating>0.9</rating>
+		<releasedate>20051018T000000</releasedate>
+		<developer>Team Ico / SCE Japan Studio</developer>
+		<publisher>Sony Computer Entertainment</publisher>
+		<genre>Action / Adventure</genre>
+		<players>1</players>
+		<governor>performance</governor>
+	</game>
+</gameList>

@@ -1,5 +1,5 @@
-GAME_NAME="Shadow of the Colossus (Celosia Recomp)"
-EXE="./SotC.sh"
+GAME_NAME="Shadow of the Colossus"
+EXE="./sotc.sh"
 ARGS=""
 PLATFORM="RG351MP"
 ICON=""

@@ -182,15 +182,17 @@ ssh <user>@<device-ip> 'uname -m'
 
 Device rules (must be followed before touching the hardware):
 
-- Write only under `/roms/ports/.SotC_Celosia/`, `/roms/ports/SotC_Celosia/`, and
-  `/tmp` (`/tmp` is tmpfs, 448 MiB).
+- Write only under `/roms/ports/sotc_data/`, `/roms/ports/sotc.sh`,
+  `/roms/ports/gamelist.xml`, and `/tmp` (`/tmp` is tmpfs, 448 MiB).
 - **Clean the device before every test/deploy** (after confirming `ps2sotc` is not
   running): remove stale runtime artifacts (`/tmp/sotc.log`, `/tmp/sotc.lock`,
   `/tmp/es_restart.log`, `/tmp/celosia_mali_shaders/`, stray duplicate
-  launchers such as `/roms/ports/SotC.sh`, and stale debug dumps/logs under
-  `/roms/ports/.SotC_Celosia/logs/` or `ps2_log.txt`), sync the current
-  `ports/r36s/SotC.sh` (LF, `chmod +x`) to `/roms/ports/.SotC_Celosia/SotC.sh`,
-  and deploy the freshly built binary atomically with MD5 verification — while
+  launchers such as `/roms/ports/SotC.sh`, `/roms/ports/SotC_Celosia.sh`, or
+  `/roms/ports/sotc_data/SotC.sh`, and stale debug dumps/logs under
+  `/roms/ports/sotc_data/logs/` or `ps2_log.txt`), sync the current
+  `ports/r36s/sotc.sh` (LF, `chmod +x`) to `/roms/ports/sotc.sh`,
+  and deploy the freshly built binary atomically with MD5 verification to
+  `/roms/ports/sotc_data/ps2sotc_aarch64_pie_sdl` — while
   always preserving `memcards/`, `celosia_settings.cfg`, game assets
   (`NICO.DAT`, `SCUS_974.72`, `*.XFF`, etc.), and `captures/`.
 - **Never** scan `/proc/[0-9]*/fd/*` — it freezes the R36S.
