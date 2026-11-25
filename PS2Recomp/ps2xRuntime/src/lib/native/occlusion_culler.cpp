@@ -238,10 +238,9 @@ namespace native_renderer
                     const float y = (k & 2) ? hi[1] : lo[1];
                     const float z = (k & 1) ? hi[2] : lo[2];
                     const Vec4 cp = transformClip(clip, x, y, z);
-                    const float aw = std::fabs(cp.w);
                     const uint32_t bits =
-                        (cp.x > aw ? 1u : 0u) | (cp.x < -aw ? 2u : 0u) |
-                        (cp.y > aw ? 4u : 0u) | (cp.y < -aw ? 8u : 0u) |
+                        (cp.x > cp.w ? 1u : 0u) | (cp.x < -cp.w ? 2u : 0u) |
+                        (cp.y > cp.w ? 4u : 0u) | (cp.y < -cp.w ? 8u : 0u) |
                         (cp.w < 0.1f ? 16u : 0u);
                     allOut &= bits;
                     if (allOut == 0u)
@@ -642,7 +641,7 @@ namespace native_renderer
             const size_t pixels = static_cast<size_t>(width) * height;
             for (size_t i = 0; i < pixels; ++i)
             {
-                if (rgba[i * 4u + 3u] < 120u)
+                if (rgba[i * 4u + 3u] < 124u)
                     return;
             }
             g_opaqueTextures.insert(id);
