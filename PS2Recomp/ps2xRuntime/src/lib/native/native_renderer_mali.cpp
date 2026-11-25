@@ -3783,7 +3783,7 @@ private:
         return &run;
     }
 
-    MaliMesh *resolveMultiMesh(const RawDraw &rd, const FramePacket &pkt)
+    MaliMesh *resolveMultiMesh(const RawDraw &rd, const FramePacket &pkt, uint32_t &builtThisFrame)
     {
         if (rd.multiCount < 2u || static_cast<size_t>(rd.multiOffset) + rd.multiCount > pkt.multiMeshIds.size())
             return nullptr;
@@ -3811,6 +3811,9 @@ private:
             mit->second.lastUsed = m_frameNum;
             return &mit->second;
         }
+
+        if (builtThisFrame >= 6u)
+            return nullptr;
 
         if (totalVerts == 0u || totalIndices == 0u || totalVerts > 65536u || totalIndices > 196608u)
             return nullptr;
@@ -3914,6 +3917,7 @@ private:
                      cm.srcIndices.data(), GL_STATIC_DRAW);
 
         m_multiMeshBytes += bytes;
+        ++builtThisFrame;
         return &cm;
     }
 
@@ -4021,6 +4025,7 @@ private:
         m_skinMaxQwordsThisFrame = 0;
         m_skinInvalidThisFrame = 0;
         uint64_t mergeUsThisFrame = 0;
+        uint32_t multiBuiltThisFrame = 0u;
 
         const uint64_t upStartUs = m_statsEnabled ? frameStartUs : 0u;
         processUploads(pkt);
@@ -4306,7 +4311,7 @@ private:
                 continue;
             if (rd.multiCount >= 2u)
             {
-                if (MaliMesh *cm = resolveMultiMesh(rd, pkt))
+                if (MaliMesh *cm = resolveMultiMesh(rd, pkt, multiBuiltThisFrame))
                 {
                     enqueueDraw(rd, rd.meshId, cm);
                     continue;
