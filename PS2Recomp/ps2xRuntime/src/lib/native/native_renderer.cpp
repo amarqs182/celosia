@@ -144,10 +144,12 @@ namespace native_renderer
         {
             d.sacParticles = false;
             d.sacLod = false;
+            d.sacLodLow = false;
             d.sacCamColl = d.sacFarChara = d.sacFxHalf = d.sacDrawDist = false;
         }
         if (on("SOTC_SAC_LOD"))
             d.sacLod = flag("SOTC_SAC_LOD");
+            d.sacLodLow = flag("SOTC_SAC_LOD_LOW");
         if (on("SOTC_SAC_PARTICLES"))
             d.sacParticles = flag("SOTC_SAC_PARTICLES");
         if (on("SOTC_FUR_SHELLS"))
@@ -379,6 +381,8 @@ namespace native_renderer
             add(std::string("SOTC_SAC_PARTICLES=") + (t.sacParticles ? "1" : "0"));
         if (t.sacLod != d.sacLod)
             add(std::string("SOTC_SAC_LOD=") + (t.sacLod ? "1" : "0"));
+        if (t.sacLodLow != d.sacLodLow)
+            add(std::string("SOTC_SAC_LOD_LOW=") + (t.sacLodLow ? "1" : "0"));
         for (const auto &[name, flag] : {std::pair<const char *, bool Tuning::*>{"SOTC_SAC_CAMCOLL", &Tuning::sacCamColl}, {"SOTC_SAC_FARCHARA", &Tuning::sacFarChara},
                                          {"SOTC_SAC_FX", &Tuning::sacFxHalf}, {"SOTC_SAC_DRAWDIST", &Tuning::sacDrawDist}})
             if (t.*flag != d.*flag)
@@ -784,6 +788,10 @@ namespace native_renderer
                     "SACRIFICE (saves game-thread and render time): each model's detail level is picked as if it were 1.6x as far away, so the simpler versions are used sooner (rougher outlines and terrain at a distance; nothing disappears). Off: the game's own levels.",
                     "SACRIFÍCIO (poupa tempo da thread do jogo e do render): o nível de detalhe de cada modelo é escolhido como se ele estivesse 1,6x mais longe, então as versões mais simples entram antes (contornos e terreno mais grosseiros à distância; nada some). Desligado: os níveis do próprio jogo.",
                     &Tuning::sacLod, "SOTC_SAC_LOD");
+        debugToggle("sac_lod_low", "Always lowest LOD", "LOD sempre mínimo",
+                    "SACRIFICE: locks terrain and persistent models (+0x28 clear) to their lowest-detail LOD level at all distances, eliminating LOD mesh-pop/stutter near the camera (nothing disappears).",
+                    "SACRIFÍCIO: trava terreno e modelos persistentes na versão de menor detalhe (LOD mais baixo) em qualquer distância, eliminando trocas e quebras de malha perto da câmera (nada some).",
+                    &Tuning::sacLodLow, "SOTC_SAC_LOD_LOW");
         // Round 20: the switches to flip on the console without a reboot,
         // first in the Debug group.
         {
@@ -1143,7 +1151,7 @@ namespace native_renderer
             {"body_shadows", &Tuning::bodyShadows, nullptr}, {"vertex_fog", &Tuning::vertexFog, nullptr}, {"fog_amount", nullptr, &Tuning::vertexFogAmount},
             {"zfog", &Tuning::zFog, nullptr}, {"particles", &Tuning::particles, nullptr}, {"sac_particles", &Tuning::sacParticles, nullptr},
             {"sac_fx", &Tuning::sacFxHalf, nullptr}, {"reflections", &Tuning::reflections, nullptr}, {"refraction", &Tuning::refraction, nullptr},
-            {"heat_haze", &Tuning::heatHaze, nullptr}, {"alpha_test", &Tuning::alphaTest, nullptr}, {"sac_lod", &Tuning::sacLod, nullptr},
+            {"heat_haze", &Tuning::heatHaze, nullptr}, {"alpha_test", &Tuning::alphaTest, nullptr}, {"sac_lod", &Tuning::sacLod, nullptr}, {"sac_lod_low", &Tuning::sacLodLow, nullptr},
             {"sac_drawdist", &Tuning::sacDrawDist, nullptr},
         };
         constexpr int kPresetFieldCount = static_cast<int>(sizeof(kPresetFields) / sizeof(kPresetFields[0]));
@@ -1302,6 +1310,7 @@ namespace native_renderer
             {"fur_shells", nullptr, &Tuning::furShells},
             {"model_detail", nullptr, &Tuning::modelDetail},
             {"sac_lod", &Tuning::sacLod, nullptr},
+            {"sac_lod_low", &Tuning::sacLodLow, nullptr},
             {"sac_drawdist", &Tuning::sacDrawDist, nullptr},
             {"sac_camcoll", &Tuning::sacCamColl, nullptr},
             {"sac_farchara", &Tuning::sacFarChara, nullptr},

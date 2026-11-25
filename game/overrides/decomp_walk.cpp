@@ -1058,8 +1058,13 @@ namespace decomp_walk
         uint64_t v0;
         float f20 = -1.0f;
         bool none = false, past = false;
-        const int32_t level = FPU_CVT_W_S(f12);
         const int32_t count = m.s32(s1 + 0x1Cu);
+        int32_t level = FPU_CVT_W_S(f12);
+        if (native_renderer::tuning().sacLodLow && m.s32(a0 + 0x28u) == 0 && count > 0)
+        {
+            level = count - 1;
+            f12 = FPU_CVT_S_W(level);
+        }
         if (static_cast<uint64_t>(static_cast<int64_t>(level)) < static_cast<uint64_t>(static_cast<int64_t>(count)))
             v0 = static_cast<uint64_t>(static_cast<int64_t>(m.s32(s1 + 0xCu)));
         else
