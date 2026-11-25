@@ -1780,6 +1780,8 @@ struct QueuedDraw
     DrawState state{};
     float minW = 0.0f;
     uint32_t seq = 0;
+    uint32_t stateFirstSeq = 0;
+    uint32_t clipFirstSeq = 0;
     uint32_t psoKey = 0;
     int16_t texArrayId = -1;
     uint8_t texArrayLayer = 0;
@@ -4347,6 +4349,24 @@ private:
 
         // Sort by 4-byte index to avoid moving ~288-byte QueuedDraw structs during std::sort,
         // then scatter into m_qAll in one sequential pass.
+        // Assign deterministic first-seen submission sequence numbers per state/clip group so
+        // frame-to-frame camera/light hash changes never scramble overlapping tree/foliage order.
+        m_stateFirstSeq.clear();
+        m_clipFirstSeq.clear();
+        for (QueuedDraw &qd : m_qUnsorted)
+        {
+            if (qd.bucket <= 1u || (qd.bucket == 2u && (qd.b2SortTier == 0u || qd.b2SortTier == 2u)))
+            {
+                const uint32_t pal = qd.skinned ? qd.state.skinPalette : 0u;
+                const uint64_t sgKey = qd.stateHash ^
+                    (static_cast<uint64_t>(qd.state.order & 0xFFu) << 56) ^
+                    (static_cast<uint64_t>(qd.bucket & 0xFu) << 52) ^
+                    (static_cast<uint64_t>(pal) * 0x517cc1b727220a95ull);
+                qd.stateFirstSeq = m_stateFirstSeq.emplace(sgKey, qd.seq).first->second;
+                const uint64_t cgKey = sgKey ^ (qd.clipHash * 0x9e3779b97f4a7c15ull);
+                qd.clipFirstSeq = m_clipFirstSeq.emplace(cgKey, qd.seq).first->second;
+            }
+        }
         const uint32_t qCount = static_cast<uint32_t>(m_qUnsorted.size());
         m_qOrder.resize(qCount);
         for (uint32_t idx = 0; idx < qCount; ++idx)
@@ -4365,13 +4385,15 @@ private:
                 const uint32_t aPal = a.skinned ? a.state.skinPalette : 0u;
                 const uint32_t bPal = b.skinned ? b.state.skinPalette : 0u;
                 if (aPal != bPal) return aPal < bPal;
+                if (a.stateFirstSeq != b.stateFirstSeq) return a.stateFirstSeq < b.stateFirstSeq;
                 if (a.stateHash != b.stateHash) return a.stateHash < b.stateHash;
                 if (a.texArrayId != b.texArrayId) return a.texArrayId < b.texArrayId;
                 if (a.state.clamp != b.state.clamp) return a.state.clamp < b.state.clamp;
                 if (a.state.alphaTest != b.state.alphaTest) return a.state.alphaTest < b.state.alphaTest;
+                if (a.clipFirstSeq != b.clipFirstSeq) return a.clipFirstSeq < b.clipFirstSeq;
                 if (a.clipHash != b.clipHash) return a.clipHash < b.clipHash;
                 if (a.texArrayId < 0 && a.state.texture != b.state.texture) return a.state.texture < b.state.texture;
-                if (a.meshId != b.meshId) return a.meshId < b.meshId;
+                if (a.bucket == 0u && a.meshId != b.meshId) return a.meshId < b.meshId;
             }
             if (a.bucket == 2u)
             {
@@ -4380,10 +4402,12 @@ private:
                 if (a.b2SortTier == 0u || a.b2SortTier == 2u)
                 {
                     if (a.psoKey != b.psoKey) return a.psoKey < b.psoKey;
+                    if (a.stateFirstSeq != b.stateFirstSeq) return a.stateFirstSeq < b.stateFirstSeq;
                     if (a.stateHash != b.stateHash) return a.stateHash < b.stateHash;
                     if (a.texArrayId != b.texArrayId) return a.texArrayId < b.texArrayId;
                     if (a.state.clamp != b.state.clamp) return a.state.clamp < b.state.clamp;
                     if (a.state.alphaTest != b.state.alphaTest) return a.state.alphaTest < b.state.alphaTest;
+                    if (a.clipFirstSeq != b.clipFirstSeq) return a.clipFirstSeq < b.clipFirstSeq;
                     if (a.clipHash != b.clipHash) return a.clipHash < b.clipHash;
                     if (a.texArrayId < 0 && a.state.texture != b.state.texture) return a.state.texture < b.state.texture;
                     if (a.meshId != b.meshId) return a.meshId < b.meshId;
@@ -6795,6 +6819,8 @@ private:
     std::vector<size_t> m_deferredHudScratch;
     std::vector<QueuedDraw> m_qBg, m_qMirror, m_qUnsorted, m_qAll;
     std::vector<uint32_t> m_qOrder;
+    std::unordered_map<uint64_t, uint32_t> m_stateFirstSeq;
+    std::unordered_map<uint64_t, uint32_t> m_clipFirstSeq;
     std::unordered_set<uint64_t> m_drawnMeshIdsScratch;
     std::unordered_set<uint64_t> m_drawnTexIdsScratch;
     std::unordered_set<uint64_t> m_dumpedTexIds;
