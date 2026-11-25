@@ -104,9 +104,16 @@ namespace native_renderer
                 float l3[kW3 * kH3] = {};
             };
 
+            struct MeshBounds
+            {
+                float lo[3];
+                float hi[3];
+            };
+
             // Game-thread upload/draw staging state (game thread only).
             IdSet g_knownMeshes;
             IdSet g_opaqueTextures;
+            std::unordered_map<uint64_t, MeshBounds> g_meshBounds;
             size_t g_meshCacheBytes = 0;
             std::vector<PendingMesh> g_pendingMeshes;
             std::vector<DrawCmd> g_stagedDraws;
@@ -115,11 +122,15 @@ namespace native_renderer
             // Camera latch & query counters shared between cpu0 (clip83) and the clip140 helper thread.
             std::mutex g_camMutex;
             float g_curVp[16] = {};
+            float g_reprojMat[16] = {};
+            bool g_reprojIdentity = true;
+            std::atomic<bool> g_reprojValid{false};
             std::atomic<bool> g_hasCurVp{false};
             std::atomic<bool> g_cutInvalidated{true};
             std::atomic<const HiZBuffer *> g_activeHiZ{nullptr};
             std::atomic<uint64_t> g_queryTested{0};
             std::atomic<uint64_t> g_queryCulled{0};
+            std::atomic<uint64_t> g_drawCulled{0};
 
             // Triple-buffered published Hi-Z pyramids shared wait-free with readers.
             HiZBuffer g_buffers[3];
@@ -171,6 +182,70 @@ namespace native_renderer
                         maxDelta = d;
                 }
                 return maxDelta < 0.8f;
+            }
+
+            void mul4x4(const float a[16], const float b[16], float out[16])
+            {
+                for (int col = 0; col < 4; ++col)
+                {
+                    const float b0 = b[col * 4 + 0];
+                    const float b1 = b[col * 4 + 1];
+                    const float b2 = b[col * 4 + 2];
+                    const float b3 = b[col * 4 + 3];
+                    for (int row = 0; row < 4; ++row)
+                        out[col * 4 + row] = a[0 + row] * b0 + a[4 + row] * b1 + a[8 + row] * b2 + a[12 + row] * b3;
+                }
+            }
+
+            bool invert4x4(const float m[16], float invOut[16])
+            {
+                double inv[16];
+                inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] + m[9] * m[7] * m[14] + m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
+                inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] - m[8] * m[7] * m[14] - m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
+                inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] + m[8] * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
+                inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] - m[8] * m[6] * m[13] - m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
+
+                inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] - m[9] * m[3] * m[14] - m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
+                inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] + m[8] * m[3] * m[14] + m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
+                inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] - m[8] * m[3] * m[13] - m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
+                inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] + m[8] * m[2] * m[13] + m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
+
+                inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] + m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
+                inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] - m[4] * m[3] * m[14] - m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
+                inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] + m[4] * m[3] * m[13] + m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
+                inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14] - m[4] * m[2] * m[13] - m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
+
+                inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] - m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
+                inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] + m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
+                inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] - m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
+                inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] + m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
+
+                double det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
+                if (std::fabs(det) < 1e-12)
+                    return false;
+                det = 1.0 / det;
+                for (int i = 0; i < 16; ++i)
+                    invOut[i] = static_cast<float>(inv[i] * det);
+                return true;
+            }
+
+            void recordMeshBounds(uint64_t id, const Vertex *vertices, uint32_t count)
+            {
+                if (!vertices || count == 0u || g_meshBounds.find(id) != g_meshBounds.end())
+                    return;
+                float lx = vertices[0].x, ly = vertices[0].y, lz = vertices[0].z;
+                float hx = lx, hy = ly, hz = lz;
+                for (uint32_t i = 1; i < count; ++i)
+                {
+                    const Vertex &v = vertices[i];
+                    if (v.x < lx) lx = v.x;
+                    if (v.x > hx) hx = v.x;
+                    if (v.y < ly) ly = v.y;
+                    if (v.y > hy) hy = v.y;
+                    if (v.z < lz) lz = v.z;
+                    if (v.z > hz) hz = v.z;
+                }
+                g_meshBounds.emplace(id, MeshBounds{{lx, ly, lz}, {hx, hy, hz}});
             }
 
             void rasterizeProjectedTri(float *l0, const Vec4 &v0, const Vec4 &v1, const Vec4 &v2)
@@ -444,9 +519,10 @@ namespace native_renderer
 
         void registerMesh(uint64_t id, const Vertex *vertices, uint32_t count, bool perFrame)
         {
-            if (perFrame || !vertices || count < kMinMeshVerts || count > kMaxMeshVerts)
+            if (perFrame || !vertices || count < kMinMeshVerts)
                 return;
-            if (g_knownMeshes.count(id))
+            recordMeshBounds(id, vertices, count);
+            if (count > kMaxMeshVerts || g_knownMeshes.count(id))
                 return;
 
             bool allOpaque = true;
@@ -500,9 +576,10 @@ namespace native_renderer
 
         void registerIndexedMesh(uint64_t id, const Vertex *vertices, uint32_t count, const uint32_t *indices, uint32_t indexCount)
         {
-            if (!vertices || !indices || count < kMinMeshVerts || count > kMaxMeshVerts || indexCount < 3u)
+            if (!vertices || !indices || count < kMinMeshVerts || indexCount < 3u)
                 return;
-            if (g_knownMeshes.count(id))
+            recordMeshBounds(id, vertices, count);
+            if (count > kMaxMeshVerts || g_knownMeshes.count(id))
                 return;
 
             PendingMesh pm;
@@ -567,11 +644,31 @@ namespace native_renderer
             {
                 g_cutInvalidated.store(false, std::memory_order_relaxed);
                 g_activeHiZ.store(&buf, std::memory_order_release);
+                if (std::memcmp(g_curVp, buf.vp, sizeof(g_curVp)) == 0)
+                {
+                    g_reprojIdentity = true;
+                    g_reprojValid.store(true, std::memory_order_release);
+                }
+                else
+                {
+                    float invCur[16];
+                    if (invert4x4(g_curVp, invCur))
+                    {
+                        mul4x4(buf.vp, invCur, g_reprojMat);
+                        g_reprojIdentity = false;
+                        g_reprojValid.store(true, std::memory_order_release);
+                    }
+                    else
+                    {
+                        g_reprojValid.store(false, std::memory_order_release);
+                    }
+                }
             }
             else
             {
                 g_cutInvalidated.store(true, std::memory_order_relaxed);
                 g_activeHiZ.store(nullptr, std::memory_order_release);
+                g_reprojValid.store(false, std::memory_order_release);
             }
             g_hasCurVp.store(true, std::memory_order_release);
         }
@@ -600,6 +697,7 @@ namespace native_renderer
                 std::lock_guard<std::mutex> lock(g_camMutex);
                 // Release reading pin at frame end so worker can freely rotate triple buffer.
                 g_activeHiZ.store(nullptr, std::memory_order_release);
+                g_reprojValid.store(false, std::memory_order_release);
                 g_readingIdx.store(-1, std::memory_order_release);
                 hadCurVp = g_hasCurVp.exchange(false, std::memory_order_acq_rel);
                 if (hadCurVp)
@@ -611,6 +709,7 @@ namespace native_renderer
                 g_stagedDraws.clear();
                 g_queryTested.store(0u, std::memory_order_relaxed);
                 g_queryCulled.store(0u, std::memory_order_relaxed);
+                g_drawCulled.store(0u, std::memory_order_relaxed);
                 return;
             }
 
@@ -622,14 +721,17 @@ namespace native_renderer
                 const uint32_t cov = g_lastCovPct.load(std::memory_order_relaxed);
                 const uint64_t tested = g_queryTested.exchange(0u, std::memory_order_relaxed);
                 const uint64_t culled = g_queryCulled.exchange(0u, std::memory_order_relaxed);
-                std::fprintf(stderr, "[occ:hiz] tested=%llu culled=%llu cov=%u%% worker=%.2fms tris=%llu draws=%llu meshes=%zu opqTex=%zu\n",
+                const uint64_t drawCulled = g_drawCulled.exchange(0u, std::memory_order_relaxed);
+                std::fprintf(stderr, "[occ:hiz] tested=%llu culled=%llu drawCulled=%llu cov=%u%% worker=%.2fms tris=%llu draws=%llu meshes=%zu bounds=%zu opqTex=%zu\n",
                              static_cast<unsigned long long>(tested / 120u),
                              static_cast<unsigned long long>(culled / 120u),
+                             static_cast<unsigned long long>(drawCulled / 120u),
                              cov,
                              static_cast<double>(rus) / 1000.0,
                              static_cast<unsigned long long>(tris),
                              static_cast<unsigned long long>(draws),
                              g_knownMeshes.size(),
+                             g_meshBounds.size(),
                              g_opaqueTextures.size());
             }
 
@@ -770,6 +872,58 @@ namespace native_renderer
             if (!prepareModelPrevClip(nullptr, modelRowMajor, pm))
                 return false;
             return isBoxOccludedClip(pm, lo, hi, 0.25f, bias, margin);
+        }
+
+        bool isMeshOccluded(uint64_t meshId, const float clip[16], float minDist, float bias, float margin)
+        {
+            if (!g_reprojValid.load(std::memory_order_acquire))
+                return false;
+            const auto it = g_meshBounds.find(meshId);
+            if (it == g_meshBounds.end())
+                return false;
+            float prevClipBuf[16];
+            const float *prevClip = clip;
+            if (!g_reprojIdentity)
+            {
+                mul4x4(g_reprojMat, clip, prevClipBuf);
+                prevClip = prevClipBuf;
+            }
+            if (!isBoxOccludedClip(prevClip, it->second.lo, it->second.hi, minDist, bias, margin))
+                return false;
+            g_drawCulled.fetch_add(1u, std::memory_order_relaxed);
+            return true;
+        }
+
+        uint32_t filterOccludedMeshes(const uint64_t *meshes, uint32_t count, const float clip[16],
+                                      float minDist, float bias, float margin, std::vector<uint64_t> &outKept)
+        {
+            outKept.clear();
+            if (!g_reprojValid.load(std::memory_order_acquire))
+                return count;
+            float prevClipBuf[16];
+            const float *prevClip = clip;
+            if (!g_reprojIdentity)
+            {
+                mul4x4(g_reprojMat, clip, prevClipBuf);
+                prevClip = prevClipBuf;
+            }
+            uint32_t dropped = 0u;
+            for (uint32_t i = 0; i < count; ++i)
+            {
+                const uint64_t id = meshes[i];
+                const auto it = g_meshBounds.find(id);
+                if (it != g_meshBounds.end() && isBoxOccludedClip(prevClip, it->second.lo, it->second.hi, minDist, bias, margin))
+                {
+                    ++dropped;
+                }
+                else
+                {
+                    outKept.push_back(id);
+                }
+            }
+            if (dropped != 0u)
+                g_drawCulled.fetch_add(dropped, std::memory_order_relaxed);
+            return static_cast<uint32_t>(outKept.size());
         }
 
         void shutdown()

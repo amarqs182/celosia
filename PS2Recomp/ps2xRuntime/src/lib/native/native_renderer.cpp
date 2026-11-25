@@ -3243,6 +3243,11 @@ namespace native_renderer
                !s.refractionSample && !s.screenCopy && !s.previousFrame && !s.noDepthWrite && s.skinPalette == 0u &&
                (s.blend == Blend::Opaque || s.blend == Blend::Normal) && s.opacity >= 0.98f && occlusion::isOpaqueTexture(s.texture);
     }
+    inline bool canOcclusionCullDraw(const DrawState &s)
+    {
+        return !s.screen && !s.background && !s.shadowVolume && !s.reflectionSource &&
+               !s.screenCopy && !s.previousFrame && s.skinPalette == 0u && s.order >= 2u;
+    }
     // Still on the worker, and not in the backend already: a build the scene
     // recorder asked for again (hasMesh says no for what it has not got) is
     // of the same content (ids hash it), so the backend's copy is drawn.
@@ -3259,8 +3264,6 @@ namespace native_renderer
             if (g_drawTapOnly)
                 return;
         }
-        ++g_uploads.draws;
-        g_frameDraws.fetch_add(1u, std::memory_order_relaxed);
         if (g_dumpFile)
             dumpDraw(mesh, clip, state);
         // Its mesh or texture still on the worker (buildAsync): left out.
@@ -3283,6 +3286,10 @@ namespace native_renderer
                 native_recorder::front::draw(&mesh, 1, clip, state, 2);
             return;
         }
+        if (t.occCull && canOcclusionCullDraw(state) && occlusion::isMeshOccluded(mesh, clip, t.occMinDist, t.occBias, t.occMargin))
+            return;
+        ++g_uploads.draws;
+        g_frameDraws.fetch_add(1u, std::memory_order_relaxed);
         if (t.occCull && solidOccluderDraw(state))
             occlusion::submitDraw(mesh, clip);
         if (native_recorder::active())
@@ -3317,8 +3324,6 @@ namespace native_renderer
             if (g_drawTapOnly)
                 return;
         }
-        g_uploads.draws += count;
-        g_frameDraws.fetch_add(count, std::memory_order_relaxed);
         if (g_dumpFile)
             for (uint32_t i = 0; i < count; ++i)
                 dumpDraw(meshes[i], clip, state);
@@ -3373,6 +3378,20 @@ namespace native_renderer
                 native_recorder::front::draw(list, n, clip, state, 2);
             return;
         }
+        if (t.occCull && canOcclusionCullDraw(state))
+        {
+            static std::vector<uint64_t> occKept;
+            const uint32_t keptCount = occlusion::filterOccludedMeshes(list, n, clip, t.occMinDist, t.occBias, t.occMargin, occKept);
+            if (keptCount == 0u)
+                return;
+            if (keptCount < n)
+            {
+                list = occKept.data();
+                n = keptCount;
+            }
+        }
+        g_uploads.draws += n;
+        g_frameDraws.fetch_add(n, std::memory_order_relaxed);
         if (t.occCull && solidOccluderDraw(state))
             occlusion::submitDrawMulti(list, n, clip);
         if (native_recorder::active())
