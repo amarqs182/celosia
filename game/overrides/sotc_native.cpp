@@ -28,6 +28,7 @@
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
 #include "runtime/native_tuning.h"
+#include "runtime/occlusion_culler.h"
 #include "runtime/native_recorder.h"
 #include "runtime/host_menu.h"
 #include "runtime/native_renderer.h"
@@ -10091,7 +10092,8 @@ namespace sotc_native
     // the vector's data and size kept in registers between its resizes.
     template <bool prefetchOn>
     __attribute__((noinline)) void mdsPartWalk(MdsPartClip &pc, uint32_t table, uint32_t root, uint32_t &budgetRef, uint32_t &maxNodeRef, bool pumpQueue,
-                                               std::vector<uint8_t> *partOut, bool &onceRef, uint32_t *seen, uint32_t stamp)
+                                               std::vector<uint8_t> *partOut, bool &onceRef, uint32_t *seen, uint32_t stamp,
+                                               const float *occPmPrev, float occMinDist, float occBias, float occMargin)
     {
         uint8_t *const ram = const_cast<uint8_t *>(g_ram);
         bool once = onceRef;
@@ -10127,6 +10129,13 @@ namespace sotc_native
                 maxNode = std::max(maxNode, node);
                 if (!state)
                     state = pc.test(ram, node);
+                if (occPmPrev && state != 1u)
+                {
+                    const float *boxLo = reinterpret_cast<const float *>(ram + (node & 0x1FFFFFCu));
+                    const float *boxHi = reinterpret_cast<const float *>(ram + ((node + 0x10u) & 0x1FFFFFCu));
+                    if (native_renderer::occlusion::isBoxOccludedClip(occPmPrev, boxLo, boxHi, occMinDist, occBias, occMargin))
+                        state = 1u;
+                }
                 std::memcpy(ram + ((node + 0x2Cu) & 0x1FFFFFCu), &state, 4);
                 if (once)
                 {
@@ -10468,6 +10477,15 @@ namespace sotc_native
                 pv[index] = static_cast<uint8_t>(state);
             };
             const bool pumpQueue = g_hookLean && prefetchOk;
+            const native_renderer::Tuning &occT = native_renderer::tuning();
+            float occPmBuf[16];
+            const float *occPmPtr = nullptr;
+            if (occT.occCull)
+            {
+                const float *curCam = in ? in->camera : reinterpret_cast<const float *>(g_ram + ((g_cameraContext + 0x5A0u) & 0x1FFFFFCu));
+                if (native_renderer::occlusion::prepareModelPrevClip(curCam, model, occPmBuf))
+                    occPmPtr = occPmBuf;
+            }
             const auto visit = [&](auto &&self, uint32_t index, uint32_t node, uint32_t inherited, int depth) -> void
             {
                 if (depth > 64 || budget == 0u)
@@ -10476,7 +10494,14 @@ namespace sotc_native
                 if (pumpQueue)
                     g_prefetchQueue.pumpOne(); // the next draw's lines (queueNextDraw)
                 maxNode = std::max(maxNode, node);
-                const uint32_t state = inherited ? inherited : test(node);
+                uint32_t state = inherited ? inherited : test(node);
+                if (occPmPtr && state != 1u)
+                {
+                    const float *boxLo = reinterpret_cast<const float *>(g_ram + (node & 0x1FFFFFCu));
+                    const float *boxHi = reinterpret_cast<const float *>(g_ram + ((node + 0x10u) & 0x1FFFFFCu));
+                    if (native_renderer::occlusion::isBoxOccludedClip(occPmPtr, boxLo, boxHi, occT.occMinDist, occT.occBias, occT.occMargin))
+                        state = 1u;
+                }
                 put(node + 0x2Cu, state);
                 record(index, state);
                 for (uint32_t link : {0x20u, 0x24u})
@@ -10522,9 +10547,11 @@ namespace sotc_native
                     return;
                 }
                 if (prefetchOn)
-                    mdsPartWalk<true>(pc, table, root, budget, maxNode, pumpQueue, partOut, once, seen, stamp);
+                    mdsPartWalk<true>(pc, table, root, budget, maxNode, pumpQueue, partOut, once, seen, stamp,
+                                      occPmPtr, occT.occMinDist, occT.occBias, occT.occMargin);
                 else
-                    mdsPartWalk<false>(pc, table, root, budget, maxNode, pumpQueue, partOut, once, seen, stamp);
+                    mdsPartWalk<false>(pc, table, root, budget, maxNode, pumpQueue, partOut, once, seen, stamp,
+                                       occPmPtr, occT.occMinDist, occT.occBias, occT.occMargin);
                 clipRegister = pc.clip;
                 if (partOk)
                     *partOk = once;

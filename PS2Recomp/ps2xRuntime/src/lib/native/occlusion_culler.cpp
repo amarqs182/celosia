@@ -147,6 +147,7 @@ namespace native_renderer
             std::atomic<uint64_t> g_lastRasterUs{0};
             std::atomic<uint64_t> g_lastTriCount{0};
             std::atomic<uint64_t> g_lastDrawCount{0};
+            std::atomic<uint32_t> g_lastCovPct{0};
 
             inline Vec4 transformClip(const float m[16], float x, float y, float z)
             {
@@ -187,7 +188,7 @@ namespace native_renderer
                 float z0 = invW0, z1 = invW1, z2 = invW2;
 
                 float area = (sx1 - sx0) * (sy2 - sy0) - (sy1 - sy0) * (sx2 - sx0);
-                if (std::fabs(area) < 1e-4f)
+                if (std::fabs(area) < 0.5f)
                     return;
                 if (area < 0.0f)
                 {
@@ -205,30 +206,41 @@ namespace native_renderer
                 if (minX > maxX || minY > maxY)
                     return;
 
+                // Positive edge functions for CCW orientation in screen (x right, y down):
+                // edge(a, b, p) = (b.x - a.x)*(p.y - a.y) - (b.y - a.y)*(p.x - a.x)
+                //               = (a.y - b.y)*(p.x - a.x) + (b.x - a.x)*(p.y - a.y)
                 const float invArea = 1.0f / area;
-                const float dx01 = sx0 - sx1, dy01 = sy1 - sy0;
-                const float dx12 = sx1 - sx2, dy12 = sy2 - sy1;
-                const float dx20 = sx2 - sx0, dy20 = sy0 - sy2;
+                const float d0x = sy1 - sy2, d0y = sx2 - sx1; // edge(1->2)
+                const float d1x = sy2 - sy0, d1y = sx0 - sx2; // edge(2->0)
+                const float d2x = sy0 - sy1, d2y = sx1 - sx0; // edge(0->1)
+
+                const float startPx = static_cast<float>(minX) + 0.5f;
+                const float startPy = static_cast<float>(minY) + 0.5f;
+                float rowW0 = d0x * (startPx - sx1) + d0y * (startPy - sy1);
+                float rowW1 = d1x * (startPx - sx2) + d1y * (startPy - sy2);
+                float rowW2 = d2x * (startPx - sx0) + d2y * (startPy - sy0);
 
                 for (int y = minY; y <= maxY; ++y)
                 {
-                    const float py = static_cast<float>(y) + 0.5f;
+                    float w0 = rowW0;
+                    float w1 = rowW1;
+                    float w2 = rowW2;
                     float *row = l0 + y * kW0;
                     for (int x = minX; x <= maxX; ++x)
                     {
-                        const float px = static_cast<float>(x) + 0.5f;
-                        const float w0 = dy12 * (px - sx1) + dx12 * (py - sy1);
-                        const float w1 = dy20 * (px - sx2) + dx20 * (py - sy2);
-                        const float w2 = dy01 * (px - sx0) + dx01 * (py - sy0);
-                        if (w0 < 0.0f || w1 < 0.0f || w2 < 0.0f)
-                            continue;
-                        const float b0 = w0 * invArea;
-                        const float b1 = w1 * invArea;
-                        const float b2 = w2 * invArea;
-                        const float z = b0 * z0 + b1 * z1 + b2 * z2;
-                        if (z > row[x])
-                            row[x] = z;
+                        if (w0 >= 0.0f && w1 >= 0.0f && w2 >= 0.0f)
+                        {
+                            const float z = (w0 * z0 + w1 * z1 + w2 * z2) * invArea;
+                            if (z > row[x])
+                                row[x] = z;
+                        }
+                        w0 += d0x;
+                        w1 += d1x;
+                        w2 += d2x;
                     }
+                    rowW0 += d0y;
+                    rowW1 += d1y;
+                    rowW2 += d2y;
                 }
             }
 
@@ -402,6 +414,14 @@ namespace native_renderer
                     buildMip(dst.l1, kW1, dst.l2, kW2, kH2);
                     buildMip(dst.l2, kW2, dst.l3, kW3, kH3);
                     dst.valid = true;
+
+                    uint32_t covered = 0u;
+                    for (int i = 0; i < kW0 * kH0; ++i)
+                    {
+                        if (dst.l0[i] > 0.0f)
+                            ++covered;
+                    }
+                    g_lastCovPct.store((covered * 100u) / static_cast<uint32_t>(kW0 * kH0), std::memory_order_relaxed);
 
                     const auto t1 = std::chrono::steady_clock::now();
                     g_lastRasterUs.store(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count()), std::memory_order_relaxed);
@@ -599,11 +619,13 @@ namespace native_renderer
                 const uint64_t rus = g_lastRasterUs.load(std::memory_order_relaxed);
                 const uint64_t tris = g_lastTriCount.load(std::memory_order_relaxed);
                 const uint64_t draws = g_lastDrawCount.load(std::memory_order_relaxed);
+                const uint32_t cov = g_lastCovPct.load(std::memory_order_relaxed);
                 const uint64_t tested = g_queryTested.exchange(0u, std::memory_order_relaxed);
                 const uint64_t culled = g_queryCulled.exchange(0u, std::memory_order_relaxed);
-                std::fprintf(stderr, "[occ:hiz] tested=%llu culled=%llu worker=%.2fms tris=%llu draws=%llu meshes=%zu opqTex=%zu\n",
+                std::fprintf(stderr, "[occ:hiz] tested=%llu culled=%llu cov=%u%% worker=%.2fms tris=%llu draws=%llu meshes=%zu opqTex=%zu\n",
                              static_cast<unsigned long long>(tested / 120u),
                              static_cast<unsigned long long>(culled / 120u),
+                             cov,
                              static_cast<double>(rus) / 1000.0,
                              static_cast<unsigned long long>(tris),
                              static_cast<unsigned long long>(draws),
@@ -640,16 +662,14 @@ namespace native_renderer
             g_cv.notify_one();
         }
 
-        bool isBoxOccluded(const float modelRowMajor[16], const float lo[3], const float hi[3], float bias, float margin)
+        bool prepareModelPrevClip(const float currentCamera[16], const float modelRowMajor[16], float outPmPrev[16])
         {
             const HiZBuffer *hz = g_activeHiZ.load(std::memory_order_acquire);
             if (!hz || g_cutInvalidated.load(std::memory_order_relaxed))
                 return false;
+            if (currentCamera && !vpContinuous(currentCamera, hz->vp))
+                return false;
 
-            g_queryTested.fetch_add(1u, std::memory_order_relaxed);
-
-            // Compute PM = VP_prev * M (4 V4 rows, matching decomp_walk::rows convention).
-            float pm[16];
             const float *vp = hz->vp;
             for (int r = 0; r < 4; ++r)
             {
@@ -658,9 +678,20 @@ namespace native_renderer
                 const float mz = modelRowMajor[r * 4 + 2];
                 const float mw = modelRowMajor[r * 4 + 3];
                 for (int c = 0; c < 4; ++c)
-                    pm[r * 4 + c] = vp[0 + c] * mx + vp[4 + c] * my + vp[8 + c] * mz + vp[12 + c] * mw;
+                    outPmPrev[r * 4 + c] = vp[0 + c] * mx + vp[4 + c] * my + vp[8 + c] * mz + vp[12 + c] * mw;
             }
+            return true;
+        }
 
+        bool isBoxOccludedClip(const float pmPrev[16], const float lo[3], const float hi[3], float minDist, float bias, float margin)
+        {
+            const HiZBuffer *hz = g_activeHiZ.load(std::memory_order_acquire);
+            if (!hz || g_cutInvalidated.load(std::memory_order_relaxed) || !pmPrev)
+                return false;
+
+            g_queryTested.fetch_add(1u, std::memory_order_relaxed);
+
+            const float minW = std::max(0.25f, minDist);
             float minNdcX = 1e9f, maxNdcX = -1e9f;
             float minNdcY = 1e9f, maxNdcY = -1e9f;
             float maxInvW = 0.0f;
@@ -670,8 +701,8 @@ namespace native_renderer
                 const float x = (k & 4) ? hi[0] : lo[0];
                 const float y = (k & 2) ? hi[1] : lo[1];
                 const float z = (k & 1) ? hi[2] : lo[2];
-                const Vec4 cp = transformClip(pm, x, y, z);
-                if (cp.w <= 0.25f)
+                const Vec4 cp = transformClip(pmPrev, x, y, z);
+                if (cp.w <= minW)
                     return false;
                 const float invW = 1.0f / cp.w;
                 const float nx = cp.x * invW;
@@ -731,6 +762,14 @@ namespace native_renderer
 
             g_queryCulled.fetch_add(1u, std::memory_order_relaxed);
             return true;
+        }
+
+        bool isBoxOccluded(const float modelRowMajor[16], const float lo[3], const float hi[3], float bias, float margin)
+        {
+            float pm[16];
+            if (!prepareModelPrevClip(nullptr, modelRowMajor, pm))
+                return false;
+            return isBoxOccludedClip(pm, lo, hi, 0.25f, bias, margin);
         }
 
         void shutdown()
