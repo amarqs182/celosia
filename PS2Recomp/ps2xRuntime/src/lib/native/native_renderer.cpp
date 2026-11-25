@@ -3008,6 +3008,7 @@ namespace native_renderer
             g_uploads.staticMeshes += 1;
             g_uploads.staticBytes += static_cast<uint64_t>(count) * sizeof(Vertex) + static_cast<uint64_t>(indexCount) * sizeof(uint32_t);
         }
+        occlusion::registerIndexedMesh(id, vertices, count, indices, indexCount);
         if (!backend())
             return;
         if (!tuning().frameTiming())

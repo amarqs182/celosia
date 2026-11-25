@@ -60,9 +60,9 @@ namespace native_renderer
             constexpr int kW3 = 10;
             constexpr int kH3 = 8;
 
-            constexpr size_t kMaxMeshVerts = 18000u;
+            constexpr size_t kMaxMeshVerts = 32000u;
             constexpr size_t kMinMeshVerts = 3u;
-            constexpr size_t kMaxMeshCacheBytes = 8u * 1024u * 1024u;
+            constexpr size_t kMaxMeshCacheBytes = 16u * 1024u * 1024u;
             constexpr uint32_t kMaxStageDraws = 2500u;
 
             struct Vec3
@@ -78,12 +78,14 @@ namespace native_renderer
             struct OccluderMesh
             {
                 std::vector<Vec3> verts;
+                std::vector<uint16_t> indices;
             };
 
             struct PendingMesh
             {
                 uint64_t id = 0;
                 std::vector<Vec3> verts;
+                std::vector<uint16_t> indices;
             };
 
             struct DrawCmd
@@ -102,21 +104,24 @@ namespace native_renderer
                 float l3[kW3 * kH3] = {};
             };
 
-            // Game-thread only state (zero locks during upload/draw/query).
+            // Game-thread upload/draw staging state (game thread only).
             IdSet g_knownMeshes;
             IdSet g_opaqueTextures;
             size_t g_meshCacheBytes = 0;
             std::vector<PendingMesh> g_pendingMeshes;
             std::vector<DrawCmd> g_stagedDraws;
-            float g_curVp[16] = {};
-            bool g_hasCurVp = false;
-            bool g_cutInvalidated = true;
-            const HiZBuffer *g_activeHiZ = nullptr;
-            uint64_t g_queryTested = 0;
-            uint64_t g_queryCulled = 0;
             uint64_t g_statFrames = 0;
 
-            // Triple-buffered published Hi-Z pyramids shared wait-free with cpu0.
+            // Camera latch & query counters shared between cpu0 (clip83) and the clip140 helper thread.
+            std::mutex g_camMutex;
+            float g_curVp[16] = {};
+            std::atomic<bool> g_hasCurVp{false};
+            std::atomic<bool> g_cutInvalidated{true};
+            std::atomic<const HiZBuffer *> g_activeHiZ{nullptr};
+            std::atomic<uint64_t> g_queryTested{0};
+            std::atomic<uint64_t> g_queryCulled{0};
+
+            // Triple-buffered published Hi-Z pyramids shared wait-free with readers.
             HiZBuffer g_buffers[3];
             std::atomic<int> g_readyIdx{0};
             std::atomic<int> g_readingIdx{-1};
@@ -141,6 +146,7 @@ namespace native_renderer
             size_t g_workerMeshBytes = 0;
             std::atomic<uint64_t> g_lastRasterUs{0};
             std::atomic<uint64_t> g_lastTriCount{0};
+            std::atomic<uint64_t> g_lastDrawCount{0};
 
             inline Vec4 transformClip(const float m[16], float x, float y, float z)
             {
@@ -154,16 +160,16 @@ namespace native_renderer
 
             inline bool vpContinuous(const float a[16], const float b[16])
             {
-                // Detect camera cuts or teleport transitions so reprojection through
-                // the previous frame's VP never culls the new camera's view.
+                // Detect camera cuts or teleport transitions using the upper 3x4 basis/proj entries
+                // (VP[12..15] stores large-coordinate camera translation that moves rapidly on normal pans).
                 float maxDelta = 0.0f;
-                for (int i = 0; i < 16; ++i)
+                for (int i = 0; i < 12; ++i)
                 {
                     const float d = std::fabs(a[i] - b[i]);
                     if (d > maxDelta)
                         maxDelta = d;
                 }
-                return maxDelta < 25.0f;
+                return maxDelta < 0.8f;
             }
 
             void rasterizeProjectedTri(float *l0, const Vec4 &v0, const Vec4 &v1, const Vec4 &v2)
@@ -317,18 +323,22 @@ namespace native_renderer
 
                     for (PendingMesh &pm : localNewMeshes)
                     {
-                        const size_t bytes = pm.verts.size() * sizeof(Vec3);
+                        const size_t bytes = pm.verts.size() * sizeof(Vec3) + pm.indices.size() * sizeof(uint16_t);
                         if (g_workerMeshBytes + bytes <= kMaxMeshCacheBytes && g_workerMeshes.find(pm.id) == g_workerMeshes.end())
                         {
                             g_workerMeshBytes += bytes;
                             OccluderMesh &om = g_workerMeshes[pm.id];
                             om.verts = std::move(pm.verts);
+                            om.indices = std::move(pm.indices);
                         }
                     }
                     localNewMeshes.clear();
 
                     if (!localHasVp || localDraws.empty())
+                    {
+                        g_lastDrawCount.store(0u, std::memory_order_relaxed);
                         continue;
+                    }
 
                     // Pick the slot not currently held by g_readyIdx or g_readingIdx.
                     const int ready = g_readyIdx.load(std::memory_order_relaxed);
@@ -347,30 +357,44 @@ namespace native_renderer
                     std::memset(dst.l0, 0, sizeof(dst.l0));
                     std::memcpy(dst.vp, localVp, sizeof(dst.vp));
 
+                    auto emitTri = [&](const float clip[16], const Vec3 &v0, const Vec3 &v1, const Vec3 &v2, uint64_t &tris)
+                    {
+                        const Vec4 p0 = transformClip(clip, v0.x, v0.y, v0.z);
+                        const Vec4 p1 = transformClip(clip, v1.x, v1.y, v1.z);
+                        const Vec4 p2 = transformClip(clip, v2.x, v2.y, v2.z);
+
+                        const float w0 = std::fabs(p0.w), w1 = std::fabs(p1.w), w2 = std::fabs(p2.w);
+                        if ((p0.x > w0 && p1.x > w1 && p2.x > w2) || (p0.x < -w0 && p1.x < -w1 && p2.x < -w2) ||
+                            (p0.y > w0 && p1.y > w1 && p2.y > w2) || (p0.y < -w0 && p1.y < -w1 && p2.y < -w2) ||
+                            (p0.w < 0.1f && p1.w < 0.1f && p2.w < 0.1f))
+                        {
+                            return;
+                        }
+                        clipAndRasterizeTri(dst.l0, p0, p1, p2);
+                        ++tris;
+                    };
+
                     uint64_t tris = 0;
+                    uint64_t drawCount = 0;
                     for (const DrawCmd &cmd : localDraws)
                     {
                         const auto it = g_workerMeshes.find(cmd.meshId);
                         if (it == g_workerMeshes.end())
                             continue;
+                        ++drawCount;
                         const std::vector<Vec3> &v = it->second.verts;
-                        const size_t n = v.size();
-                        for (size_t i = 0; i + 2 < n; i += 3)
+                        const std::vector<uint16_t> &idx = it->second.indices;
+                        if (!idx.empty())
                         {
-                            const Vec4 p0 = transformClip(cmd.clip, v[i].x, v[i].y, v[i].z);
-                            const Vec4 p1 = transformClip(cmd.clip, v[i + 1].x, v[i + 1].y, v[i + 1].z);
-                            const Vec4 p2 = transformClip(cmd.clip, v[i + 2].x, v[i + 2].y, v[i + 2].z);
-
-                            // Coarse clip-plane reject when all 3 verts lie outside one same plane.
-                            const float w0 = std::fabs(p0.w), w1 = std::fabs(p1.w), w2 = std::fabs(p2.w);
-                            if ((p0.x > w0 && p1.x > w1 && p2.x > w2) || (p0.x < -w0 && p1.x < -w1 && p2.x < -w2) ||
-                                (p0.y > w0 && p1.y > w1 && p2.y > w2) || (p0.y < -w0 && p1.y < -w1 && p2.y < -w2) ||
-                                (p0.w < 0.1f && p1.w < 0.1f && p2.w < 0.1f))
-                            {
-                                continue;
-                            }
-                            clipAndRasterizeTri(dst.l0, p0, p1, p2);
-                            ++tris;
+                            const size_t ni = idx.size();
+                            for (size_t i = 0; i + 2 < ni; i += 3)
+                                emitTri(cmd.clip, v[idx[i]], v[idx[i + 1]], v[idx[i + 2]], tris);
+                        }
+                        else
+                        {
+                            const size_t nv = v.size();
+                            for (size_t i = 0; i + 2 < nv; i += 3)
+                                emitTri(cmd.clip, v[i], v[i + 1], v[i + 2], tris);
                         }
                     }
 
@@ -382,6 +406,7 @@ namespace native_renderer
                     const auto t1 = std::chrono::steady_clock::now();
                     g_lastRasterUs.store(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count()), std::memory_order_relaxed);
                     g_lastTriCount.store(tris, std::memory_order_relaxed);
+                    g_lastDrawCount.store(drawCount, std::memory_order_relaxed);
 
                     g_readyIdx.store(g_writeIdx, std::memory_order_release);
                 }
@@ -403,22 +428,92 @@ namespace native_renderer
                 return;
             if (g_knownMeshes.count(id))
                 return;
-            const size_t bytes = static_cast<size_t>(count) * sizeof(Vec3);
-            if (g_meshCacheBytes + bytes > kMaxMeshCacheBytes)
-                return;
+
+            bool allOpaque = true;
             for (uint32_t i = 0; i < count; ++i)
             {
-                if (vertices[i].a < 124u)
-                    return;
+                if (vertices[i].a < 120u)
+                {
+                    allOpaque = false;
+                    break;
+                }
             }
-            g_knownMeshes.insert(id);
-            g_meshCacheBytes += bytes;
 
             PendingMesh pm;
             pm.id = id;
+            if (allOpaque)
+            {
+                const size_t bytes = static_cast<size_t>(count) * sizeof(Vec3);
+                if (g_meshCacheBytes + bytes > kMaxMeshCacheBytes)
+                    return;
+                pm.verts.resize(count);
+                for (uint32_t i = 0; i < count; ++i)
+                    pm.verts[i] = {vertices[i].x, vertices[i].y, vertices[i].z};
+                g_meshCacheBytes += bytes;
+            }
+            else
+            {
+                // Keep only triangles with opaque vertices (preserves terrain tiles with translucent skirts).
+                for (uint32_t i = 0; i + 2u < count; i += 3u)
+                {
+                    if (vertices[i].a >= 120u && vertices[i + 1u].a >= 120u && vertices[i + 2u].a >= 120u)
+                    {
+                        pm.indices.push_back(static_cast<uint16_t>(i));
+                        pm.indices.push_back(static_cast<uint16_t>(i + 1u));
+                        pm.indices.push_back(static_cast<uint16_t>(i + 2u));
+                    }
+                }
+                if (pm.indices.empty())
+                    return;
+                const size_t bytes = static_cast<size_t>(count) * sizeof(Vec3) + pm.indices.size() * sizeof(uint16_t);
+                if (g_meshCacheBytes + bytes > kMaxMeshCacheBytes)
+                    return;
+                pm.verts.resize(count);
+                for (uint32_t i = 0; i < count; ++i)
+                    pm.verts[i] = {vertices[i].x, vertices[i].y, vertices[i].z};
+                g_meshCacheBytes += bytes;
+            }
+
+            g_knownMeshes.insert(id);
+            g_pendingMeshes.push_back(std::move(pm));
+        }
+
+        void registerIndexedMesh(uint64_t id, const Vertex *vertices, uint32_t count, const uint32_t *indices, uint32_t indexCount)
+        {
+            if (!vertices || !indices || count < kMinMeshVerts || count > kMaxMeshVerts || indexCount < 3u)
+                return;
+            if (g_knownMeshes.count(id))
+                return;
+
+            PendingMesh pm;
+            pm.id = id;
+            pm.indices.reserve(indexCount);
+            for (uint32_t i = 0; i + 2u < indexCount; i += 3u)
+            {
+                const uint32_t i0 = indices[i];
+                const uint32_t i1 = indices[i + 1u];
+                const uint32_t i2 = indices[i + 2u];
+                if (i0 < count && i1 < count && i2 < count &&
+                    vertices[i0].a >= 120u && vertices[i1].a >= 120u && vertices[i2].a >= 120u)
+                {
+                    pm.indices.push_back(static_cast<uint16_t>(i0));
+                    pm.indices.push_back(static_cast<uint16_t>(i1));
+                    pm.indices.push_back(static_cast<uint16_t>(i2));
+                }
+            }
+            if (pm.indices.empty())
+                return;
+
+            const size_t bytes = static_cast<size_t>(count) * sizeof(Vec3) + pm.indices.size() * sizeof(uint16_t);
+            if (g_meshCacheBytes + bytes > kMaxMeshCacheBytes)
+                return;
+
             pm.verts.resize(count);
             for (uint32_t i = 0; i < count; ++i)
                 pm.verts[i] = {vertices[i].x, vertices[i].y, vertices[i].z};
+
+            g_meshCacheBytes += bytes;
+            g_knownMeshes.insert(id);
             g_pendingMeshes.push_back(std::move(pm));
         }
 
@@ -437,24 +532,28 @@ namespace native_renderer
 
         void setFrameCamera(const float vpRowMajor[16])
         {
-            if (g_hasCurVp && std::memcmp(g_curVp, vpRowMajor, sizeof(g_curVp)) == 0)
+            // Fast lock-free early-out after first latch of the frame (called concurrently by clip140 + clip83).
+            if (g_hasCurVp.load(std::memory_order_acquire))
+                return;
+            std::lock_guard<std::mutex> lock(g_camMutex);
+            if (g_hasCurVp.load(std::memory_order_relaxed))
                 return;
             std::memcpy(g_curVp, vpRowMajor, sizeof(g_curVp));
-            g_hasCurVp = true;
 
             const int idx = g_readyIdx.load(std::memory_order_acquire);
             g_readingIdx.store(idx, std::memory_order_release);
             const HiZBuffer &buf = g_buffers[idx];
             if (buf.valid && vpContinuous(g_curVp, buf.vp))
             {
-                g_activeHiZ = &buf;
-                g_cutInvalidated = false;
+                g_cutInvalidated.store(false, std::memory_order_relaxed);
+                g_activeHiZ.store(&buf, std::memory_order_release);
             }
             else
             {
-                g_activeHiZ = nullptr;
-                g_cutInvalidated = true;
+                g_cutInvalidated.store(true, std::memory_order_relaxed);
+                g_activeHiZ.store(nullptr, std::memory_order_release);
             }
+            g_hasCurVp.store(true, std::memory_order_release);
         }
 
         void submitDraw(uint64_t meshId, const float clip[16])
@@ -475,15 +574,23 @@ namespace native_renderer
 
         void endFrame(bool enabled, bool logStats)
         {
-            // Release reading pin at frame end so worker can freely rotate triple buffer.
-            g_readingIdx.store(-1, std::memory_order_release);
-            g_activeHiZ = nullptr;
+            bool hadCurVp = false;
+            float frameVp[16] = {};
+            {
+                std::lock_guard<std::mutex> lock(g_camMutex);
+                // Release reading pin at frame end so worker can freely rotate triple buffer.
+                g_activeHiZ.store(nullptr, std::memory_order_release);
+                g_readingIdx.store(-1, std::memory_order_release);
+                hadCurVp = g_hasCurVp.exchange(false, std::memory_order_acq_rel);
+                if (hadCurVp)
+                    std::memcpy(frameVp, g_curVp, sizeof(frameVp));
+            }
 
             if (!enabled)
             {
                 g_stagedDraws.clear();
-                g_hasCurVp = false;
-                g_queryTested = g_queryCulled = 0;
+                g_queryTested.store(0u, std::memory_order_relaxed);
+                g_queryCulled.store(0u, std::memory_order_relaxed);
                 return;
             }
 
@@ -491,13 +598,17 @@ namespace native_renderer
             {
                 const uint64_t rus = g_lastRasterUs.load(std::memory_order_relaxed);
                 const uint64_t tris = g_lastTriCount.load(std::memory_order_relaxed);
-                std::fprintf(stderr, "[occ:hiz] tested=%llu culled=%llu worker=%.2fms tris=%llu meshes=%zu\n",
-                             static_cast<unsigned long long>(g_queryTested / 120u),
-                             static_cast<unsigned long long>(g_queryCulled / 120u),
+                const uint64_t draws = g_lastDrawCount.load(std::memory_order_relaxed);
+                const uint64_t tested = g_queryTested.exchange(0u, std::memory_order_relaxed);
+                const uint64_t culled = g_queryCulled.exchange(0u, std::memory_order_relaxed);
+                std::fprintf(stderr, "[occ:hiz] tested=%llu culled=%llu worker=%.2fms tris=%llu draws=%llu meshes=%zu opqTex=%zu\n",
+                             static_cast<unsigned long long>(tested / 120u),
+                             static_cast<unsigned long long>(culled / 120u),
                              static_cast<double>(rus) / 1000.0,
                              static_cast<unsigned long long>(tris),
-                             g_knownMeshes.size());
-                g_queryTested = g_queryCulled = 0;
+                             static_cast<unsigned long long>(draws),
+                             g_knownMeshes.size(),
+                             g_opaqueTextures.size());
             }
 
             ensureWorkerStarted();
@@ -515,9 +626,9 @@ namespace native_renderer
                 {
                     g_inboxDraws.swap(g_stagedDraws);
                     g_stagedDraws.clear();
-                    g_inboxHasVp = g_hasCurVp;
-                    if (g_hasCurVp)
-                        std::memcpy(g_inboxVp, g_curVp, sizeof(g_inboxVp));
+                    g_inboxHasVp = hadCurVp;
+                    if (hadCurVp)
+                        std::memcpy(g_inboxVp, frameVp, sizeof(g_inboxVp));
                     g_hasJob = true;
                 }
                 else
@@ -526,17 +637,16 @@ namespace native_renderer
                     g_stagedDraws.clear();
                 }
             }
-            g_hasCurVp = false;
             g_cv.notify_one();
         }
 
         bool isBoxOccluded(const float modelRowMajor[16], const float lo[3], const float hi[3], float bias, float margin)
         {
-            const HiZBuffer *hz = g_activeHiZ;
-            if (!hz || g_cutInvalidated)
+            const HiZBuffer *hz = g_activeHiZ.load(std::memory_order_acquire);
+            if (!hz || g_cutInvalidated.load(std::memory_order_relaxed))
                 return false;
 
-            ++g_queryTested;
+            g_queryTested.fetch_add(1u, std::memory_order_relaxed);
 
             // Compute PM = VP_prev * M (4 V4 rows, matching decomp_walk::rows convention).
             float pm[16];
@@ -619,7 +729,7 @@ namespace native_renderer
                 }
             }
 
-            ++g_queryCulled;
+            g_queryCulled.fetch_add(1u, std::memory_order_relaxed);
             return true;
         }
 
