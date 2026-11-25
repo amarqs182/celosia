@@ -144,10 +144,10 @@ inline uint64_t fnv1aHash(const void *data, size_t len, uint64_t h = 14695981039
     return h;
 }
 
-inline int8_t packNormComponent(float f)
+inline int8_t packNormComponent(float f) noexcept
 {
     const float clamped = std::clamp(f, -1.0f, 1.0f);
-    return static_cast<int8_t>(std::lround(clamped * 127.0f));
+    return static_cast<int8_t>(clamped * 127.0f + (clamped >= 0.0f ? 0.5f : -0.5f));
 }
 
 struct CompactVertex
@@ -2041,7 +2041,7 @@ public:
         m_paceEnabled = envBool("SOTC_MALI_PACE", false);
         m_statsEnabled = envBool("SOTC_MALI_STATS", false);
         m_uploadBudgetUs = static_cast<uint64_t>(std::max(0, envInt("SOTC_MALI_UPLOAD_BUDGET_US", 4000)));
-        m_bgRate = static_cast<uint32_t>(std::max(1, envInt("SOTC_MALI_BG_RATE", 2)));
+        m_bgRate = static_cast<uint32_t>(std::max(1, envInt("SOTC_MALI_BG_RATE", 16)));
         {
             const int cap = envInt("SOTC_FPS_CAP", 30);
             m_targetFps = cap <= 0 ? 0 : std::max(20, cap);
@@ -2651,7 +2651,7 @@ private:
         }
         glBindVertexArray(0);
 
-        makeTarget(m_bgTarget, 256, 256, true);
+        makeTarget(m_bgTarget, 64, 64, true);
         m_lastPresentTime = std::chrono::steady_clock::now();
         m_initialized = true;
         std::fprintf(stderr, "[mali] Phase 7G+E GLES 3.2 backend up (async=%d mailbox=%d keepCur=%d direct=%d fastSh=%d shCache=%u/%u astcIdx=%zu texArr=%d(maxL=%u,bud=%lluM) merge=%d(chunk=%u) inst=%d atPass2=%d cull=%d skin=%d tex5551=%d water=%d trilin=%d aniso=%d(max=%.0f) fxaa=%d rcas=%d bloom=%d exp=%d dof=%d mb=%d ca=%d flare=%d ao=%d upBud=%llu drs=%d@%dfps[%.2f..%.2f] drawOnly=%d budget=%lluM)\n",
@@ -2715,6 +2715,7 @@ private:
         destroyTarget(m_mainTarget[1]);
         destroyTarget(m_postTarget);
         destroyTarget(m_bgTarget);
+        m_bgValid = false;
         destroyTarget(m_bloomQuarter);
         destroyTarget(m_bloomEighth);
         destroyTarget(m_bloomHist[0]);
@@ -3797,7 +3798,7 @@ private:
             m_tex16Enabled = liveTune.maliTex16;
             m_directScanoutEnabled = liveTune.maliDirectScanout;
             m_zPrepassEnabled = liveTune.maliZPrepass;
-            m_bgRate = static_cast<uint32_t>(std::clamp(static_cast<int>(liveTune.maliBgRate + 0.5f), 1, 4));
+            m_bgRate = static_cast<uint32_t>(std::clamp(static_cast<int>(liveTune.maliBgRate + 0.5f), 1, 16));
             m_statsEnabled = liveTune.maliStats;
             m_furShells = std::clamp(static_cast<int>(liveTune.furShells + 0.5f), 0, 16);
             {
@@ -4411,17 +4412,33 @@ private:
 
         resetPsoAndUniformCaches();
 
-        // Phase 6A: Skip m_qBg -> m_bgTarget completely when !m_fog.enabled (ZFOG=0)!
-        if (m_fog.enabled && m_skyImageEnabled && !m_qBg.empty() && m_bgTarget.fbo && (m_frameNum % m_bgRate == 0u || m_frameNum <= 2u))
+        // Phase 6A: Skip m_qBg -> m_bgTarget completely when !m_fog.enabled (ZFOG=0),
+        // and reuse the cached 64x64 sky backdrop when camera/fog/sky draws are unchanged.
+        if (m_fog.enabled && m_skyImageEnabled && !m_qBg.empty() && m_bgTarget.fbo &&
+            (!m_bgValid || m_frameNum <= 2u || (m_frameNum % m_bgRate == 0u)))
         {
-            glBindFramebuffer(GL_FRAMEBUFFER, m_bgTarget.fbo);
-            glViewport(0, 0, static_cast<GLsizei>(m_bgTarget.width), static_cast<GLsizei>(m_bgTarget.height));
-            glDepthMask(GL_TRUE);
-            glClearColor(m_fog.colour[0], m_fog.colour[1], m_fog.colour[2], 1.0f);
-            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            uint64_t bgHash = fnv1aHash(m_fog.colour, sizeof(m_fog.colour));
+            const size_t bgCount = m_qBg.size();
+            bgHash = fnv1aHash(&bgCount, sizeof(bgCount), bgHash);
             for (const QueuedDraw &q : m_qBg)
-                emitDrawSingle(q, pkt, false, 0.02f, 0.0f);
-            invalidateDepth();
+            {
+                bgHash = fnv1aHash(&q.meshId, sizeof(q.meshId), bgHash);
+                bgHash = fnv1aHash(&q.clipHash, sizeof(q.clipHash), bgHash);
+                bgHash = fnv1aHash(&q.stateHash, sizeof(q.stateHash), bgHash);
+            }
+            if (!m_bgValid || bgHash != m_bgLastHash)
+            {
+                glBindFramebuffer(GL_FRAMEBUFFER, m_bgTarget.fbo);
+                glViewport(0, 0, static_cast<GLsizei>(m_bgTarget.width), static_cast<GLsizei>(m_bgTarget.height));
+                glDepthMask(GL_TRUE);
+                glClearColor(m_fog.colour[0], m_fog.colour[1], m_fog.colour[2], 1.0f);
+                glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+                for (const QueuedDraw &q : m_qBg)
+                    emitDrawSingle(q, pkt, false, 0.02f, 0.0f);
+                invalidateDepth();
+                m_bgLastHash = bgHash;
+                m_bgValid = true;
+            }
         }
 
         if (!directScanout && m_waterMode >= 2 && hasReflectionSample && m_mirrorTarget.fbo && !m_qMirror.empty())
@@ -6431,7 +6448,9 @@ private:
     uint32_t m_maxArrayLayers = 64u;
     uint64_t m_cacheBudgetBytes = 160ull * 1024ull * 1024ull;
     uint64_t m_texArrayBudgetBytes = 100ull * 1024ull * 1024ull;
-    uint32_t m_bgRate = 2;
+    uint32_t m_bgRate = 16;
+    uint64_t m_bgLastHash = 0;
+    bool m_bgValid = false;
     int m_targetFps = 30;
     int m_drsTargetFps = 30;
     float m_drsMin = 0.60f;
