@@ -3188,18 +3188,25 @@ namespace sotc_native
     {
         uint32_t n = 0, s = 0;
         bool lit = false;
+        bool hasSecond = false;
         const float *transform = nullptr;
         native_renderer::DrawState state;
+        native_renderer::DrawState secondState;
         std::vector<uint64_t> ids;
+        std::vector<uint64_t> secondIds;
         void flush()
         {
             if (!n)
                 return;
             native_renderer::drawMulti(ids.data(), n, transform, state);
+            if (hasSecond)
+                native_renderer::drawMulti(secondIds.data(), n, transform, secondState);
             g_planStats.ranges += n > 1u;
             g_planStats.merged += n - 1u;
             n = 0;
+            hasSecond = false;
             ids.clear();
+            secondIds.clear();
         }
     } g_planRun;
     bool g_planRuns = true; // SOTC_PLAN_RUNS=0: one draw a packet
@@ -13320,10 +13327,43 @@ namespace sotc_native
                 g_planRun.n = 1;
                 g_planRun.s = s;
                 g_planRun.lit = state.lit;
+                g_planRun.hasSecond = false;
                 g_planRun.transform = transform;
                 g_planRun.state = state;
                 g_planRun.ids.assign(1u, mesh);
                 ++g_frameDraws;
+                ++g_modelDraws;
+                hs.draws += hs.on;
+                return;
+            }
+            else if (runs && e && e->resolved && !usingFallback && !posed && twoTextures && e->twoPasses && e->readyTwo && !reflective && !bossMask && info && mesh == id)
+            {
+                native_renderer::DrawState second = state;
+                second.texture = full ? full->texture2 : surfaceTexture(header, surface, 0x3Cu);
+                second.uvOffset[0] = second.uvOffset[1] = 0.0f;
+                second.maxLod = 0.0f;
+                if (!noMips)
+                {
+                    if (full)
+                        applyLod(full->lod[1], second);
+                    else
+                        surfaceLod(header, surface, second, 0x3Cu);
+                }
+                second.blend = full ? full->blend2 : surfaceBlend(s, 0x43u);
+                second.clamp = full ? full->clamp2 : surfaceClamp(s, 0x09u);
+                second.writeDepth = false;
+                second.overlay = true;
+                g_planRun.flush();
+                g_planRun.n = 1;
+                g_planRun.s = s;
+                g_planRun.lit = state.lit;
+                g_planRun.hasSecond = true;
+                g_planRun.transform = transform;
+                g_planRun.state = state;
+                g_planRun.secondState = second;
+                g_planRun.ids.assign(1u, mesh);
+                g_planRun.secondIds.assign(1u, id ^ (1ull << 61));
+                g_frameDraws += 2u;
                 ++g_modelDraws;
                 hs.draws += hs.on;
                 return;
@@ -13566,10 +13606,17 @@ namespace sotc_native
                     ++g_planStats.asked;
                 }
                 e.idFrame = g_frame;
-                if (g_planRun.n && runs && e.resolved && e.ready && !e.twoPasses && !e.skinned && e.s == g_planRun.s && e.lit == g_planRun.lit && id == e.id && !changedInPlace)
+                if (g_planRun.n && runs && e.resolved && e.ready &&
+                    (g_planRun.hasSecond ? (e.twoPasses && e.readyTwo) : !e.twoPasses) &&
+                    !e.skinned && e.s == g_planRun.s && e.lit == g_planRun.lit && id == e.id && !changedInPlace)
                 {
                     // The run's draw, for this packet's mesh too.
                     g_planRun.ids.push_back(id);
+                    if (g_planRun.hasSecond)
+                    {
+                        g_planRun.secondIds.push_back(id ^ (1ull << 61));
+                        ++g_frameDraws;
+                    }
                     ++g_planRun.n;
                     ++g_frameDraws;
                     ++g_modelDraws;
