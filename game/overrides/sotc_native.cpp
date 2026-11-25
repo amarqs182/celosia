@@ -7019,6 +7019,12 @@ namespace sotc_native
             }
             sotc_decomp::abTick(frame);
             native_renderer::beginFrame();
+            if (g_cameraContext && native_renderer::tuning().occCull)
+            {
+                float camVp[16];
+                std::memcpy(camVp, g_ram + ((g_cameraContext + 0x5A0u) & 0x1FFFFFCu), sizeof(camVp));
+                native_renderer::occlusion::setFrameCamera(camVp);
+            }
             // SOTC_DRAW_DUMP_FRAMES=f,f,... (debugging): those frames' draws to
             // SOTC_DRAW_DUMP_DIR (default shots)/draws_<frame>.txt.
             static const std::vector<uint64_t> dumpFrames = []
@@ -10483,6 +10489,7 @@ namespace sotc_native
             if (occT.occCull)
             {
                 const float *curCam = in ? in->camera : reinterpret_cast<const float *>(g_ram + ((g_cameraContext + 0x5A0u) & 0x1FFFFFCu));
+                native_renderer::occlusion::setFrameCamera(curCam);
                 if (native_renderer::occlusion::prepareModelPrevClip(curCam, model, occPmBuf))
                     occPmPtr = occPmBuf;
             }
