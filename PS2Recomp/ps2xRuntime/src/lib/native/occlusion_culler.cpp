@@ -229,6 +229,27 @@ namespace native_renderer
                 return true;
             }
 
+            bool isBoxFrustumCulled(const float clip[16], const float lo[3], const float hi[3])
+            {
+                uint32_t allOut = 0x3Fu;
+                for (int k = 0; k < 8; ++k)
+                {
+                    const float x = (k & 4) ? hi[0] : lo[0];
+                    const float y = (k & 2) ? hi[1] : lo[1];
+                    const float z = (k & 1) ? hi[2] : lo[2];
+                    const Vec4 cp = transformClip(clip, x, y, z);
+                    const float aw = std::fabs(cp.w);
+                    const uint32_t bits =
+                        (cp.x > aw ? 1u : 0u) | (cp.x < -aw ? 2u : 0u) |
+                        (cp.y > aw ? 4u : 0u) | (cp.y < -aw ? 8u : 0u) |
+                        (cp.w < 0.1f ? 16u : 0u);
+                    allOut &= bits;
+                    if (allOut == 0u)
+                        return false;
+                }
+                return allOut != 0u;
+            }
+
             void recordMeshBounds(uint64_t id, const Vertex *vertices, uint32_t count)
             {
                 if (!vertices || count == 0u || g_meshBounds.find(id) != g_meshBounds.end())
@@ -629,17 +650,27 @@ namespace native_renderer
 
         void setFrameCamera(const float vpRowMajor[16])
         {
-            // Fast lock-free early-out after first latch of the frame (called concurrently by clip140 + clip83).
-            if (g_hasCurVp.load(std::memory_order_acquire))
+            // Fast lock-free early-out when camera matches the already-latched matrix this frame.
+            if (g_hasCurVp.load(std::memory_order_acquire) && std::memcmp(g_curVp, vpRowMajor, sizeof(g_curVp)) == 0)
                 return;
             std::lock_guard<std::mutex> lock(g_camMutex);
-            if (g_hasCurVp.load(std::memory_order_relaxed))
+            const bool hadVp = g_hasCurVp.load(std::memory_order_relaxed);
+            if (hadVp && std::memcmp(g_curVp, vpRowMajor, sizeof(g_curVp)) == 0)
                 return;
-            std::memcpy(g_curVp, vpRowMajor, sizeof(g_curVp));
 
-            const int idx = g_readyIdx.load(std::memory_order_acquire);
-            g_readingIdx.store(idx, std::memory_order_release);
+            int idx = g_readingIdx.load(std::memory_order_relaxed);
+            if (idx < 0 || idx >= 3)
+            {
+                idx = g_readyIdx.load(std::memory_order_acquire);
+                g_readingIdx.store(idx, std::memory_order_release);
+            }
             const HiZBuffer &buf = g_buffers[idx];
+
+            // Ignore discontinuous auxiliary cameras (e.g., planar mirror passes) if main camera is active.
+            if (hadVp && (!buf.valid || !vpContinuous(vpRowMajor, buf.vp)))
+                return;
+
+            std::memcpy(g_curVp, vpRowMajor, sizeof(g_curVp));
             if (buf.valid && vpContinuous(g_curVp, buf.vp))
             {
                 g_cutInvalidated.store(false, std::memory_order_relaxed);
@@ -816,8 +847,8 @@ namespace native_renderer
                 if (invW > maxInvW) maxInvW = invW;
             }
 
-            // Reject giant boxes spanning most of the viewport so macro structures stay safe.
-            if ((maxNdcX - minNdcX) > 1.8f || (maxNdcY - minNdcY) > 1.8f)
+            // Reject giant boxes covering virtually the entire viewport in both axes.
+            if ((maxNdcX - minNdcX) > 1.95f && (maxNdcY - minNdcY) > 1.95f)
                 return false;
 
             const float u0 = std::clamp(0.5f * minNdcX + 0.5f - margin, 0.0f, 1.0f);
@@ -837,7 +868,7 @@ namespace native_renderer
             int mip = 3;
             for (int l = 0; l < 3; ++l)
             {
-                if (((x1 >> l) - (x0 >> l)) <= 1 && ((y1 >> l) - (y0 >> l)) <= 1)
+                if (((x1 >> l) - (x0 >> l)) <= 3 && ((y1 >> l) - (y0 >> l)) <= 3)
                 {
                     mip = l;
                     break;
@@ -876,10 +907,15 @@ namespace native_renderer
 
         bool isMeshOccluded(uint64_t meshId, const float clip[16], float minDist, float bias, float margin)
         {
-            if (!g_reprojValid.load(std::memory_order_acquire))
-                return false;
             const auto it = g_meshBounds.find(meshId);
             if (it == g_meshBounds.end())
+                return false;
+            if (isBoxFrustumCulled(clip, it->second.lo, it->second.hi))
+            {
+                g_drawCulled.fetch_add(1u, std::memory_order_relaxed);
+                return true;
+            }
+            if (!g_reprojValid.load(std::memory_order_acquire))
                 return false;
             float prevClipBuf[16];
             const float *prevClip = clip;
@@ -898,11 +934,10 @@ namespace native_renderer
                                       float minDist, float bias, float margin, std::vector<uint64_t> &outKept)
         {
             outKept.clear();
-            if (!g_reprojValid.load(std::memory_order_acquire))
-                return count;
+            const bool reprojOk = g_reprojValid.load(std::memory_order_acquire);
             float prevClipBuf[16];
             const float *prevClip = clip;
-            if (!g_reprojIdentity)
+            if (reprojOk && !g_reprojIdentity)
             {
                 mul4x4(g_reprojMat, clip, prevClipBuf);
                 prevClip = prevClipBuf;
@@ -912,7 +947,12 @@ namespace native_renderer
             {
                 const uint64_t id = meshes[i];
                 const auto it = g_meshBounds.find(id);
-                if (it != g_meshBounds.end() && isBoxOccludedClip(prevClip, it->second.lo, it->second.hi, minDist, bias, margin))
+                if (it == g_meshBounds.end())
+                {
+                    outKept.push_back(id);
+                }
+                else if (isBoxFrustumCulled(clip, it->second.lo, it->second.hi) ||
+                         (reprojOk && isBoxOccludedClip(prevClip, it->second.lo, it->second.hi, minDist, bias, margin)))
                 {
                     ++dropped;
                 }

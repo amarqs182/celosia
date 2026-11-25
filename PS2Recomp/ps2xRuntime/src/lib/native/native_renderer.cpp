@@ -3241,7 +3241,8 @@ namespace native_renderer
     {
         return !s.screen && !s.background && !s.overlay && !s.shadowVolume && !s.reflectionSource && !s.reflectionSample &&
                !s.refractionSample && !s.screenCopy && !s.previousFrame && !s.noDepthWrite && s.skinPalette == 0u &&
-               (s.blend == Blend::Opaque || s.blend == Blend::Normal) && s.opacity >= 0.98f && occlusion::isOpaqueTexture(s.texture);
+               (s.blend == Blend::Opaque || (s.blend == Blend::Normal && occlusion::isOpaqueTexture(s.texture))) &&
+               s.opacity >= 0.98f;
     }
     inline bool canOcclusionCullDraw(const DrawState &s)
     {
