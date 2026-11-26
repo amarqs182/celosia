@@ -2672,8 +2672,10 @@ private:
         {
             glBindVertexArray(m_streamMergeVao[i]);
             glBindBuffer(GL_ARRAY_BUFFER, m_streamMergeVbo[i]);
+            glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(12288u * sizeof(CompactVertex)), nullptr, GL_STREAM_DRAW);
             setupCompactVertexAttribs();
             glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_streamMergeIbo[i]);
+            glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(24576u * sizeof(uint32_t)), nullptr, GL_STREAM_DRAW);
         }
         glBindVertexArray(0);
 
@@ -3785,7 +3787,7 @@ private:
         return &run;
     }
 
-    MaliMesh *resolveMultiMesh(const RawDraw &rd, const FramePacket &pkt, uint32_t &builtThisFrame)
+    MaliMesh *resolveMultiMesh(const RawDraw &rd, const FramePacket &pkt, uint32_t &builtThisFrame, uint64_t &mergeUsThisFrame)
     {
         if (rd.multiCount < 2u || static_cast<size_t>(rd.multiOffset) + rd.multiCount > pkt.multiMeshIds.size())
             return nullptr;
@@ -3814,11 +3816,12 @@ private:
             return &mit->second;
         }
 
-        if (builtThisFrame >= 6u)
+        if (builtThisFrame >= 2u || (m_mergeBudgetUs && mergeUsThisFrame >= m_mergeBudgetUs))
             return nullptr;
 
-        if (totalVerts == 0u || totalIndices == 0u || totalVerts > 65536u || totalIndices > 196608u)
+        if (totalVerts == 0u || totalIndices == 0u || totalVerts > 32768u || totalIndices > 98304u)
             return nullptr;
+        const uint64_t tMulti0 = m_mergeBudgetUs ? nowUs() : 0u;
 
         const uint64_t bytes = static_cast<uint64_t>(totalVerts) * sizeof(CompactVertex) +
                                static_cast<uint64_t>(totalIndices) * sizeof(uint32_t);
@@ -3920,6 +3923,8 @@ private:
 
         m_multiMeshBytes += bytes;
         ++builtThisFrame;
+        if (m_mergeBudgetUs)
+            mergeUsThisFrame += nowUs() - tMulti0;
         return &cm;
     }
 
@@ -4313,7 +4318,7 @@ private:
                 continue;
             if (rd.multiCount >= 2u)
             {
-                if (MaliMesh *cm = resolveMultiMesh(rd, pkt, multiBuiltThisFrame))
+                if (MaliMesh *cm = resolveMultiMesh(rd, pkt, multiBuiltThisFrame, mergeUsThisFrame))
                 {
                     enqueueDraw(rd, rd.meshId, cm);
                     continue;
@@ -4453,6 +4458,8 @@ private:
         m_cachedRunForDraw.assign(m_qAll.size(), nullptr);
         if (m_mergeEnabled)
         {
+            uint64_t streamUsThisFrame = 0u;
+            constexpr uint64_t kStreamMergeBudgetUs = 2000u;
             for (size_t i = 0; i < m_qAll.size();)
             {
                 const QueuedDraw &q = m_qAll[i];
@@ -4503,11 +4510,13 @@ private:
                                     chunkVerts += static_cast<uint32_t>(jm->srcVerts.size());
                                     chunkIndices += static_cast<uint32_t>(jm->srcIndices.size());
                                 }
-                                if (chunkVerts > 0u && chunkIndices > 0u &&
-                                    chunkVerts <= 4096u &&
-                                    m_streamVertsScratch.size() + chunkVerts <= 24000u &&
-                                    m_streamIndicesScratch.size() + chunkIndices <= 48000u)
+                                if (streamUsThisFrame < kStreamMergeBudgetUs &&
+                                    chunkVerts > 0u && chunkIndices > 0u &&
+                                    chunkVerts <= 2048u &&
+                                    m_streamVertsScratch.size() + chunkVerts <= 12288u &&
+                                    m_streamIndicesScratch.size() + chunkIndices <= 24576u)
                                 {
+                                    const uint64_t tStr0 = nowUs();
                                     const uint32_t firstIndex = static_cast<uint32_t>(m_streamIndicesScratch.size());
                                     for (size_t j = s; j < e; ++j)
                                     {
@@ -4541,6 +4550,7 @@ private:
                                     }
                                     m_streamChunks.push_back({firstIndex, chunkIndices, sq.texArrayId});
                                     m_streamChunkForDraw[s] = static_cast<int32_t>(m_streamChunks.size() - 1u);
+                                    streamUsThisFrame += nowUs() - tStr0;
                                 }
                             }
                         }
@@ -4558,11 +4568,11 @@ private:
                 glBindVertexArray(m_streamMergeVao[m_arenaSlot]);
                 m_lastVao = m_streamMergeVao[m_arenaSlot];
                 glBindBuffer(GL_ARRAY_BUFFER, m_streamMergeVbo[m_arenaSlot]);
-                glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(m_streamVertsScratch.size() * sizeof(CompactVertex)),
-                             m_streamVertsScratch.data(), GL_STREAM_DRAW);
+                glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(m_streamVertsScratch.size() * sizeof(CompactVertex)),
+                                m_streamVertsScratch.data());
                 glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_streamMergeIbo[m_arenaSlot]);
-                glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(m_streamIndicesScratch.size() * sizeof(uint32_t)),
-                             m_streamIndicesScratch.data(), GL_STREAM_DRAW);
+                glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(m_streamIndicesScratch.size() * sizeof(uint32_t)),
+                                m_streamIndicesScratch.data());
             }
         }
         const uint64_t dlStartUs = m_statsEnabled ? nowUs() : 0u;
@@ -5509,7 +5519,7 @@ private:
         const double gpuFrameMs = std::max(0.0, frameMs - lastCapMs - pacerSleepMs);
         m_emaFrameMs = m_emaFrameMs > 0.0 ? (m_emaFrameMs * 0.85 + frameMs * 0.15) : frameMs;
         m_emaGpuFrameMs = m_emaGpuFrameMs > 0.0 ? (m_emaGpuFrameMs * 0.85 + gpuFrameMs * 0.15) : gpuFrameMs;
-        if (!pkt.hold && m_drsEnabled && (m_frameNum % 12u == 0u))
+        if (!pkt.hold && m_drsEnabled && (m_frameNum % 8u == 0u))
         {
             const double metricMs = m_drsDrawOnly ? m_emaDrawMs : m_emaGpuFrameMs;
             const double budgetMs = (1000.0 / static_cast<double>(m_drsTargetFps)) * (m_drsDrawOnly ? 0.85 : 1.0);
@@ -5523,11 +5533,11 @@ private:
                     m_drsOverStreak = 0;
                 }
             }
-            else if (metricMs <= budgetMs * 1.04 && m_emaDrawMs < budgetMs * 0.70)
+            else if (metricMs <= budgetMs * 1.04 && m_emaDrawMs < budgetMs * 0.72)
             {
                 ++m_drsUnderStreak;
                 m_drsOverStreak = 0;
-                if (m_drsUnderStreak >= 6 && m_drsScale < m_drsMax)
+                if (m_drsUnderStreak >= 3 && m_drsScale < m_drsMax)
                 {
                     m_drsScale = std::min(m_drsMax, m_drsScale + 0.05f);
                     m_drsUnderStreak = 0;
