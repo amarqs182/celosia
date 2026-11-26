@@ -93,7 +93,7 @@ export PS2X_HOST_CLOCK_MAX_LAG=2
 unset SOTC_FIXED_DT
 export SOTC_MAX_DT=0.0333334
 unset SOTC_CAP20
-export SOTC_FRAME_INTERVAL=1
+export SOTC_FRAME_INTERVAL=2
 
 # 4. Distribuicao Multi-Core e Afinidades de Threads
 export SOTC_THREADS=1
