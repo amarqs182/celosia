@@ -850,10 +850,13 @@ namespace decomp_walk
     {
         if (count <= 0 || count > 8 || !Ram::ok(header, 0x58u))
             return fallback;
+        // instance + 0x250 packs the LOD into a 3-bit signed field (bits 40-42),
+        // so values >= 4 would sign-extend negative and cull the model.
+        const int32_t maxLod = std::min(count - 1, 3);
         const bool partCulled = (m.u32(header + 0x18u) & 1u) == 0u && m.u32(header + 0x54u) != 1u;
         if (!partCulled)
-            return count - 1;
-        for (int32_t lv = count - 1; lv >= 0; --lv)
+            return maxLod;
+        for (int32_t lv = maxLod; lv >= 0; --lv)
             if (m.u32(header + 0x30u + static_cast<uint32_t>(lv) * 4u) != 0u)
                 return lv;
         return fallback;
@@ -863,13 +866,14 @@ namespace decomp_walk
     {
         if (count <= 0 || count > 8 || !hd)
             return fallback;
+        const int32_t maxLod = std::min(count - 1, 3);
         uint32_t flags = 0, n54 = 0;
         std::memcpy(&flags, hd + 0x18u, 4);
         std::memcpy(&n54, hd + 0x54u, 4);
         const bool partCulled = (flags & 1u) == 0u && n54 != 1u;
         if (!partCulled)
-            return count - 1;
-        for (int32_t lv = count - 1; lv >= 0; --lv)
+            return maxLod;
+        for (int32_t lv = maxLod; lv >= 0; --lv)
         {
             uint32_t tbl = 0;
             std::memcpy(&tbl, hd + 0x30u + static_cast<uint32_t>(lv) * 4u, 4);
