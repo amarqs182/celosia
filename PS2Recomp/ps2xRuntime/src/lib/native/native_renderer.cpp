@@ -149,6 +149,7 @@ namespace native_renderer
         }
         if (on("SOTC_SAC_LOD"))
             d.sacLod = flag("SOTC_SAC_LOD");
+        if (on("SOTC_SAC_LOD_LOW"))
             d.sacLodLow = flag("SOTC_SAC_LOD_LOW");
         if (on("SOTC_SAC_PARTICLES"))
             d.sacParticles = flag("SOTC_SAC_PARTICLES");

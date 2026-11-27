@@ -846,6 +846,39 @@ namespace decomp_walk
         return s;
     }
 
+    inline int32_t coarsestValidLod(const Ram m, uint32_t header, int32_t count, int32_t fallback)
+    {
+        if (count <= 0 || count > 8 || !Ram::ok(header, 0x58u))
+            return fallback;
+        const bool partCulled = (m.u32(header + 0x18u) & 1u) == 0u && m.u32(header + 0x54u) != 1u;
+        if (!partCulled)
+            return count - 1;
+        for (int32_t lv = count - 1; lv >= 0; --lv)
+            if (m.u32(header + 0x30u + static_cast<uint32_t>(lv) * 4u) != 0u)
+                return lv;
+        return fallback;
+    }
+
+    inline int32_t coarsestValidLodHost(const uint8_t *hd, int32_t count, int32_t fallback)
+    {
+        if (count <= 0 || count > 8 || !hd)
+            return fallback;
+        uint32_t flags = 0, n54 = 0;
+        std::memcpy(&flags, hd + 0x18u, 4);
+        std::memcpy(&n54, hd + 0x54u, 4);
+        const bool partCulled = (flags & 1u) == 0u && n54 != 1u;
+        if (!partCulled)
+            return count - 1;
+        for (int32_t lv = count - 1; lv >= 0; --lv)
+        {
+            uint32_t tbl = 0;
+            std::memcpy(&tbl, hd + 0x30u + static_cast<uint32_t>(lv) * 4u, 4);
+            if (tbl != 0u)
+                return lv;
+        }
+        return fallback;
+    }
+
     // modelClipSolid's level by distance (0x1098a14..0x1098b48): the LOD
     // record's thresholds of levels 1..3 (+0x18 / +0x1c / +0x20) against
     // the distance, then with the hysteresis +0x24 around the current level:
@@ -1060,9 +1093,10 @@ namespace decomp_walk
         bool none = false, past = false;
         const int32_t count = m.s32(s1 + 0x1Cu);
         int32_t level = FPU_CVT_W_S(f12);
-        if (native_renderer::tuning().sacLodLow && m.s32(a0 + 0x28u) == 0 && count > 0)
+        if (native_renderer::tuning().sacLodLow && count > 0 &&
+            (m.s32(a0 + 0x28u) == 0 || (level >= 0 && level < count)))
         {
-            level = count - 1;
+            level = coarsestValidLod(m, s1, count, level);
             f12 = FPU_CVT_S_W(level);
         }
         if (static_cast<uint64_t>(static_cast<int64_t>(level)) < static_cast<uint64_t>(static_cast<int64_t>(count)))
@@ -1105,6 +1139,8 @@ namespace decomp_walk
                 v0 = GPR_U64(ctx, 2);
             }
             f20 = f12;
+            if (native_renderer::tuning().sacLodLow && count > 0 && !FPU_C_OLT_S(f20, 0.0f))
+                f20 = FPU_CVT_S_W(coarsestValidLod(m, s1, count, FPU_CVT_W_S(f20)));
         }
         if (FPU_C_OLT_S(f20, 0.0f))
             return finish(-1.0f, v0);
@@ -1418,6 +1454,8 @@ namespace decomp_walk
                     f20 = f12;
                 else
                     f20 = keepsLast ? static_cast<float>(count - 1) : -1.0f;
+                if (native_renderer::tuning().sacLodLow && count > 0 && (keepsLast || f20 >= 0.0f))
+                    f20 = static_cast<float>(coarsestValidLodHost(hd, count, static_cast<int32_t>(f20)));
                 if (!keepsLast && sacMinProjectedSize() > 0.0f && d > 10.0f && rr > 0.0f && (rr / d) < sacMinProjectedSize())
                     f20 = -1.0f;
                 if (f20 < 0.0f)
@@ -1645,6 +1683,8 @@ namespace decomp_walk
                     f20 = f12;
                 else
                     f20 = keepsLast ? static_cast<float>(count - 1) : -1.0f;
+                if (native_renderer::tuning().sacLodLow && count > 0 && (keepsLast || f20 >= 0.0f))
+                    f20 = static_cast<float>(coarsestValidLodHost(hd, count, static_cast<int32_t>(f20)));
                 if (!keepsLast && sacMinProjectedSize() > 0.0f && d > 10.0f && rr > 0.0f && (rr / d) < sacMinProjectedSize())
                     f20 = -1.0f;
                 if (f20 < 0.0f)
