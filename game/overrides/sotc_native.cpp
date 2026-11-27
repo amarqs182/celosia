@@ -3155,6 +3155,8 @@ namespace sotc_native
         uint64_t p4ListFrame = ~0ull; // in hookjobs::g_p4Made for this frame
         bool p4Logged = false; // p4Log holds the words the frame spans were made of
         std::vector<std::pair<uint32_t, uint32_t>> p4Spans, p4Dyn, p4Log;
+        std::atomic<bool> allStaticReady{false}; // every drawable static packet is meshKnown (O(1) fast-path skip)
+        std::atomic<bool> hasStaticReady{false}; // at least one static packet drawn ready & no dynamic/skinned packets (eligible as fallbackPlan)
     };
     std::unordered_map<uint64_t, ModelPlan> g_plans;
     struct PlanCache97
@@ -3281,6 +3283,8 @@ namespace sotc_native
         p.p4Made = false; // round P4: its span lists made again when a move needs them
         p.p4Frame = ~0ull;
         p.p4Logged = false;
+        p.allStaticReady.store(false, std::memory_order_relaxed);
+        p.hasStaticReady.store(false, std::memory_order_relaxed);
     }
     // The plan of (header, LOD), checked once a frame; nullptr: none (LOD out of range).
     ModelPlan *modelPlan(uint32_t header, uint32_t lod)
@@ -3365,8 +3369,14 @@ namespace sotc_native
         {
             p.meshEpoch = evictions;
             p.skinEpoch = g_skinnedEpoch;
+            p.allStaticReady.store(false, std::memory_order_relaxed);
+            p.hasStaticReady.store(false, std::memory_order_relaxed);
             for (PlanPacket &e : p.pk)
+            {
                 e.resolved = false;
+                e.ready = false;
+                e.readyTwo = false;
+            }
         }
         return &p;
     }
@@ -5542,6 +5552,7 @@ namespace sotc_native
         float clip[16] = {}, projection[16] = {};
         float ripple[2] = {};
         ModelPlan *plan = nullptr;
+        ModelPlan *fallbackPlan = nullptr; // already-ready LOD plan of the same header kept while `plan` builds async
         std::vector<uint8_t> partVisible;
         // The instance's palette and lights as they are at the hook (as the
         // hook read them before round 23: the draws are made with these;
@@ -12104,14 +12115,18 @@ namespace sotc_native
             return;
 
         uint32_t gl = static_cast<uint32_t>((lw >> 40) & 7u);
-        if ((word(h + 0x18u) & 1u) && gl >= word(h + 0x1Cu) && word(h + 0x1Cu) != 0u)
-            gl = word(h + 0x1Cu) - 1u;
+        const uint32_t lodCount = word(h + 0x1Cu);
+        if ((word(h + 0x18u) & 1u) && gl >= lodCount && lodCount != 0u)
+            gl = lodCount - 1u;
         uint32_t l = gl;
-        if (const int finer = static_cast<int>(native_renderer::tuning().modelDetail + 0.5f); finer > 0 && l > 0u)
+        if (!native_renderer::tuning().sacLodLow)
         {
-            l = finer >= 2 ? 0u : l - 1u;
-            if (word(h + 0x30u + l * 4u) == 0u && word(h + 0x30u + gl * 4u) != 0u)
-                l = gl;
+            if (const int finer = static_cast<int>(native_renderer::tuning().modelDetail + 0.5f); finer > 0 && l > 0u)
+            {
+                l = finer >= 2 ? 0u : l - 1u;
+                if (word(h + 0x30u + l * 4u) == 0u && word(h + 0x30u + gl * 4u) != 0u)
+                    l = gl;
+            }
         }
         const uint32_t table = word(h + 0x30u + l * 4u);
         const bool partCulled = (word(h + 0x18u) & 1u) == 0u && word(h + 0x54u) != 1u;
@@ -12421,6 +12436,35 @@ namespace sotc_native
         job.opacity = opacity;
         job.planOn = planOn;
         job.plan = planOn ? (lod == gameLod ? gamePlan : modelPlan(header, lod)) : nullptr;
+        job.fallbackPlan = nullptr;
+        if (job.plan && native_renderer::tuning().asyncBuilds &&
+            !job.plan->allStaticReady.load(std::memory_order_acquire) &&
+            lodCount > 1u && lodCount <= 8u && !job.plan->pk.empty())
+        {
+            auto tryCand = [&](uint32_t cand) -> bool
+            {
+                if (partCulled && word(header + 0x30u + cand * 4u) == 0u)
+                    return false;
+                auto it = g_plans.find((static_cast<uint64_t>(header) << 3) | cand);
+                if (it == g_plans.end())
+                    return false;
+                ModelPlan &cp = it->second;
+                if (!cp.hasStaticReady.load(std::memory_order_acquire) || cp.pk.empty())
+                    return false;
+                cp.used = g_frame;
+                if (!planChecked(cp, header, cand))
+                    return false;
+                if (!cp.hasStaticReady.load(std::memory_order_acquire))
+                    return false;
+                job.fallbackPlan = &cp;
+                return true;
+            };
+            bool foundFallback = false;
+            for (uint32_t cand = lod + 1u; cand < lodCount && !foundFallback; ++cand)
+                foundFallback = tryCand(cand);
+            for (uint32_t cand = lod; cand > 0u && !foundFallback; --cand)
+                foundFallback = tryCand(cand - 1u);
+        }
         std::memcpy(job.clip, clip, sizeof(clip));
         zone(0x2005u);
         if (lean)
@@ -13570,32 +13614,40 @@ namespace sotc_native
         // would keep it without looking (drawn the frame before, not its
         // stagger frame, not rewritten in place).
         ModelPlan *plan = job.plan;
-        const auto planPackets = [&]
+        const auto planPackets = [&](ModelPlan *activePlan, bool usePartCulled, bool fallbackDraw = false)
         {
             SOTC_READ_SITE(14);
-            const size_t n = plan->pk.size();
+            const size_t n = activePlan->pk.size();
+            const bool trackReady = !fallbackDraw && !activePlan->allStaticReady.load(std::memory_order_relaxed) && n > 0u;
+            bool allReadyNow = trackReady;
+            bool sawAnyReadyStatic = false;
+            bool sawDynamic = false;
             for (size_t k = 0; k < n; ++k)
             {
-                PlanPacket &e = plan->pk[k];
+                PlanPacket &e = activePlan->pk[k];
                 if (hs.on)
                     ++hs.packets, ++hs.lodPackets;
                 if (g_prefetch)
                 {
                     if (k + 1u < n)
-                        __builtin_prefetch(&g_surfaceInfo[plan->pk[k + 1u].slot]);
+                        __builtin_prefetch(&g_surfaceInfo[activePlan->pk[k + 1u].slot]);
                     if (!onWorker) // the game thread's queue
                         g_prefetchQueue.pump(2u);
                 }
+                const bool culled = usePartCulled && e.part != 0xFFFFFFFFu && e.part < partVisible.size() && partVisible[e.part] == 1u;
                 if (planStatsOn())
                 {
                     ++g_planStats.visited;
-                    const bool culled = partCulled && e.part != 0xFFFFFFFFu && e.part < partVisible.size() && partVisible[e.part] == 1u;
-                    if (k == 0u || plan->pk[k - 1u].part != e.part)
+                    if (k == 0u || activePlan->pk[k - 1u].part != e.part)
                         ++g_planStats.partRuns, g_planStats.partRunsSkipped += culled;
                     g_planStats.partSkipped += culled;
                 }
-                if (partCulled && e.part != 0xFFFFFFFFu && e.part < partVisible.size() && partVisible[e.part] == 1u)
+                if (culled)
+                {
+                    if (allReadyNow && !(e.resolved && e.ready && (!e.twoPasses || e.readyTwo) && !e.skinned && !e.rewritten))
+                        allReadyNow = false;
                     continue;
+                }
                 SurfaceInfo *info = &g_surfaceInfo[e.slot];
                 if (!(info->s == e.s && info->header == header && info->frame == g_frame))
                     info = &surfaceInfo(header, e.s);
@@ -13640,6 +13692,14 @@ namespace sotc_native
                     ++g_planStats.asked;
                 }
                 e.idFrame = g_frame;
+                if (fallbackDraw)
+                {
+                    // Never spend asyncBudget or main-thread builds on an unbuilt off-screen
+                    // part of the old fallback LOD; draw only packets already in GPU memory.
+                    const bool twoP = detailTexturesOn() && (info->texMode == 2u);
+                    if (!native_renderer::meshKnown(id) || (twoP && !native_renderer::meshKnown(id ^ (1ull << 61))))
+                        continue;
+                }
                 if (g_planRun.n && runs && e.resolved && e.ready &&
                     (g_planRun.hasSecond ? (e.twoPasses && e.readyTwo) : !e.twoPasses) &&
                     !e.skinned && e.s == g_planRun.s && e.lit == g_planRun.lit && id == e.id && !changedInPlace)
@@ -13657,13 +13717,34 @@ namespace sotc_native
                     hs.draws += hs.on;
                     if (planStatsOn())
                         ++g_planStats.drawn;
+                    sawAnyReadyStatic = true;
                     continue;
                 }
                 if (planStatsOn())
                     ++g_planStats.drawn;
                 drawPacket(static_cast<uint32_t>(k), e.surface, e.s, info, e.size, e.data, id, changedInPlace, &e);
+                if (!fallbackDraw)
+                {
+                    const bool dyn = changedInPlace || e.rewritten || e.skinned != nullptr;
+                    const bool readyStatic = !dyn && e.resolved && e.ready && (!e.twoPasses || e.readyTwo);
+                    if (dyn)
+                        sawDynamic = true;
+                    else if (readyStatic)
+                        sawAnyReadyStatic = true;
+                    if (allReadyNow && !readyStatic)
+                        allReadyNow = false;
+                }
             }
             g_planRun.flush();
+            if (!fallbackDraw)
+            {
+                if (allReadyNow)
+                    activePlan->allStaticReady.store(true, std::memory_order_release);
+                if (sawDynamic)
+                    activePlan->hasStaticReady.store(false, std::memory_order_release);
+                else if (sawAnyReadyStatic && !activePlan->hasStaticReady.load(std::memory_order_relaxed))
+                    activePlan->hasStaticReady.store(true, std::memory_order_release);
+            }
         };
         // SOTC_PLAN_VERIFY=<n>: every n-th frame the old walk too, dry, and
         // the two lists of draw hashes compared.
@@ -13671,7 +13752,82 @@ namespace sotc_native
         if (!verify)
         {
             if (plan)
-                planPackets();
+            {
+                // Seamless atomic LOD-level fallback: when switching into a new LOD whose static
+                // meshes/textures are not yet uploaded, queue them asynchronously in the background
+                // while keeping the already-ready fallback LOD on screen so scenery never vanishes.
+                if (job.fallbackPlan && native_renderer::tuning().asyncBuilds &&
+                    !plan->allStaticReady.load(std::memory_order_relaxed))
+                {
+                    bool canFallback = true;
+                    bool targetReady = true;
+                    for (PlanPacket &e : plan->pk)
+                    {
+                        if (partCulled && e.part != 0xFFFFFFFFu && e.part < partVisible.size() && partVisible[e.part] == 1u)
+                            continue;
+                        SurfaceInfo *info = &g_surfaceInfo[e.slot];
+                        if (!(info->s == e.s && info->header == header && info->frame == g_frame))
+                            info = &surfaceInfo(header, e.s);
+                        if (!surfaceDrawnFlags(info->flags))
+                            continue;
+                        uint64_t id;
+                        bool changedInPlace = false;
+                        if (e.idFrame == g_frame || (!e.rewritten && e.idFrame + 1u == g_frame && ((g_frame + (e.data >> 5)) & 15u) != 0u))
+                            id = e.id;
+                        else
+                        {
+                            id = packetId(e.data, e.size, true);
+                            changedInPlace = g_packetChangedInPlace;
+                            e.rewritten = g_packetRewritten;
+                            if (id != e.id)
+                            {
+                                e.id = id;
+                                e.resolved = false;
+                                e.ready = false;
+                                e.readyTwo = false;
+                                e.twoPasses = false;
+                            }
+                            e.idFrame = g_frame;
+                        }
+                        if (changedInPlace || e.rewritten || g_skinnedIds.count(id) || g_everSkinnedIds.count(id))
+                        {
+                            canFallback = false;
+                            break;
+                        }
+                        const SurfaceInfo &full = surfaceInfoFull(*info, e.surface);
+                        const bool twoPasses = detailTexturesOn() && (info->texMode == 2u);
+                        const bool ready1 = native_renderer::meshKnown(id);
+                        const bool ready2 = !twoPasses || native_renderer::meshKnown(id ^ (1ull << 61));
+                        const bool texReady = (!full.texture || !native_renderer::asyncPending(full.texture)) &&
+                                              (!twoPasses || !full.texture2 || !native_renderer::asyncPending(full.texture2));
+                        if (!ready1 || !ready2)
+                        {
+                            targetReady = false;
+                            const bool missing1 = !ready1 && !native_renderer::hasMesh(id);
+                            const bool missing2 = twoPasses && !ready2 && !native_renderer::hasMesh(id ^ (1ull << 61));
+                            if ((missing1 || missing2) && native_renderer::asyncBudgetLeft())
+                            {
+                                const uint32_t pktLayer = info->layer[fading ? 1 : 0];
+                                const bool isTerrainPkt = pktLayer >= 1u && pktLayer <= 3u;
+                                const bool reorderSafe = !twoPasses && full.blend == native_renderer::Blend::Opaque &&
+                                                         pktLayer >= 2u && pktLayer <= 11u &&
+                                                         ((info->flags & 0x2200u) != 0x2200u) && (((info->flags >> 17) & 1u) == 0u);
+                                buildPacketAsync(id, e.data, e.size, twoPasses, reorderSafe, isTerrainPkt);
+                            }
+                        }
+                        else if (!texReady)
+                        {
+                            targetReady = false;
+                        }
+                    }
+                    if (canFallback && !targetReady)
+                    {
+                        planPackets(job.fallbackPlan, false, true);
+                        return;
+                    }
+                }
+                planPackets(plan, partCulled);
+            }
             else
                 walkPackets();
             return;
@@ -13680,7 +13836,7 @@ namespace sotc_native
         fromPlan.clear();
         fromWalk.clear();
         native_renderer::setDrawTap(&fromPlan);
-        planPackets();
+        planPackets(plan, partCulled);
         native_renderer::setDrawTap(&fromWalk);
         native_renderer::setDrawTapOnly(true);
         walkPackets();

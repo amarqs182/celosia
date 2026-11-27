@@ -2093,7 +2093,13 @@ public:
     void uploadMesh(uint64_t id, const Vertex *vertices, uint32_t count, bool perFrame) override
     {
         if (!vertices || !count)
+        {
+            // Match GLBackend::uploadMesh: mark empty static packets known so
+            // drawPacket and seamless LOD fallback never re-queue them forever.
+            if (!perFrame)
+                m_knownMeshes.insert(id);
             return;
+        }
 
         if (perFrame)
         {

@@ -226,6 +226,7 @@ namespace native_renderer
     // frame; no limit by default): a caller over it leaves the draw out (held)
     // and asks again the next frame.
     bool asyncBudgetLeft();
+    bool asyncPending(uint64_t id);
 
     // Draws of one frame: `clip` (column-major) takes model space to clip
     // space with x, y and w as the game's projection gives them (x/w, y/w in
