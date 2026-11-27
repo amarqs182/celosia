@@ -533,23 +533,8 @@ out mediump vec4 oColor;
 
 void main()
 {
-    mediump vec4 t;
-    if (uFogCol.w > 0.5)
-    {
-        if (uFogC.w > 0.0)
-        {
-            highp float lod = clamp(vLogW * uFogC.z + uFogC.y, 0.0, uFogC.w);
-            t = textureLod(uTex, vUV.xy, lod);
-        }
-        else
-        {
-            t = texture(uTex, vUV.xy);
-        }
-    }
-    else
-    {
-        t = vec4(vec3(128.0 / 255.0), 1.0);
-    }
+    highp float lod = uFogC.w > 0.0 ? clamp(vLogW * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
+    mediump vec4 t = uFogCol.w > 0.5 ? textureLod(uTex, vUV.xy, lod) : vec4(vec3(128.0 / 255.0), 1.0);
     mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
     oColor = vec4(clamp(raw, 0.0, 1.0), 1.0);
 }
@@ -572,23 +557,8 @@ void main()
 {
     if (vScreen.w < 0.0)
         discard;
-    mediump vec4 t;
-    if (uFogCol.w > 0.5)
-    {
-        if (uFogC.w > 0.0)
-        {
-            highp float lod = clamp(vLogW * uFogC.z + uFogC.y, 0.0, uFogC.w);
-            t = textureLod(uTex, vUV.xy, lod);
-        }
-        else
-        {
-            t = texture(uTex, vUV.xy);
-        }
-    }
-    else
-    {
-        t = vec4(vec3(128.0 / 255.0), 1.0);
-    }
+    highp float lod = uFogC.w > 0.0 ? clamp(vLogW * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
+    mediump vec4 t = uFogCol.w > 0.5 ? textureLod(uTex, vUV.xy, lod) : vec4(vec3(128.0 / 255.0), 1.0);
     mediump float alpha = clamp(t.a * max(uFogCol.w, 1.0) * vColor.a, 0.0, 1.0);
     if (alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y))
         discard;
@@ -611,28 +581,12 @@ out mediump vec4 oColor;
 
 void main()
 {
-    mediump vec4 t;
-    if (uFogCol.w > 0.5)
-    {
-        if (uFogC.w > 0.0)
-        {
-            highp float lod = clamp(vLogW * uFogC.z + uFogC.y, 0.0, uFogC.w);
-            t = textureLod(uTex, vUV.xy, lod);
-        }
-        else
-        {
-            t = texture(uTex, vUV.xy);
-        }
-    }
-    else
-    {
-        t = vec4(vec3(128.0 / 255.0), 1.0);
-    }
+    highp float lod = uFogC.w > 0.0 ? clamp(vLogW * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
+    mediump vec4 t = uFogCol.w > 0.5 ? textureLod(uTex, vUV.xy, lod) : vec4(vec3(128.0 / 255.0), 1.0);
     mediump float alpha = clamp(t.a * max(uFogCol.w, 1.0) * vColor.a, 0.0, 1.0);
-    if (alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y))
-        alpha = 0.0;
+    bool away = alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y);
     mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
-    oColor = vec4(clamp(raw, 0.0, 1.0), alpha);
+    oColor = away ? vec4(0.0) : vec4(clamp(raw, 0.0, 1.0), alpha);
 }
 )";
 
@@ -657,8 +611,7 @@ void main()
     highp float lod = uFogC.w > 0.0 ? clamp(vLogW * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
     mediump vec4 t = uFogCol.w > 0.5 ? textureLod(uTex, vUV.xy, lod) : vec4(vec3(128.0 / 255.0), 1.0);
     mediump float alpha = clamp(t.a * max(uFogCol.w, 1.0) * vColor.a, 0.0, 1.0);
-    if (alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y))
-        alpha = 0.0;
+    bool away = vScreen.w < 0.0 || alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y);
     mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
     mediump vec3 rgb = clamp(raw, 0.0, 1.0);
     rgb = mix(uFogCol.rgb, rgb, clamp(vUV.w / max(depth, 1e-3), 0.0, 1.0));
@@ -670,7 +623,7 @@ void main()
             f = floor(f * uFogA.z) / uFogA.z;
         rgb = mix(rgb, texture(uBackground, scr).rgb, f);
     }
-    oColor = vec4(rgb, alpha);
+    oColor = away ? vec4(0.0) : vec4(rgb, alpha);
 }
 )";
 
@@ -1080,16 +1033,8 @@ out mediump vec4 oColor;
 
 void main()
 {
-    mediump vec4 t;
-    if (uFogC.w > 0.0)
-    {
-        highp float lod = clamp(vLogW * uFogC.z + uFogC.y, 0.0, uFogC.w);
-        t = textureLod(uTexArray, vec3(vUV.xy, floor(vTexLayer + 0.5)), lod);
-    }
-    else
-    {
-        t = texture(uTexArray, vec3(vUV.xy, floor(vTexLayer + 0.5)));
-    }
+    highp float lod = uFogC.w > 0.0 ? clamp(vLogW * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
+    mediump vec4 t = textureLod(uTexArray, vec3(vUV.xy, floor(vTexLayer + 0.5)), lod);
     mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
     oColor = vec4(clamp(raw, 0.0, 1.0), 1.0);
 }
@@ -1113,16 +1058,8 @@ void main()
 {
     if (vScreen.w < 0.0)
         discard;
-    mediump vec4 t;
-    if (uFogC.w > 0.0)
-    {
-        highp float lod = clamp(vLogW * uFogC.z + uFogC.y, 0.0, uFogC.w);
-        t = textureLod(uTexArray, vec3(vUV.xy, floor(vTexLayer + 0.5)), lod);
-    }
-    else
-    {
-        t = texture(uTexArray, vec3(vUV.xy, floor(vTexLayer + 0.5)));
-    }
+    highp float lod = uFogC.w > 0.0 ? clamp(vLogW * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
+    mediump vec4 t = textureLod(uTexArray, vec3(vUV.xy, floor(vTexLayer + 0.5)), lod);
     mediump float alpha = clamp(t.a * max(uFogCol.w, 1.0) * vColor.a, 0.0, 1.0);
     if (alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y))
         discard;
@@ -1146,21 +1083,12 @@ out mediump vec4 oColor;
 
 void main()
 {
-    mediump vec4 t;
-    if (uFogC.w > 0.0)
-    {
-        highp float lod = clamp(vLogW * uFogC.z + uFogC.y, 0.0, uFogC.w);
-        t = textureLod(uTexArray, vec3(vUV.xy, floor(vTexLayer + 0.5)), lod);
-    }
-    else
-    {
-        t = texture(uTexArray, vec3(vUV.xy, floor(vTexLayer + 0.5)));
-    }
+    highp float lod = uFogC.w > 0.0 ? clamp(vLogW * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
+    mediump vec4 t = textureLod(uTexArray, vec3(vUV.xy, floor(vTexLayer + 0.5)), lod);
     mediump float alpha = clamp(t.a * max(uFogCol.w, 1.0) * vColor.a, 0.0, 1.0);
-    if (alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y))
-        alpha = 0.0;
+    bool away = alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y);
     mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
-    oColor = vec4(clamp(raw, 0.0, 1.0), alpha);
+    oColor = away ? vec4(0.0) : vec4(clamp(raw, 0.0, 1.0), alpha);
 }
 )";
 
@@ -1262,8 +1190,7 @@ void main()
     highp float lod = uFogC.w > 0.0 ? clamp(vLogW * uFogC.z + uFogC.y, 0.0, uFogC.w) : 0.0;
     mediump vec4 t = textureLod(uTexArray, vec3(vUV.xy, floor(vTexLayer + 0.5)), lod);
     mediump float alpha = clamp(t.a * max(uFogCol.w, 1.0) * vColor.a, 0.0, 1.0);
-    if (alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y))
-        alpha = 0.0;
+    bool away = vScreen.w < 0.0 || alpha < max(0.02, uAlpha.x) || (uAlpha.y > 0.0 && alpha >= uAlpha.y);
     mediump vec3 raw = max(t.rgb * vColor.rgb, vec3(0.0));
     mediump vec3 rgb = clamp(raw, 0.0, 1.0);
     rgb = mix(uFogCol.rgb, rgb, clamp(vUV.w / max(depth, 1e-3), 0.0, 1.0));
@@ -1275,7 +1202,7 @@ void main()
             f = floor(f * uFogA.z) / uFogA.z;
         rgb = mix(rgb, texture(uBackground, scr).rgb, f);
     }
-    oColor = vec4(rgb, alpha);
+    oColor = away ? vec4(0.0) : vec4(rgb, alpha);
 }
 )";
 
@@ -1517,7 +1444,7 @@ bool linkProgCached(ShaderProg &out, const char *name, const char *vsSrc, const 
     std::string binPath;
     if (useCache && !cacheDir.empty())
     {
-        binPath = cacheDir + "/" + name + "_v17.bin";
+        binPath = cacheDir + "/" + name + "_v18.bin";
         if (FILE *fp = std::fopen(binPath.c_str(), "rb"))
         {
             GLenum fmt = 0;
@@ -1890,6 +1817,7 @@ inline bool canMergeStatic(const QueuedDraw &a, const QueuedDraw &b)
     return a.bucket == b.bucket &&
            a.bucket <= 2u &&
            a.b2SortTier == b.b2SortTier &&
+           ((a.bucket == 2u && a.b2SortTier != 0u) || a.stateHash == b.stateHash) &&
            a.mesh && b.mesh &&
            !a.mesh->dynamic && !b.mesh->dynamic &&
            !a.skinned && !b.skinned &&
@@ -1955,7 +1883,7 @@ inline bool canInstanceStatic(const QueuedDraw &a, const QueuedDraw &b)
 inline bool sameMaterialSuperGroup(const QueuedDraw &a, const QueuedDraw &b)
 {
     return a.bucket == b.bucket &&
-           (a.bucket <= 1u || (a.bucket == 2u && (a.b2SortTier == 0u || a.b2SortTier == 2u) && a.b2SortTier == b.b2SortTier)) &&
+           (a.bucket <= 1u || (a.bucket == 2u && a.b2SortTier == 0u && a.b2SortTier == b.b2SortTier)) &&
            a.stateHash == b.stateHash &&
            a.mesh && b.mesh &&
            !a.mesh->dynamic && !b.mesh->dynamic &&
@@ -2022,7 +1950,7 @@ public:
             m_hasLetterboxCrop = (cropRatio > 0.001f);
         }
         m_mergeBudgetUs = static_cast<uint64_t>(std::max(0, envInt("SOTC_MALI_MERGE_BUDGET_US", 2500)));
-        m_mergeChunkMax = static_cast<uint32_t>(std::clamp(envInt("SOTC_MALI_MERGE_CHUNK", 64), 4, 128));
+        m_mergeChunkMax = static_cast<uint32_t>(std::clamp(envInt("SOTC_MALI_MERGE_CHUNK", 24), 4, 128));
         m_cacheBudgetBytes = static_cast<uint64_t>(std::max(16, envInt("SOTC_MALI_CACHE_BUDGET_MB", 160))) * 1024ull * 1024ull;
         m_texArrayBudgetBytes = std::min(100ull * 1024ull * 1024ull, (m_cacheBudgetBytes * 5ull) / 8ull);
         m_atPass2Mode = std::clamp(envInt("SOTC_MALI_AT_PASS2", 1), 0, 2); // 0=off, 1=smart auto, 2=always
@@ -2047,7 +1975,7 @@ public:
         m_paceEnabled = envBool("SOTC_MALI_PACE", false);
         m_statsEnabled = envBool("SOTC_MALI_STATS", false);
         m_uploadBudgetUs = static_cast<uint64_t>(std::max(0, envInt("SOTC_MALI_UPLOAD_BUDGET_US", 4000)));
-        m_bgRate = static_cast<uint32_t>(std::max(1, envInt("SOTC_MALI_BG_RATE", 16)));
+        m_bgRate = static_cast<uint32_t>(std::max(1, envInt("SOTC_MALI_BG_RATE", 4)));
         {
             const int cap = envInt("SOTC_FPS_CAP", 30);
             m_targetFps = cap <= 0 ? 0 : std::max(20, cap);
@@ -2134,7 +2062,10 @@ public:
     void uploadIndexedMesh(uint64_t id, const Vertex *vertices, uint32_t count, const uint32_t *indices, uint32_t indexCount) override
     {
         if (!vertices || !count || !indices || !indexCount)
+        {
+            m_knownMeshes.insert(id);
             return;
+        }
         m_knownMeshes.insert(id);
         UploadCmd cmd{};
         cmd.kind = UploadCmd::IndexedMesh;
@@ -2148,7 +2079,10 @@ public:
     void uploadSkinnedMesh(uint64_t id, const SkinVertex *vertices, uint32_t count, const uint32_t *indices, uint32_t indexCount) override
     {
         if (!vertices || !count)
+        {
+            m_knownMeshes.insert(id);
             return;
+        }
         m_knownMeshes.insert(id);
         UploadCmd cmd{};
         cmd.kind = UploadCmd::SkinnedMesh;
@@ -2291,12 +2225,16 @@ public:
             auto isMeshInUse = [&](uint64_t id) {
                 for (const auto &d : m_rec.draws)
                     if (d.meshId == id) return true;
+                for (uint64_t mid : m_rec.multiMeshIds)
+                    if (mid == id) return true;
                 for (const auto &u : m_rec.uploads)
                     if (u.kind != UploadCmd::Texture && u.id == id) return true;
                 if (m_hasPendingFrame)
                 {
                     for (const auto &d : m_pending.draws)
                         if (d.meshId == id) return true;
+                    for (uint64_t mid : m_pending.multiMeshIds)
+                        if (mid == id) return true;
                     for (const auto &u : m_pending.uploads)
                         if (u.kind != UploadCmd::Texture && u.id == id) return true;
                 }
@@ -2316,6 +2254,7 @@ public:
                 }
                 return false;
             };
+            bool anyMeshEvicted = false;
             for (uint64_t id : m_pendingEvictMeshes)
             {
                 if (isMeshInUse(id))
@@ -2324,8 +2263,11 @@ public:
                 {
                     m_knownMeshes.erase(id);
                     m_rec.confirmEvictMeshes.push_back(id);
+                    anyMeshEvicted = true;
                 }
             }
+            if (anyMeshEvicted)
+                m_evictions.fetch_add(1u, std::memory_order_release);
             for (uint64_t id : m_pendingEvictTex)
             {
                 if (isTexInUse(id))
@@ -2678,10 +2620,10 @@ private:
         {
             glBindVertexArray(m_streamMergeVao[i]);
             glBindBuffer(GL_ARRAY_BUFFER, m_streamMergeVbo[i]);
-            glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(12288u * sizeof(CompactVertex)), nullptr, GL_STREAM_DRAW);
+            glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(16384u * sizeof(CompactVertex)), nullptr, GL_STREAM_DRAW);
             setupCompactVertexAttribs();
             glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_streamMergeIbo[i]);
-            glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(24576u * sizeof(uint32_t)), nullptr, GL_STREAM_DRAW);
+            glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(32768u * sizeof(uint32_t)), nullptr, GL_STREAM_DRAW);
         }
         glBindVertexArray(0);
 
@@ -2715,6 +2657,8 @@ private:
         GlContextGuard guard;
         glDeleteVertexArrays(3, m_arenaVao);
         glDeleteBuffers(3, m_arenaVbo);
+        m_arenaVboBytes[0] = m_arenaVboBytes[1] = m_arenaVboBytes[2] = 0;
+        if (m_copyReadFbo) { glDeleteFramebuffers(1, &m_copyReadFbo); m_copyReadFbo = 0; }
         glDeleteVertexArrays(3, m_streamMergeVao);
         glDeleteBuffers(3, m_streamMergeVbo);
         glDeleteBuffers(3, m_streamMergeIbo);
@@ -2884,7 +2828,6 @@ private:
             {
                 deleteMeshGpu(it->second);
                 m_meshes.erase(it);
-                m_evictions.fetch_add(1u, std::memory_order_relaxed);
             }
         }
         for (uint64_t id : pkt.cancelEvictTex)
@@ -2908,7 +2851,6 @@ private:
                 else
                     m_gpuTexBytes = 0;
                 m_textures.erase(it);
-                m_evictions.fetch_add(1u, std::memory_order_relaxed);
             }
         }
         if (!pkt.confirmEvictTex.empty())
@@ -2919,7 +2861,7 @@ private:
             if (cmd.kind == UploadCmd::StaticMesh || cmd.kind == UploadCmd::IndexedMesh)
             {
                 MaliMesh &mesh = m_meshes[cmd.id];
-                ++mesh.revision;
+                mesh.revision = m_nextMeshRevision++;
                 mesh.pendingEvict = false;
                 mesh.lastUsed = pkt.frameNum;
                 mesh.indexed = (cmd.kind == UploadCmd::IndexedMesh);
@@ -2989,7 +2931,7 @@ private:
             else if (cmd.kind == UploadCmd::SkinnedMesh)
             {
                 MaliMesh &mesh = m_meshes[cmd.id];
-                ++mesh.revision;
+                mesh.revision = m_nextMeshRevision++;
                 mesh.pendingEvict = false;
                 mesh.lastUsed = pkt.frameNum;
                 mesh.dynamic = false;
@@ -3086,22 +3028,20 @@ private:
                         break;
                 }
             }
-            for (auto it = m_deferredUploads.begin(); it != m_deferredUploads.end();)
+            std::deque<UploadCmd> keepDeferred;
+            while (!m_deferredUploads.empty())
             {
-                const bool stillDeferred = (it->kind == UploadCmd::Texture)
-                    ? (m_drawnTexIdsScratch.count(it->id) != 0u)
-                    : (m_drawnMeshIdsScratch.count(it->id) != 0u);
+                UploadCmd cmd = std::move(m_deferredUploads.front());
+                m_deferredUploads.pop_front();
+                const bool stillDeferred = (cmd.kind == UploadCmd::Texture)
+                    ? (m_drawnTexIdsScratch.count(cmd.id) != 0u)
+                    : (m_drawnMeshIdsScratch.count(cmd.id) != 0u);
                 if (!stillDeferred)
-                {
-                    UploadCmd cmd = std::move(*it);
-                    it = m_deferredUploads.erase(it);
                     uploadCmdOnGl(cmd);
-                }
                 else
-                {
-                    ++it;
-                }
+                    keepDeferred.push_back(std::move(cmd));
             }
+            m_deferredUploads.swap(keepDeferred);
         }
         if (uploadStartUs)
             m_uploadUsThisFrame = nowUs() - uploadStartUs;
@@ -3341,7 +3281,12 @@ private:
 
     void ensureStandalone2D(MaliTex &tx)
     {
-        if (tx.has2D || tx.rawData.empty() || !tx.width || !tx.height)
+        if (tx.has2D || !tx.width || !tx.height)
+            return;
+        const bool canCopyFromArray = tx.rawData.empty() && !tx.astc && tx.arrayId >= 0 &&
+                                      static_cast<size_t>(tx.arrayId) < m_texArrays.size() &&
+                                      m_texArrays[tx.arrayId].tex != 0u;
+        if (tx.rawData.empty() && !canCopyFromArray)
             return;
         if (!tx.tex)
             glGenTextures(1, &tx.tex);
@@ -3353,7 +3298,66 @@ private:
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(tx.levels - 1u));
 
         uint64_t newTexBytes = 0;
-        if (tx.astc)
+        if (canCopyFromArray)
+        {
+            GLint prevReadFbo = 0;
+            glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevReadFbo);
+            if (!m_copyReadFbo)
+                glGenFramebuffers(1, &m_copyReadFbo);
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, m_copyReadFbo);
+            const GLuint arrTex = m_texArrays[tx.arrayId].tex;
+            const GLenum sizedFmt = (tx.fmtCode == 0u) ? GL_RGB565 : (tx.fmtCode == 1u ? GL_RGB5_A1 : GL_RGBA8);
+            const uint64_t bpp = tx.tex16 ? 2ull : 4ull;
+            glFramebufferTextureLayer(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, arrTex,
+                                      0, static_cast<GLint>(tx.arrayLayer));
+            if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+            {
+                glFramebufferTextureLayer(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, 0, 0, 0);
+                glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(prevReadFbo));
+                glDeleteTextures(1, &tx.tex);
+                tx.tex = 0;
+                m_lastTex = ~0u;
+                return;
+            }
+            glTexStorage2D(GL_TEXTURE_2D, static_cast<GLsizei>(tx.levels), sizedFmt,
+                           static_cast<GLsizei>(tx.width), static_cast<GLsizei>(tx.height));
+            uint32_t lw = tx.width, lh = tx.height;
+            bool needGenMips = false;
+            for (uint32_t lv = 0; lv < tx.levels; ++lv)
+            {
+                if (lv > 0u)
+                {
+                    glFramebufferTextureLayer(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, arrTex,
+                                              static_cast<GLint>(lv), static_cast<GLint>(tx.arrayLayer));
+                    if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+                    {
+                        needGenMips = true;
+                        break;
+                    }
+                }
+                glCopyTexSubImage2D(GL_TEXTURE_2D, static_cast<GLint>(lv),
+                                    0, 0, 0, 0, static_cast<GLsizei>(lw), static_cast<GLsizei>(lh));
+                newTexBytes += static_cast<uint64_t>(lw) * lh * bpp;
+                lw = std::max(1u, lw >> 1);
+                lh = std::max(1u, lh >> 1);
+            }
+            glFramebufferTextureLayer(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, 0, 0, 0);
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(prevReadFbo));
+            if (needGenMips)
+            {
+                glGenerateMipmap(GL_TEXTURE_2D);
+                newTexBytes = 0;
+                lw = tx.width;
+                lh = tx.height;
+                for (uint32_t lv = 0; lv < tx.levels; ++lv)
+                {
+                    newTexBytes += static_cast<uint64_t>(lw) * lh * bpp;
+                    lw = std::max(1u, lw >> 1);
+                    lh = std::max(1u, lh >> 1);
+                }
+            }
+        }
+        else if (tx.astc)
         {
             uint8_t bx = 0, by = 0;
             const GLenum fmt = fmtCodeToGlInternal(tx.fmtCode, bx, by);
@@ -3912,7 +3916,7 @@ private:
         cm.gpuBytes = bytes;
         cm.srcBytes = bytes;
         cm.lastUsed = m_frameNum;
-        cm.revision = 1u;
+        cm.revision = m_nextMeshRevision++;
 
         glGenVertexArrays(1, &cm.vao);
         glGenBuffers(1, &cm.vbo);
@@ -3946,14 +3950,32 @@ private:
             return false;
         if (m_atPass2Mode == 2)
             return true;
-        // Mode 1 (smart auto): skip Pass 2 when neither vertex nor texture has intermediate alpha in (4, 124).
-        if (q.state.opacity < 0.99f)
+        // Mode 1 (smart auto): skip Pass 2 only when alpha cannot fall in (0.02, aref).
+        if (q.state.fresnel || q.state.opacity < 0.99f || aref >= 0.99f)
             return true;
         if (q.mesh && q.mesh->hasIntermediateAlpha)
             return true;
         if (q.tex && !q.tex->binaryAlpha)
             return true;
         return false;
+    }
+
+    uint32_t makeAlphaTestPass2Pso(const QueuedDraw &q, bool mapToArray) const
+    {
+        const uint32_t baseProg = q.psoKey & 31u;
+        const bool fastFog = (baseProg == 7u || baseProg == 10u || baseProg == 14u || baseProg == 25u);
+        // Soft (discard-free, alpha=0) shaders are ONLY valid when blending by source alpha;
+        // Blend::Opaque draws (e.g. alpha-cutout tree canopy cards) MUST keep discard!
+        const bool canSoftP2 = m_fastShadersEnabled && (q.state.blend != Blend::Opaque);
+        uint32_t p2Prog;
+        if (q.skinned)
+            p2Prog = canSoftP2 ? (fastFog ? 11u : 4u) : (fastFog ? 10u : 4u);
+        else
+            p2Prog = canSoftP2 ? (fastFog ? 8u : 12u) : (fastFog ? 7u : 1u);
+        if (mapToArray && q.texArrayId >= 0)
+            p2Prog = toArrayProg(p2Prog);
+        // Use GL_LEQUAL (depthFunc=0) matching native_renderer_gl.cpp so coplanar passes never flicker.
+        return makePsoKey(p2Prog, q.state.blend, true, false, 0u);
     }
 
     void executeFrame(FramePacket &pkt, bool glAlreadyHeld = false)
@@ -4045,9 +4067,15 @@ private:
 
         if (!pkt.dynVerts.empty())
         {
+            const size_t needBytes = pkt.dynVerts.size() * sizeof(Vertex);
             glBindBuffer(GL_ARRAY_BUFFER, m_arenaVbo[m_arenaSlot]);
-            glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(pkt.dynVerts.size() * sizeof(Vertex)),
-                         pkt.dynVerts.data(), GL_STREAM_DRAW);
+            if (needBytes > m_arenaVboBytes[m_arenaSlot])
+            {
+                const size_t allocBytes = std::max<size_t>(65536u, needBytes + (needBytes >> 2));
+                glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(allocBytes), nullptr, GL_STREAM_DRAW);
+                m_arenaVboBytes[m_arenaSlot] = allocBytes;
+            }
+            glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(needBytes), pkt.dynVerts.data());
         }
         const uint64_t qStartUs = m_statsEnabled ? nowUs() : 0u;
 
@@ -4362,17 +4390,17 @@ private:
         // then scatter into m_qAll in one sequential pass.
         // Assign deterministic first-seen submission sequence numbers per state/clip group so
         // frame-to-frame camera/light hash changes never scramble overlapping tree/foliage order.
-        m_stateFirstSeq.assign(m_stateFirstSeq.size(), {0ull, 0u});
-        m_clipFirstSeq.assign(m_clipFirstSeq.size(), {0ull, 0u});
         const size_t needCap = std::max<size_t>(256u, m_qUnsorted.size() * 2u);
         size_t pow2 = 256u;
         while (pow2 < needCap)
             pow2 <<= 1u;
         if (m_stateFirstSeq.size() < pow2)
-            m_stateFirstSeq.assign(pow2, {0ull, 0u});
+            m_stateFirstSeq.resize(pow2);
         if (m_clipFirstSeq.size() < pow2)
-            m_clipFirstSeq.assign(pow2, {0ull, 0u});
-        const size_t mask = m_stateFirstSeq.size() - 1u;
+            m_clipFirstSeq.resize(pow2);
+        std::memset(m_stateFirstSeq.data(), 0, pow2 * sizeof(m_stateFirstSeq[0]));
+        std::memset(m_clipFirstSeq.data(), 0, pow2 * sizeof(m_clipFirstSeq[0]));
+        const size_t mask = pow2 - 1u;
         auto firstSeq = [mask](std::vector<std::pair<uint64_t, uint32_t>> &tab, uint64_t key, uint32_t seq) -> uint32_t
         {
             if (key == 0ull)
@@ -4393,7 +4421,7 @@ private:
         };
         for (QueuedDraw &qd : m_qUnsorted)
         {
-            if (qd.bucket <= 1u || (qd.bucket == 2u && (qd.b2SortTier == 0u || qd.b2SortTier == 2u)))
+            if (qd.bucket <= 1u || (qd.bucket == 2u && qd.b2SortTier == 0u))
             {
                 const uint32_t pal = qd.skinned ? qd.state.skinPalette : 0u;
                 const uint64_t sgKey = qd.stateHash ^
@@ -4437,7 +4465,7 @@ private:
             {
                 if (a.b2SortTier != b.b2SortTier)
                     return a.b2SortTier < b.b2SortTier;
-                if (a.b2SortTier == 0u || a.b2SortTier == 2u)
+                if (a.b2SortTier == 0u)
                 {
                     if (a.psoKey != b.psoKey) return a.psoKey < b.psoKey;
                     if (a.stateFirstSeq != b.stateFirstSeq) return a.stateFirstSeq < b.stateFirstSeq;
@@ -4469,7 +4497,9 @@ private:
             for (size_t i = 0; i < m_qAll.size();)
             {
                 const QueuedDraw &q = m_qAll[i];
-                if (q.bucket <= 2u && q.mesh && !q.mesh->dynamic && !q.skinned && !q.mesh->srcVerts.empty() &&
+                const bool skipMerge = (q.bucket == 2u && q.b2SortTier == 2u) ||
+                                       (wantGlowOrder && q.state.order == pkt.glow.order);
+                if (!skipMerge && q.bucket <= 2u && q.mesh && !q.mesh->dynamic && !q.skinned && !q.mesh->srcVerts.empty() &&
                     i + 1u < m_qAll.size() && canMergeStatic(q, m_qAll[i + 1u]))
                 {
                     size_t groupEnd = i + 2u;
@@ -4519,8 +4549,8 @@ private:
                                 if (streamUsThisFrame < kStreamMergeBudgetUs &&
                                     chunkVerts > 0u && chunkIndices > 0u &&
                                     chunkVerts <= 2048u &&
-                                    m_streamVertsScratch.size() + chunkVerts <= 12288u &&
-                                    m_streamIndicesScratch.size() + chunkIndices <= 24576u)
+                                    m_streamVertsScratch.size() + chunkVerts <= 16384u &&
+                                    m_streamIndicesScratch.size() + chunkIndices <= 32768u)
                                 {
                                     const uint64_t tStr0 = nowUs();
                                     const uint32_t firstIndex = static_cast<uint32_t>(m_streamIndicesScratch.size());
@@ -4689,11 +4719,16 @@ private:
             for (const QueuedDraw &q : m_qBg)
             {
                 bgHash = fnv1aHash(&q.meshId, sizeof(q.meshId), bgHash);
-                bgHash = fnv1aHash(&q.clipHash, sizeof(q.clipHash), bgHash);
-                bgHash = fnv1aHash(&q.stateHash, sizeof(q.stateHash), bgHash);
+                bgHash = fnv1aHash(q.clip, 16u * sizeof(float), bgHash);
+                bgHash = fnv1aHash(&q.state.texture, sizeof(q.state.texture), bgHash);
+                bgHash = fnv1aHash(&q.state.opacity, sizeof(q.state.opacity), bgHash);
+                bgHash = fnv1aHash(q.state.uvOffset, sizeof(q.state.uvOffset), bgHash);
             }
             if (!m_bgValid || bgHash != m_bgLastHash)
             {
+                glActiveTexture(GL_TEXTURE1);
+                glBindTexture(GL_TEXTURE_2D, m_whiteTex);
+                glActiveTexture(GL_TEXTURE0);
                 glBindFramebuffer(GL_FRAMEBUFFER, m_bgTarget.fbo);
                 glViewport(0, 0, static_cast<GLsizei>(m_bgTarget.width), static_cast<GLsizei>(m_bgTarget.height));
                 glDepthMask(GL_TRUE);
@@ -4704,6 +4739,7 @@ private:
                 invalidateDepth();
                 m_bgLastHash = bgHash;
                 m_bgValid = true;
+                resetPsoAndUniformCaches();
             }
         }
 
@@ -5010,10 +5046,7 @@ private:
                         if (anyNeedPass2)
                         {
                             QueuedDraw p2 = sq;
-                            const bool fastFog = ((sq.psoKey & 31u) == 7u || (sq.psoKey & 31u) == 10u);
-                            const uint32_t p2ProgBase = m_fastShadersEnabled ? (fastFog ? 8u : 12u) : 1u;
-                            const uint32_t p2Prog = (sq.texArrayId >= 0) ? toArrayProg(p2ProgBase) : p2ProgBase;
-                            p2.psoKey = makePsoKey(p2Prog, sq.state.blend, true, false, 1u);
+                            p2.psoKey = makeAlphaTestPass2Pso(sq, true);
                             emitMergedRun(p2, *run, pkt, true, 0.02f, aref);
                         }
                         else if (((sq.state.alphaTest >> 12) & 3u) == 1u || ((sq.state.alphaTest >> 12) & 3u) == 3u)
@@ -5042,10 +5075,7 @@ private:
                         if (anyNeedPass2)
                         {
                             QueuedDraw p2 = sq;
-                            const bool fastFog = ((sq.psoKey & 31u) == 7u || (sq.psoKey & 31u) == 10u);
-                            const uint32_t p2ProgBase = m_fastShadersEnabled ? (fastFog ? 8u : 12u) : 1u;
-                            const uint32_t p2Prog = (sq.texArrayId >= 0) ? toArrayProg(p2ProgBase) : p2ProgBase;
-                            p2.psoKey = makePsoKey(p2Prog, sq.state.blend, true, false, 1u);
+                            p2.psoKey = makeAlphaTestPass2Pso(sq, true);
                             emitStreamMergedChunk(p2, chunk, pkt, true, 0.02f, aref);
                         }
                         else if (((sq.state.alphaTest >> 12) & 3u) == 1u || ((sq.state.alphaTest >> 12) & 3u) == 3u)
@@ -5062,9 +5092,72 @@ private:
             };
 
             // Phase 6.1/7C/8 + Streaming Merge + Cross-Clip Instancing across Material Super-Groups.
-            if ((q.bucket <= 1u || (q.bucket == 2u && (q.b2SortTier == 0u || q.b2SortTier == 2u))) &&
+            if ((q.bucket <= 1u || (q.bucket == 2u && q.b2SortTier == 0u)) &&
                 q.mesh && !q.mesh->dynamic && !q.skinned && !q.state.reflectionSample && !q.state.refractionSample)
             {
+                const bool orderSensitive = (q.bucket == 1u);
+                auto flushInstScratch = [&]()
+                {
+                    if (m_instScratch.empty())
+                        return;
+                    if (m_instancingEnabled && m_instScratch.size() >= 2u)
+                    {
+                        if (!orderSensitive)
+                        {
+                            std::sort(m_instScratch.begin(), m_instScratch.end(), [](const QueuedDraw *a, const QueuedDraw *b) {
+                                if (a->meshId != b->meshId) return a->meshId < b->meshId;
+                                if (a->texArrayLayer != b->texArrayLayer) return a->texArrayLayer < b->texArrayLayer;
+                                if (a->state.texture != b->state.texture) return a->state.texture < b->state.texture;
+                                return a->seq < b->seq;
+                            });
+                        }
+                        for (size_t k = 0; k < m_instScratch.size();)
+                        {
+                            const QueuedDraw *iq0 = m_instScratch[k];
+                            size_t kEnd = k + 1u;
+                            while (kEnd < m_instScratch.size() && (kEnd - k) < kMaxInstances && canInstanceStatic(*iq0, *m_instScratch[kEnd]))
+                                ++kEnd;
+                            const uint32_t cnt = static_cast<uint32_t>(kEnd - k);
+                            if (cnt >= 2u)
+                            {
+                                if (iq0->bucket == 0u)
+                                    emitInstanced(&m_instScratch[k], cnt, pkt, true, 0.0f, 0.0f, iq0->psoKey);
+                                else if (iq0->bucket == 2u)
+                                    emitInstanced(&m_instScratch[k], cnt, pkt, true, b2MinAlpha(*iq0), 0.0f, iq0->psoKey);
+                                else
+                                {
+                                    const float aref = static_cast<float>((iq0->state.alphaTest >> 4) & 0xFFu) / 128.0f;
+                                    emitInstanced(&m_instScratch[k], cnt, pkt, true, std::max(0.02f, aref), 0.0f, iq0->psoKey);
+                                    bool anyPass2 = false;
+                                    for (uint32_t u = 0; u < cnt; ++u)
+                                        if (needsAlphaTestPass2(*m_instScratch[k + u], aref)) { anyPass2 = true; break; }
+                                    if (anyPass2)
+                                    {
+                                        const uint32_t p2Pso = makeAlphaTestPass2Pso(*iq0, false);
+                                        emitInstanced(&m_instScratch[k], cnt, pkt, true, 0.02f, aref, p2Pso);
+                                    }
+                                    else if (((iq0->state.alphaTest >> 12) & 3u) == 1u || ((iq0->state.alphaTest >> 12) & 3u) == 3u)
+                                        m_pass2SkipThisFrame += cnt;
+                                }
+                                m_instSavedThisFrame += cnt - 1u;
+                                if (iq0->bucket == 2u)
+                                    m_b2SavedThisFrame += cnt - 1u;
+                            }
+                            else
+                            {
+                                emitBucketSingle(*iq0, pkt);
+                            }
+                            k = kEnd;
+                        }
+                    }
+                    else
+                    {
+                        for (const QueuedDraw *jq : m_instScratch)
+                            emitBucketSingle(*jq, pkt);
+                    }
+                    m_instScratch.clear();
+                };
+
                 size_t superEnd = i + 1u;
                 while (superEnd < m_qAll.size() && sameMaterialSuperGroup(q, m_qAll[superEnd]))
                     ++superEnd;
@@ -5080,10 +5173,17 @@ private:
                         for (size_t s = sub; s < mergeEnd;)
                         {
                             const size_t e = std::min(s + static_cast<size_t>(m_mergeChunkMax), mergeEnd);
-                            if (e - s >= 2u && emitChunkOrStream(s, e, m_qAll[s]))
+                            const bool hasPreparedChunk = (e - s >= 2u) &&
+                                                          (m_streamChunkForDraw[s] == -2 || m_cachedRunForDraw[s] != nullptr || m_streamChunkForDraw[s] >= 0);
+                            if (hasPreparedChunk)
                             {
-                                s = e;
-                                continue;
+                                if (orderSensitive)
+                                    flushInstScratch();
+                                if (emitChunkOrStream(s, e, m_qAll[s]))
+                                {
+                                    s = e;
+                                    continue;
+                                }
                             }
                             for (size_t j = s; j < e; ++j)
                             {
@@ -5110,60 +5210,7 @@ private:
                         ++sub;
                     }
                 }
-                if (m_instancingEnabled && m_instScratch.size() >= 2u)
-                {
-                    std::sort(m_instScratch.begin(), m_instScratch.end(), [](const QueuedDraw *a, const QueuedDraw *b) {
-                        if (a->meshId != b->meshId) return a->meshId < b->meshId;
-                        if (a->texArrayLayer != b->texArrayLayer) return a->texArrayLayer < b->texArrayLayer;
-                        if (a->state.texture != b->state.texture) return a->state.texture < b->state.texture;
-                        return a->seq < b->seq;
-                    });
-                    for (size_t k = 0; k < m_instScratch.size();)
-                    {
-                        const QueuedDraw *iq0 = m_instScratch[k];
-                        size_t kEnd = k + 1u;
-                        while (kEnd < m_instScratch.size() && (kEnd - k) < kMaxInstances && canInstanceStatic(*iq0, *m_instScratch[kEnd]))
-                            ++kEnd;
-                        const uint32_t cnt = static_cast<uint32_t>(kEnd - k);
-                        if (cnt >= 2u)
-                        {
-                            if (iq0->bucket == 0u)
-                                emitInstanced(&m_instScratch[k], cnt, pkt, true, 0.0f, 0.0f, iq0->psoKey);
-                            else if (iq0->bucket == 2u)
-                                emitInstanced(&m_instScratch[k], cnt, pkt, true, b2MinAlpha(*iq0), 0.0f, iq0->psoKey);
-                            else
-                            {
-                                const float aref = static_cast<float>((iq0->state.alphaTest >> 4) & 0xFFu) / 128.0f;
-                                emitInstanced(&m_instScratch[k], cnt, pkt, true, std::max(0.02f, aref), 0.0f, iq0->psoKey);
-                                bool anyPass2 = false;
-                                for (uint32_t u = 0; u < cnt; ++u)
-                                    if (needsAlphaTestPass2(*m_instScratch[k + u], aref)) { anyPass2 = true; break; }
-                                if (anyPass2)
-                                {
-                                    const bool fastFog = ((iq0->psoKey & 31u) == 7u || (iq0->psoKey & 31u) == 10u);
-                                    const uint32_t p2Prog = m_fastShadersEnabled ? (fastFog ? 8u : 12u) : 1u;
-                                    const uint32_t p2Pso = makePsoKey(p2Prog, iq0->state.blend, true, false, 1u);
-                                    emitInstanced(&m_instScratch[k], cnt, pkt, true, 0.02f, aref, p2Pso);
-                                }
-                                else if (((iq0->state.alphaTest >> 12) & 3u) == 1u || ((iq0->state.alphaTest >> 12) & 3u) == 3u)
-                                    m_pass2SkipThisFrame += cnt;
-                            }
-                            m_instSavedThisFrame += cnt - 1u;
-                            if (iq0->bucket == 2u)
-                                m_b2SavedThisFrame += cnt - 1u;
-                        }
-                        else
-                        {
-                            emitBucketSingle(*iq0, pkt);
-                        }
-                        k = kEnd;
-                    }
-                }
-                else
-                {
-                    for (const QueuedDraw *jq : m_instScratch)
-                        emitBucketSingle(*jq, pkt);
-                }
+                flushInstScratch();
                 i = superEnd;
                 continue;
             }
@@ -5174,7 +5221,6 @@ private:
                 size_t groupEnd = i + 2u;
                 while (groupEnd < m_qAll.size() && canMergeStatic(q, m_qAll[groupEnd]))
                     ++groupEnd;
-                m_instScratch.clear();
                 for (size_t s = i; s < groupEnd;)
                 {
                     const size_t e = std::min(s + static_cast<size_t>(m_mergeChunkMax), groupEnd);
@@ -5192,12 +5238,10 @@ private:
                             ++m_culledThisFrame;
                             continue;
                         }
-                        m_instScratch.push_back(&jq);
+                        emitBucketSingle(jq, pkt);
                     }
                     s = e;
                 }
-                for (const QueuedDraw *jq : m_instScratch)
-                    emitBucketSingle(*jq, pkt);
                 i = groupEnd;
                 continue;
             }
@@ -5242,9 +5286,7 @@ private:
                                 if (needsAlphaTestPass2(*inst[k], aref)) { anyPass2 = true; break; }
                             if (anyPass2)
                             {
-                                const bool fastFog = ((iq.psoKey & 31u) == 7u || (iq.psoKey & 31u) == 10u);
-                                const uint32_t p2Prog = m_fastShadersEnabled ? (fastFog ? 8u : 12u) : 1u;
-                                const uint32_t p2Pso = makePsoKey(p2Prog, iq.state.blend, true, false, 1u);
+                                const uint32_t p2Pso = makeAlphaTestPass2Pso(iq, false);
                                 emitInstanced(inst, count, pkt, true, 0.02f, aref, p2Pso);
                             }
                             else if (((iq.state.alphaTest >> 12) & 3u) == 1u || ((iq.state.alphaTest >> 12) & 3u) == 3u)
@@ -5523,12 +5565,14 @@ private:
 
         const double frameMs = static_cast<double>(nowUs() - frameStartUs) * 0.001;
         const double gpuFrameMs = std::max(0.0, frameMs - lastCapMs - pacerSleepMs);
+        const double budgetMsBase = 1000.0 / static_cast<double>(m_drsTargetFps);
+        const double clampedGpuMs = std::min(gpuFrameMs, budgetMsBase * 2.5);
         m_emaFrameMs = m_emaFrameMs > 0.0 ? (m_emaFrameMs * 0.85 + frameMs * 0.15) : frameMs;
-        m_emaGpuFrameMs = m_emaGpuFrameMs > 0.0 ? (m_emaGpuFrameMs * 0.85 + gpuFrameMs * 0.15) : gpuFrameMs;
-        if (!pkt.hold && m_drsEnabled && (m_frameNum % 8u == 0u))
+        m_emaGpuFrameMs = m_emaGpuFrameMs > 0.0 ? (m_emaGpuFrameMs * 0.80 + clampedGpuMs * 0.20) : clampedGpuMs;
+        if (!pkt.hold && m_drsEnabled && (m_frameNum % 6u == 0u))
         {
             const double metricMs = m_drsDrawOnly ? m_emaDrawMs : m_emaGpuFrameMs;
-            const double budgetMs = (1000.0 / static_cast<double>(m_drsTargetFps)) * (m_drsDrawOnly ? 0.85 : 1.0);
+            const double budgetMs = budgetMsBase * (m_drsDrawOnly ? 0.85 : 1.0);
             if (metricMs > budgetMs * 1.12)
             {
                 ++m_drsOverStreak;
@@ -5543,7 +5587,7 @@ private:
             {
                 ++m_drsUnderStreak;
                 m_drsOverStreak = 0;
-                if (m_drsUnderStreak >= 3 && m_drsScale < m_drsMax)
+                if (m_drsUnderStreak >= 2 && m_drsScale < m_drsMax)
                 {
                     m_drsScale = std::min(m_drsMax, m_drsScale + 0.05f);
                     m_drsUnderStreak = 0;
@@ -5656,6 +5700,16 @@ private:
                          m_deferredUploads.size());
         }
 
+        if (m_frameNum % 30u == 0u && m_mergeRuns.size() > 256u)
+        {
+            for (auto it = m_mergeRuns.begin(); it != m_mergeRuns.end();)
+            {
+                if (!it->second.vao && it->second.lastUsed + 4u < m_frameNum)
+                    it = m_mergeRuns.erase(it);
+                else
+                    ++it;
+            }
+        }
         if (m_frameNum % 300u == 0u)
             evictStale();
     }
@@ -6413,10 +6467,7 @@ private:
             if (needsAlphaTestPass2(q, aref))
             {
                 QueuedDraw pass2 = q;
-                const bool fastFog = ((q.psoKey & 31u) == 7u || (q.psoKey & 31u) == 10u);
-                const uint32_t p2Prog = m_fastShadersEnabled ? (q.skinned ? (fastFog ? 11u : 4u) : (fastFog ? 8u : 12u))
-                                                             : (q.skinned ? 4u : 1u);
-                pass2.psoKey = makePsoKey(p2Prog, q.state.blend, true, false, 1u);
+                pass2.psoKey = makeAlphaTestPass2Pso(q, false);
                 emitDrawSingle(pass2, pkt, true, 0.02f, aref);
             }
             else if (((q.state.alphaTest >> 12) & 3u) == 1u || ((q.state.alphaTest >> 12) & 3u) == 3u)
@@ -6476,14 +6527,9 @@ private:
         for (auto it = m_meshes.begin(); it != m_meshes.end();)
         {
             if (it->second.dynamic && it->second.lastUsed + 30u < m_frameNum)
-            {
                 it = m_meshes.erase(it);
-                m_evictions.fetch_add(1u, std::memory_order_relaxed);
-            }
             else
-            {
                 ++it;
-            }
         }
         if (m_mergeSrcBytes > (kMaxMergeSrcBytes * 7ull) / 8ull)
             evictOldMergeSrc(m_frameNum, 1200u, kMaxMergeSrcBytes / 4ull);
@@ -6542,7 +6588,7 @@ private:
             else
             {
                 totalRawBytes += t.rawData.size();
-                if (t.lastUsed + 1800u < m_frameNum)
+                if (!t.astc && t.lastUsed + 1800u < m_frameNum)
                     rawCands.push_back({t.lastUsed, id});
             }
         }
@@ -6666,7 +6712,6 @@ private:
                         else
                             m_gpuTexBytes = 0;
                         m_textures.erase(it);
-                        m_evictions.fetch_add(1u, std::memory_order_relaxed);
                     }
                 }
             }
@@ -6728,11 +6773,11 @@ private:
     uint64_t m_uploadBudgetUs = 1500;
     uint64_t m_uploadUsThisFrame = 0;
     uint64_t m_mergeBudgetUs = 2500;
-    uint32_t m_mergeChunkMax = 64u;
+    uint32_t m_mergeChunkMax = 24u;
     uint32_t m_maxArrayLayers = 64u;
     uint64_t m_cacheBudgetBytes = 160ull * 1024ull * 1024ull;
     uint64_t m_texArrayBudgetBytes = 100ull * 1024ull * 1024ull;
-    uint32_t m_bgRate = 16;
+    uint32_t m_bgRate = 4;
     uint64_t m_bgLastHash = 0;
     bool m_bgValid = false;
     int m_targetFps = 30;
@@ -6835,6 +6880,9 @@ private:
 
     GLuint m_arenaVao[3] = {};
     GLuint m_arenaVbo[3] = {};
+    size_t m_arenaVboBytes[3] = {};
+    GLuint m_copyReadFbo = 0;
+    uint32_t m_nextMeshRevision = 1u;
     GLuint m_streamMergeVao[3] = {};
     GLuint m_streamMergeVbo[3] = {};
     GLuint m_streamMergeIbo[3] = {};
